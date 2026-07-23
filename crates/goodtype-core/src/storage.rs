@@ -12,7 +12,10 @@ use std::{
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tempfile::NamedTempFile;
 
-use crate::{InkLayer, NotebookManifest, Page, PageBackground, PageObject, SCHEMA_VERSION};
+use crate::{
+    InkLayer, InkLayerReference, NotebookManifest, Page, PageBackground, PageObject, PageReference,
+    SCHEMA_VERSION,
+};
 
 pub const MAX_IMAGE_BYTES: usize = 20 * 1024 * 1024;
 const MAX_JSON_BYTES: usize = 8 * 1024 * 1024;
@@ -51,6 +54,7 @@ struct RecoveryIntent {
 pub struct NotebookHistory {
     undo: Vec<NotebookSnapshot>,
     redo: Vec<NotebookSnapshot>,
+    current_page_id: Option<String>,
     current_revision: Option<u64>,
     current_fingerprint: Option<u64>,
 }
@@ -132,18 +136,42 @@ pub fn open_notebook(selected_root: &Path) -> Result<NotebookSnapshot, StorageEr
     recover_interrupted_transaction(&root)?;
     let manifest: NotebookManifest = read_json(&root, "goodtype.json")?;
     validate_manifest(&manifest)?;
+    validate_manifest_files(&root, &manifest)?;
+    let page_id = manifest
+        .pages
+        .first()
+        .expect("validated non-empty page list")
+        .id
+        .clone();
+    load_page(&root, manifest, &page_id)
+}
 
-    let page: Page = read_json(&root, &manifest.pages[0].path)?;
+pub fn open_page(selected_root: &Path, page_id: &str) -> Result<NotebookSnapshot, StorageError> {
+    let root = canonical_root(selected_root)?;
+    recover_interrupted_transaction(&root)?;
+    let manifest: NotebookManifest = read_json(&root, "goodtype.json")?;
+    validate_manifest(&manifest)?;
+    validate_manifest_files(&root, &manifest)?;
+    load_page(&root, manifest, page_id)
+}
+
+fn load_page(
+    root: &Path,
+    manifest: NotebookManifest,
+    page_id: &str,
+) -> Result<NotebookSnapshot, StorageError> {
+    let reference = page_reference(&manifest, page_id)?;
+    let page: Page = read_json(root, &reference.path)?;
     let ink_layers = page
         .ink_layers
         .iter()
-        .map(|reference| read_json(&root, &reference.path))
+        .map(|reference| read_json(root, &reference.path))
         .collect::<Result<Vec<_>, _>>()?;
 
     let block_paths = referenced_block_paths(&manifest, &page);
     let asset_paths = referenced_asset_paths(&page);
-    let blocks = read_stored_files(&root, &block_paths, MAX_BLOCK_BYTES)?;
-    let assets = read_stored_files(&root, &asset_paths, MAX_IMAGE_BYTES)?;
+    let blocks = read_stored_files(root, &block_paths, MAX_BLOCK_BYTES)?;
+    let assets = read_stored_files(root, &asset_paths, MAX_IMAGE_BYTES)?;
     let snapshot = NotebookSnapshot {
         manifest,
         page,
@@ -151,7 +179,7 @@ pub fn open_notebook(selected_root: &Path) -> Result<NotebookSnapshot, StorageEr
         assets,
         ink_layers,
     };
-    validate_snapshot(&root, &snapshot)?;
+    validate_snapshot(root, &snapshot)?;
     Ok(snapshot)
 }
 
@@ -159,18 +187,107 @@ pub fn observe_notebook(
     selected_root: &Path,
     history: &mut NotebookHistory,
 ) -> Result<NotebookSnapshot, StorageError> {
+    let snapshot = open_notebook(selected_root)?;
+    observe_snapshot(selected_root, history, snapshot)
+}
+
+pub fn observe_page(
+    selected_root: &Path,
+    page_id: &str,
+    history: &mut NotebookHistory,
+) -> Result<NotebookSnapshot, StorageError> {
+    let snapshot = open_page(selected_root, page_id)?;
+    observe_snapshot(selected_root, history, snapshot)
+}
+
+fn observe_snapshot(
+    selected_root: &Path,
+    history: &mut NotebookHistory,
+    snapshot: NotebookSnapshot,
+) -> Result<NotebookSnapshot, StorageError> {
     let root = canonical_root(selected_root)?;
-    let snapshot = open_notebook(&root)?;
     let fingerprint = canonical_fingerprint(&root, &snapshot)?;
-    if history.current_revision != Some(snapshot.page.revision)
+    if history.current_page_id.as_deref() != Some(snapshot.page.id.as_str())
+        || history.current_revision != Some(snapshot.page.revision)
         || history.current_fingerprint != Some(fingerprint)
     {
         history.undo.clear();
         history.redo.clear();
     }
+    history.current_page_id = Some(snapshot.page.id.clone());
     history.current_revision = Some(snapshot.page.revision);
     history.current_fingerprint = Some(fingerprint);
     Ok(snapshot)
+}
+
+pub fn create_page(
+    selected_root: &Path,
+    modified_at: &str,
+) -> Result<NotebookSnapshot, StorageError> {
+    if modified_at.is_empty() || modified_at.len() > 64 {
+        return invalid("page timestamp must be present and bounded");
+    }
+    let root = canonical_root(selected_root)?;
+    recover_interrupted_transaction(&root)?;
+    let manifest_bytes = read_limited(resolve_existing(&root, "goodtype.json")?, MAX_JSON_BYTES)?;
+    let mut manifest: NotebookManifest = serde_json::from_slice(&manifest_bytes)?;
+    validate_manifest(&manifest)?;
+    validate_manifest_files(&root, &manifest)?;
+
+    let mut number = manifest.pages.len() + 1;
+    let (id, page_path, ink_id, ink_path) = loop {
+        let id = format!("page-{number:03}");
+        let page_path = format!("pages/{id}.json");
+        let ink_id = format!("{id}-ink-001");
+        let ink_path = format!("ink/{id}-layer-001.json");
+        if !manifest
+            .pages
+            .iter()
+            .any(|page| page.id == id || page.path == page_path)
+            && !root.join(&page_path).exists()
+            && !root.join(&ink_path).exists()
+        {
+            break (id, page_path, ink_id, ink_path);
+        }
+        number += 1;
+    };
+
+    manifest.pages.push(PageReference {
+        id: id.clone(),
+        path: page_path,
+    });
+    manifest.modified_at = modified_at.to_owned();
+    let page = Page {
+        schema_version: SCHEMA_VERSION,
+        id: id.clone(),
+        revision: 1,
+        geometry: manifest.default_page.geometry.clone(),
+        background: manifest.default_page.background.clone(),
+        objects: Vec::new(),
+        reading_order: Vec::new(),
+        ink_layers: vec![InkLayerReference {
+            id: ink_id.clone(),
+            path: ink_path,
+        }],
+    };
+    let snapshot = NotebookSnapshot {
+        manifest,
+        page,
+        blocks: Vec::new(),
+        assets: Vec::new(),
+        ink_layers: vec![InkLayer {
+            schema_version: SCHEMA_VERSION,
+            id: ink_id,
+            page_id: id,
+            strokes: Vec::new(),
+        }],
+    };
+    validate_snapshot(&root, &snapshot)?;
+    if read_limited(resolve_existing(&root, "goodtype.json")?, MAX_JSON_BYTES)? != manifest_bytes {
+        return invalid("external change detected; reopen the notebook before adding a page");
+    }
+    save_to_root(&root, &snapshot)?;
+    open_page(&root, &snapshot.page.id)
 }
 
 pub fn commit_notebook(
@@ -179,13 +296,14 @@ pub fn commit_notebook(
     mut snapshot: NotebookSnapshot,
 ) -> Result<HistoryResult, StorageError> {
     let root = canonical_root(selected_root)?;
-    let current = open_notebook(selected_root)?;
+    let current = open_page(selected_root, &snapshot.page.id)?;
     ensure_current(&root, history, &current, snapshot.page.revision)?;
     snapshot.page.revision = current.page.revision + 1;
     save_transactional(&root, &current, &snapshot)?;
-    let saved = open_notebook(&root)?;
+    let saved = open_page(&root, &snapshot.page.id)?;
     push_history(&mut history.undo, history_snapshot(current));
     history.redo.clear();
+    history.current_page_id = Some(saved.page.id.clone());
     history.current_revision = Some(saved.page.revision);
     history.current_fingerprint = Some(canonical_fingerprint(&root, &saved)?);
     Ok(history_result(saved, history))
@@ -211,7 +329,11 @@ fn restore_notebook(
     undo: bool,
 ) -> Result<HistoryResult, StorageError> {
     let root = canonical_root(selected_root)?;
-    let current = open_notebook(&root)?;
+    let page_id = history
+        .current_page_id
+        .clone()
+        .ok_or_else(|| invalid_error("page must be observed before undo or redo"))?;
+    let current = open_page(&root, &page_id)?;
     ensure_current(
         &root,
         history,
@@ -225,7 +347,7 @@ fn restore_notebook(
         .ok_or_else(|| StorageError::InvalidNotebook("nothing to undo or redo".into()))?;
     target.page.revision = current.page.revision + 1;
     save_transactional(&root, &current, &target)?;
-    let restored = open_notebook(&root)?;
+    let restored = open_page(&root, &page_id)?;
 
     if undo {
         history.undo.pop();
@@ -234,6 +356,7 @@ fn restore_notebook(
         history.redo.pop();
         push_history(&mut history.undo, history_snapshot(current));
     }
+    history.current_page_id = Some(restored.page.id.clone());
     history.current_revision = Some(restored.page.revision);
     history.current_fingerprint = Some(canonical_fingerprint(&root, &restored)?);
     Ok(history_result(restored, history))
@@ -245,7 +368,8 @@ fn ensure_current(
     current: &NotebookSnapshot,
     expected: u64,
 ) -> Result<(), StorageError> {
-    if current.page.revision == expected
+    if history.current_page_id.as_deref() == Some(current.page.id.as_str())
+        && current.page.revision == expected
         && history
             .current_revision
             .is_none_or(|revision| revision == current.page.revision)
@@ -276,9 +400,10 @@ fn ensure_current(
 }
 
 fn canonical_fingerprint(root: &Path, snapshot: &NotebookSnapshot) -> Result<u64, StorageError> {
+    let reference = page_reference(&snapshot.manifest, &snapshot.page.id)?;
     let mut files = vec![
         ("goodtype.json", MAX_JSON_BYTES),
-        (snapshot.manifest.pages[0].path.as_str(), MAX_JSON_BYTES),
+        (reference.path.as_str(), MAX_JSON_BYTES),
     ];
     files.extend(
         referenced_block_paths(&snapshot.manifest, &snapshot.page)
@@ -373,7 +498,9 @@ fn recover_interrupted_transaction(root: &Path) -> Result<(), StorageError> {
         return invalid("recovery revisions are not consecutive");
     }
 
-    let current_revision = read_json::<Page>(root, &intent.candidate.manifest.pages[0].path)
+    let candidate_reference =
+        page_reference(&intent.candidate.manifest, &intent.candidate.page.id)?;
+    let current_revision = read_json::<Page>(root, &candidate_reference.path)
         .map(|page| page.revision)
         .ok();
     if current_revision == Some(intent.candidate.page.revision) {
@@ -452,6 +579,9 @@ pub fn store_pasted_image(
 
 fn save_to_root(root: &Path, snapshot: &NotebookSnapshot) -> Result<(), StorageError> {
     validate_snapshot(root, snapshot)?;
+    let page_path = page_reference(&snapshot.manifest, &snapshot.page.id)?
+        .path
+        .clone();
 
     for file in &snapshot.blocks {
         write_atomic(root, &file.path, &file.bytes)?;
@@ -467,7 +597,7 @@ fn save_to_root(root: &Path, snapshot: &NotebookSnapshot) -> Result<(), StorageE
             .expect("validated ink reference");
         write_json(root, &reference.path, layer)?;
     }
-    write_json(root, &snapshot.manifest.pages[0].path, &snapshot.page)?;
+    write_json(root, &page_path, &snapshot.page)?;
     write_json(root, "goodtype.json", &snapshot.manifest)
 }
 
@@ -478,14 +608,20 @@ fn validate_manifest(manifest: &NotebookManifest) -> Result<(), StorageError> {
             manifest.schema_version
         )));
     }
-    if manifest.pages.len() != 1 {
-        return Err(StorageError::InvalidNotebook(
-            "Phase 0 supports exactly one page".into(),
-        ));
+    if manifest.pages.is_empty() {
+        return invalid("notebook must contain at least one page");
     }
-    validate_relative(&manifest.pages[0].path)?;
-    if !is_in_directory(&manifest.pages[0].path, "pages") {
-        return Err(StorageError::InvalidPath(manifest.pages[0].path.clone()));
+    let mut ids = HashSet::new();
+    let mut paths = HashSet::new();
+    for page in &manifest.pages {
+        if page.id.is_empty() || !ids.insert(page.id.as_str()) || !paths.insert(page.path.as_str())
+        {
+            return invalid("manifest page IDs and paths must be non-empty and unique");
+        }
+        validate_relative(&page.path)?;
+        if !is_in_directory(&page.path, "pages") {
+            return Err(StorageError::InvalidPath(page.path.clone()));
+        }
     }
     if let Some(style) = &manifest.shared_style_path {
         validate_relative(style)?;
@@ -493,20 +629,34 @@ fn validate_manifest(manifest: &NotebookManifest) -> Result<(), StorageError> {
     Ok(())
 }
 
+fn validate_manifest_files(root: &Path, manifest: &NotebookManifest) -> Result<(), StorageError> {
+    for page in &manifest.pages {
+        resolve_existing(root, &page.path)?;
+    }
+    Ok(())
+}
+
+fn page_reference<'a>(
+    manifest: &'a NotebookManifest,
+    page_id: &str,
+) -> Result<&'a PageReference, StorageError> {
+    manifest
+        .pages
+        .iter()
+        .find(|page| page.id == page_id)
+        .ok_or_else(|| invalid_error("page is not referenced by the notebook manifest"))
+}
+
 fn validate_snapshot(root: &Path, snapshot: &NotebookSnapshot) -> Result<(), StorageError> {
     validate_manifest(&snapshot.manifest)?;
     prepare_target(root, "goodtype.json")?;
-    prepare_target(root, &snapshot.manifest.pages[0].path)?;
+    let page_reference = page_reference(&snapshot.manifest, &snapshot.page.id)?;
+    prepare_target(root, &page_reference.path)?;
     if snapshot.page.schema_version != SCHEMA_VERSION {
         return Err(StorageError::InvalidNotebook(format!(
             "unsupported page schema version {}",
             snapshot.page.schema_version
         )));
-    }
-    if snapshot.manifest.pages[0].id != snapshot.page.id {
-        return Err(StorageError::InvalidNotebook(
-            "manifest and page IDs differ".into(),
-        ));
     }
     validate_page_content(snapshot)?;
 
@@ -1222,6 +1372,41 @@ mod tests {
             panic!("image object missing");
         };
         assert_eq!((fields.x, fields.scale), (144.0, 1.5));
+    }
+
+    #[test]
+    fn creates_and_commits_pages_independently() {
+        let temporary = tempfile::tempdir().unwrap();
+        let notebook_root = temporary.path().join("notebook");
+        create_notebook(&notebook_root, &snapshot()).unwrap();
+
+        let second = create_page(&notebook_root, "2026-07-23T18:00:00Z").unwrap();
+        assert_eq!(second.manifest.pages.len(), 2);
+        assert_eq!(second.page.id, "page-002");
+        assert!(second.page.objects.is_empty());
+
+        let mut history = NotebookHistory::default();
+        let mut changed = observe_page(&notebook_root, "page-002", &mut history).unwrap();
+        let mut stroke = snapshot().ink_layers[0].strokes[0].clone();
+        stroke.id = "page-002-stroke-001".into();
+        changed.ink_layers[0].strokes.push(stroke);
+        commit_notebook(&notebook_root, &mut history, changed).unwrap();
+
+        let first = open_page(&notebook_root, "page-001").unwrap();
+        let second = open_page(&notebook_root, "page-002").unwrap();
+        assert_eq!(first.page.revision, 1);
+        assert_eq!(first.ink_layers[0].strokes.len(), 1);
+        assert_eq!(second.page.revision, 2);
+        assert_eq!(second.ink_layers[0].strokes.len(), 1);
+        assert_eq!(
+            second
+                .manifest
+                .pages
+                .iter()
+                .map(|page| page.id.as_str())
+                .collect::<Vec<_>>(),
+            ["page-001", "page-002"]
+        );
     }
 
     #[test]

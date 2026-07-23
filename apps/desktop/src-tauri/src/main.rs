@@ -13,6 +13,8 @@ fn main() {
             workspace::write_phase0_metrics,
             notebook::create_notebook,
             notebook::open_notebook,
+            notebook::open_page,
+            notebook::create_page,
             notebook::commit_notebook,
             notebook::undo_notebook,
             notebook::redo_notebook,

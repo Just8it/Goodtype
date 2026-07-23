@@ -1,6 +1,6 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
-  import { onDestroy, onMount } from "svelte";
+  import { onDestroy, onMount, tick } from "svelte";
   import { clampZoom, type Point } from "../geometry/coordinates";
   import type {
     InkLayer,
@@ -22,6 +22,7 @@
   import ImageObject from "./ImageObject.svelte";
   import InkSurface from "./InkSurface.svelte";
   import { nearestPaletteDock, type PaletteDock } from "./palette";
+  import ReadOnlyPage from "./ReadOnlyPage.svelte";
   import TypstBlock from "./TypstBlock.svelte";
 
   type StoredFile = { path: string; bytes: number[] };
@@ -36,6 +37,11 @@
     snapshot: NotebookSnapshot;
     canUndo: boolean;
     canRedo: boolean;
+  };
+  type PageEntry = {
+    id: string;
+    path: string;
+    snapshot: NotebookSnapshot | null;
   };
   type TypstTransform = {
     x: number;
@@ -85,8 +91,14 @@
     typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
   let root = $state("");
+  let notebookManifest = $state<NotebookManifest | null>(null);
+  let activePageId = $state("page-001");
+  let activeInkLayerId = $state(INK_LAYER_ID);
+  let activeInkLayerPath = $state("ink/page-001-layer-001.json");
+  let pageEntries = $state<PageEntry[]>([]);
   let pageOpen = $state(false);
   let busy = $state(true);
+  let activatingPageId = $state<string | null>(null);
   let status = $state("Opening the notebook…");
   let revision = $state(1);
   let zoom = $state(1);
@@ -156,6 +168,7 @@
     busy = true;
     if (!tauriAvailable) {
       root = "Browser preview (persistence and real Typst compilation require Tauri)";
+      applySnapshot(buildSnapshot());
       pageOpen = true;
       busy = false;
       status = "Browser preview ready";
@@ -204,7 +217,7 @@
         {
           ...fields(INK_GROUP_ID, 1, GROUP_ID, now),
           type: "ink_group",
-          inkLayerId: INK_LAYER_ID,
+          inkLayerId: activeInkLayerId,
           strokeIds: groupedStrokeIds,
         },
         {
@@ -230,7 +243,7 @@
 
     const page: Page = {
       schemaVersion: 1,
-      id: "page-001",
+      id: activePageId,
       revision,
       geometry: { widthPt: PAGE_WIDTH_PT, heightPt: PAGE_HEIGHT_PT },
       background: { kind: "plain", color: "#ffffff" },
@@ -238,22 +251,23 @@
       readingOrder: grouped
         ? [GROUP_ID, ...extraTypstIds, ...(image ? ["image-001"] : [])]
         : [...typstBlocks.map((block) => block.id), ...(image ? ["image-001"] : [])],
-      inkLayers: [{ id: INK_LAYER_ID, path: "ink/page-001-layer-001.json" }],
+      inkLayers: [{ id: activeInkLayerId, path: activeInkLayerPath }],
+    };
+    const manifest = notebookManifest ?? {
+      schemaVersion: 1,
+      id: "phase0b-notebook",
+      title: "Goodtype",
+      pages: [{ id: page.id, path: "pages/page-001.json" }],
+      defaultPage: {
+        geometry: page.geometry,
+        background: page.background,
+      },
+      sharedStylePath: null,
+      createdAt,
+      modifiedAt: now,
     };
     return {
-      manifest: {
-        schemaVersion: 1,
-        id: "phase0b-notebook",
-        title: "Goodtype",
-        pages: [{ id: page.id, path: "pages/page-001.json" }],
-        defaultPage: {
-          geometry: page.geometry,
-          background: page.background,
-        },
-        sharedStylePath: null,
-        createdAt,
-        modifiedAt: now,
-      },
+      manifest: { ...manifest, modifiedAt: now },
       page,
       blocks: typstBlocks.map((block) => ({
         path: block.path,
@@ -263,7 +277,7 @@
       inkLayers: [
         {
           schemaVersion: 1,
-          id: INK_LAYER_ID,
+          id: activeInkLayerId,
           pageId: page.id,
           strokes,
         },
@@ -295,6 +309,18 @@
     typstCommitTimer = undefined;
     typstDirty = false;
     revokeImageUrl();
+    notebookManifest = snapshot.manifest;
+    activePageId = snapshot.page.id;
+    const activeInk = snapshot.page.inkLayers[0];
+    activeInkLayerId = activeInk?.id ?? `${activePageId}-ink-001`;
+    activeInkLayerPath = activeInk?.path ?? `ink/${activePageId}-layer-001.json`;
+    pageEntries = snapshot.manifest.pages.map((page) => ({
+      ...page,
+      snapshot:
+        page.id === snapshot.page.id
+          ? snapshot
+          : pageEntries.find((entry) => entry.id === page.id)?.snapshot ?? null,
+    }));
     revision = snapshot.page.revision;
     createdAt = snapshot.manifest.createdAt;
     strokes = snapshot.inkLayers[0]?.strokes ?? [];
@@ -356,6 +382,80 @@
     }
     selectedImage = false;
     selectedTypstId = null;
+  }
+
+  async function ensurePageLoaded(pageId: string, refresh = false) {
+    const entry = pageEntries.find((page) => page.id === pageId);
+    if (!entry || (entry.snapshot && !refresh)) return entry?.snapshot ?? null;
+    try {
+      const snapshot = await invoke<NotebookSnapshot>("open_page", { root, pageId });
+      entry.snapshot = snapshot;
+      return snapshot;
+    } catch (error) {
+      status = `Could not load page: ${message(error)}`;
+      return null;
+    }
+  }
+
+  function observePage(node: HTMLElement, pageId: string) {
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) void ensurePageLoaded(pageId);
+      },
+      { root: pageViewport, rootMargin: "100% 0px" },
+    );
+    observer.observe(node);
+    return { destroy: () => observer.disconnect() };
+  }
+
+  async function activatePage(pageId: string) {
+    if (
+      pageId === activePageId ||
+      activatingPageId !== null ||
+      busy ||
+      pendingTransactions > 0
+    ) return;
+    activatingPageId = pageId;
+    try {
+      if (!(await persist())) return;
+      const snapshot = await ensurePageLoaded(pageId, true);
+      if (!snapshot) return;
+      applySnapshot(snapshot);
+      canUndo = false;
+      canRedo = false;
+      status = `Page ${activePageNumber()} ready`;
+    } finally {
+      activatingPageId = null;
+    }
+  }
+
+  async function addPage() {
+    moreOpen = false;
+    if (!(await persist())) return;
+    busy = true;
+    try {
+      const snapshot = await invoke<NotebookSnapshot>("create_page", {
+        root,
+        modifiedAt: new Date().toISOString(),
+      });
+      applySnapshot(snapshot);
+      canUndo = false;
+      canRedo = false;
+      await tick();
+      document
+        .querySelector<HTMLElement>(`[data-page-id="${snapshot.page.id}"]`)
+        ?.scrollIntoView({ behavior: "smooth", block: "center" });
+      status = `Added page ${activePageNumber()}`;
+    } catch (error) {
+      status = `Could not add page: ${message(error)}`;
+    } finally {
+      busy = false;
+    }
+  }
+
+  function activePageNumber() {
+    const index = notebookManifest?.pages.findIndex((page) => page.id === activePageId) ?? 0;
+    return Math.max(0, index) + 1;
   }
 
   async function compileTypst(id: string, request: {
@@ -469,7 +569,7 @@
       ...typstBlocks,
       {
         id,
-        path: `blocks/${id}.typ`,
+        path: `blocks/${activePageId}-${id}.typ`,
         source: "= New block\n\nType here",
         transform: {
           x: 150 + (typstBlocks.length % 4) * 20,
@@ -748,7 +848,10 @@
     transactionQueue = transactionQueue
       .then(async () => {
         try {
-          const result = await invoke<HistoryResult>(command, { root });
+          const result = await invoke<HistoryResult>(command, {
+            root,
+            pageId: activePageId,
+          });
           applySnapshot(result.snapshot);
           canUndo = result.canUndo;
           canRedo = result.canRedo;
@@ -1073,6 +1176,7 @@
     <aside class="overflow-menu" aria-label="Notebook actions">
       <div class="menu-path" title={root}><span>Local notebook</span><strong>{root || "Opening..."}</strong></div>
       <button type="button" onclick={() => void persist()}>Confirm saved</button>
+      {#if pageOpen}<button type="button" onclick={addPage}>Add page below</button>{/if}
       <button type="button" onclick={() => { metricsOpen = true; moreOpen = false; }}>Timing evidence</button>
       <div class="menu-divider"></div>
       {#if pageOpen}
@@ -1094,68 +1198,94 @@
       onpointercancelcapture={workspacePointerEnd}
     >
       <div class="page-scroll-content" bind:this={pageViewport}>
-        <div class="page-frame" bind:this={pageFrame} style:width={`${PAGE_WIDTH_PT * zoom}px`} style:height={`${PAGE_HEIGHT_PT * zoom}px`}>
-          <div class="page" style:width={`${PAGE_WIDTH_PT}px`} style:height={`${PAGE_HEIGHT_PT}px`} style:transform={`scale(${zoom})`}>
-            <div class="objects">
-              {#each typstBlocks as block (block.id)}
-                <TypstBlock
-                  id={block.id}
-                  source={block.source}
-                  initialX={block.transform.x}
-                  initialY={block.transform.y}
-                  initialLayoutWidthPt={block.transform.layoutWidthPt}
-                  initialScale={block.transform.scale}
-                  compileResult={block.result}
-                  selected={selectedTypstId === block.id}
-                  toPageDelta={(x, y) => ({ x: x / zoom, y: y / zoom })}
-                  onSelect={() => {
-                    selectedTypstId = block.id;
-                    selectedImage = false;
-                  }}
-                  onDeselect={() => (selectedTypstId = null)}
-                  onCompile={(request) => compileTypst(block.id, request)}
-                  onSourceChange={(source) => updateTypstSource(block.id, source)}
-                  onTransform={(transform) => updateTypstTransform(block.id, transform)}
-                />
-              {/each}
-              {#if image}
-                <ImageObject
-                  src={image.url}
-                  alt={image.alt}
-                  x={image.x}
-                  y={image.y}
-                  widthPt={image.widthPt}
-                  heightPt={image.heightPt}
-                  scale={image.scale}
-                  selected={selectedImage}
-                  toPageDelta={(x, y) => ({ x: x / zoom, y: y / zoom })}
-                  onSelect={() => {
-                    selectedImage = true;
-                    selectedTypstId = null;
-                  }}
-                  onMove={(position) => changeImage(position)}
-                  onScale={(scale) => changeImage({ scale })}
-                />
-              {/if}
-            </div>
-            <div class:object-input={directObjectInput} class="ink-layer">
-              <InkSurface
-                {strokes}
-                {selectedStrokeIds}
-                pageWidthPt={PAGE_WIDTH_PT}
-                pageHeightPt={PAGE_HEIGHT_PT}
-                {zoom}
-                color={inkColor()}
-                widthPt={inkWidthPt()}
-                {tool}
-                onStrokeFinalized={addStroke}
-                onStrokesChange={(next) => changeStrokes(next, "Updated ink")}
-                onSelectionChange={updateInkSelection}
-                onStrokeMetrics={recordStrokeMetrics}
-              />
-            </div>
-          </div>
-        </div>
+        {#each pageEntries as entry, index (entry.id)}
+          <article
+            class:active-page={entry.id === activePageId}
+            class="page-stack-item"
+            data-page-id={entry.id}
+            aria-label={`Page ${index + 1}`}
+            aria-current={entry.id === activePageId ? "page" : undefined}
+            use:observePage={entry.id}
+            onpointerenter={() => void activatePage(entry.id)}
+            onfocusin={() => void activatePage(entry.id)}
+          >
+            <span class="page-number">Page {index + 1}</span>
+            {#if entry.id === activePageId}
+              <div class="page-frame" bind:this={pageFrame} style:width={`${PAGE_WIDTH_PT * zoom}px`} style:height={`${PAGE_HEIGHT_PT * zoom}px`}>
+                <div class="page" style:width={`${PAGE_WIDTH_PT}px`} style:height={`${PAGE_HEIGHT_PT}px`} style:transform={`scale(${zoom})`}>
+                  <div class="objects">
+                    {#each typstBlocks as block (block.id)}
+                      <TypstBlock
+                        id={block.id}
+                        source={block.source}
+                        initialX={block.transform.x}
+                        initialY={block.transform.y}
+                        initialLayoutWidthPt={block.transform.layoutWidthPt}
+                        initialScale={block.transform.scale}
+                        compileResult={block.result}
+                        selected={selectedTypstId === block.id}
+                        toPageDelta={(x, y) => ({ x: x / zoom, y: y / zoom })}
+                        onSelect={() => {
+                          selectedTypstId = block.id;
+                          selectedImage = false;
+                        }}
+                        onDeselect={() => (selectedTypstId = null)}
+                        onCompile={(request) => compileTypst(block.id, request)}
+                        onSourceChange={(source) => updateTypstSource(block.id, source)}
+                        onTransform={(transform) => updateTypstTransform(block.id, transform)}
+                      />
+                    {/each}
+                    {#if image}
+                      <ImageObject
+                        src={image.url}
+                        alt={image.alt}
+                        x={image.x}
+                        y={image.y}
+                        widthPt={image.widthPt}
+                        heightPt={image.heightPt}
+                        scale={image.scale}
+                        selected={selectedImage}
+                        toPageDelta={(x, y) => ({ x: x / zoom, y: y / zoom })}
+                        onSelect={() => {
+                          selectedImage = true;
+                          selectedTypstId = null;
+                        }}
+                        onMove={(position) => changeImage(position)}
+                        onScale={(scale) => changeImage({ scale })}
+                      />
+                    {/if}
+                  </div>
+                  <div class:object-input={directObjectInput} class="ink-layer">
+                    <InkSurface
+                      {strokes}
+                      {selectedStrokeIds}
+                      pageWidthPt={PAGE_WIDTH_PT}
+                      pageHeightPt={PAGE_HEIGHT_PT}
+                      {zoom}
+                      color={inkColor()}
+                      widthPt={inkWidthPt()}
+                      {tool}
+                      onStrokeFinalized={addStroke}
+                      onStrokesChange={(next) => changeStrokes(next, "Updated ink")}
+                      onSelectionChange={updateInkSelection}
+                      onStrokeMetrics={recordStrokeMetrics}
+                    />
+                  </div>
+                </div>
+              </div>
+            {:else}
+              <div class="page-frame" style:width={`${PAGE_WIDTH_PT * zoom}px`} style:height={`${PAGE_HEIGHT_PT * zoom}px`}>
+                <div class="page read-only-page" style:width={`${PAGE_WIDTH_PT}px`} style:height={`${PAGE_HEIGHT_PT}px`} style:transform={`scale(${zoom})`}>
+                  {#if entry.snapshot}
+                    <ReadOnlyPage snapshot={entry.snapshot} {root} {zoom} />
+                  {:else}
+                    <span class="page-loading">Loading page…</span>
+                  {/if}
+                </div>
+              </div>
+            {/if}
+          </article>
+        {/each}
       </div>
 
       <div class="history-pill" aria-label="Page history">
@@ -1247,7 +1377,7 @@
       {/if}
     {/if}
     <div class:failure={transactionFailed} class="operation-status" title={status}>{status}</div>
-    <span class="page-count">Page 1 of 1</span><span class="footer-divider"></span>
+    <span class="page-count">Page {activePageNumber()} of {notebookManifest?.pages.length ?? 1}</span><span class="footer-divider"></span>
     <button type="button" onclick={() => changeZoom(1)}>{Math.round(zoom * 100)}%</button>
     <span class="footer-divider"></span><span class:failure={transactionFailed} class="local-state">{transactionFailed ? "Needs attention" : "Local · saved"}</span>
   </footer>
@@ -1398,15 +1528,27 @@
   }
 
   .page-scroll-content {
-    display: grid;
+    display: flex;
     width: 100%;
     height: 100%;
     overflow: auto;
     padding: 46px 108px 58px;
     scrollbar-width: none;
-    place-items: center;
+    align-items: center;
+    flex-direction: column;
+    gap: 46px;
   }
   .page-scroll-content::-webkit-scrollbar { display: none; }
+  .page-stack-item { position: relative; flex: none; }
+  .page-stack-item.active-page .page-number { color: var(--blueprint-light); }
+  .page-number {
+    position: absolute;
+    top: 0;
+    right: calc(100% + 12px);
+    color: var(--quiet);
+    font: 10px "Cascadia Mono", Consolas, monospace;
+    white-space: nowrap;
+  }
   .page-frame { position: relative; flex: none; }
   .page {
     position: relative;
@@ -1415,6 +1557,8 @@
     box-shadow: 0 2px 6px rgb(0 0 0 / 30%), 0 24px 60px rgb(0 0 0 / 45%);
     transform-origin: top left;
   }
+  .read-only-page { pointer-events: none; }
+  .page-loading { display: grid; height: 100%; color: #8d949d; font-size: 12px; place-items: center; }
 
   .objects, .ink-layer { position: absolute; inset: 0; }
   .objects { z-index: 1; pointer-events: none; }
