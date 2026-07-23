@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "id": "notebook-001",
+  "title": "Minimal Goodtype notebook",
+  "pages": [
+    { "id": "page-001", "path": "pages/page-001.json" }
+  ],
+  "defaultPage": {
+    "geometry": { "widthPt": 595.0, "heightPt": 842.0 },
+    "background": { "kind": "plain", "color": "#ffffff" }
+  },
+  "sharedStylePath": "style.typ",
+  "createdAt": "2026-07-22T00:00:00Z",
+  "modifiedAt": "2026-07-22T00:00:00Z"
+}

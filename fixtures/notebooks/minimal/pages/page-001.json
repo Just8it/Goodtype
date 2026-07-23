@@ -1,0 +1,93 @@
+{
+  "schemaVersion": 1,
+  "id": "page-001",
+  "revision": 1,
+  "geometry": { "widthPt": 595.0, "heightPt": 842.0 },
+  "background": { "kind": "plain", "color": "#ffffff" },
+  "objects": [
+    {
+      "type": "typst",
+      "id": "typst-001",
+      "x": 72.0,
+      "y": 96.0,
+      "rotation": 0.0,
+      "scale": 1.0,
+      "zIndex": 1,
+      "readingOrder": 0,
+      "groupId": "group-001",
+      "createdAt": "2026-07-22T00:00:00Z",
+      "modifiedAt": "2026-07-22T00:00:00Z",
+      "sourcePath": "blocks/equation.typ",
+      "layoutWidthPt": 220.0,
+      "measuredWidthPt": 180.0,
+      "measuredHeightPt": 32.0
+    },
+    {
+      "type": "ink_group",
+      "id": "ink-group-001",
+      "x": 0.0,
+      "y": 0.0,
+      "rotation": 0.0,
+      "scale": 1.0,
+      "zIndex": 2,
+      "readingOrder": 1,
+      "groupId": "group-001",
+      "createdAt": "2026-07-22T00:00:00Z",
+      "modifiedAt": "2026-07-22T00:00:00Z",
+      "inkLayerId": "ink-layer-001",
+      "strokeIds": ["stroke-001"]
+    },
+    {
+      "type": "group",
+      "id": "group-001",
+      "x": 0.0,
+      "y": 0.0,
+      "rotation": 0.0,
+      "scale": 1.0,
+      "zIndex": 3,
+      "readingOrder": 0,
+      "groupId": null,
+      "createdAt": "2026-07-22T00:00:00Z",
+      "modifiedAt": "2026-07-22T00:00:00Z",
+      "childIds": ["typst-001", "ink-group-001"]
+    },
+    {
+      "type": "image",
+      "id": "image-001",
+      "x": 72.0,
+      "y": 180.0,
+      "rotation": 0.0,
+      "scale": 1.0,
+      "zIndex": 4,
+      "readingOrder": 1,
+      "groupId": null,
+      "createdAt": "2026-07-22T00:00:00Z",
+      "modifiedAt": "2026-07-22T00:00:00Z",
+      "sourcePath": "assets/diagram.svg",
+      "widthPt": 120.0,
+      "heightPt": 80.0,
+      "altText": "A sample engineering diagram"
+    },
+    {
+      "type": "pdf_material",
+      "id": "pdf-001",
+      "x": 220.0,
+      "y": 180.0,
+      "rotation": 0.0,
+      "scale": 1.0,
+      "zIndex": 5,
+      "readingOrder": 2,
+      "groupId": null,
+      "createdAt": "2026-07-22T00:00:00Z",
+      "modifiedAt": "2026-07-22T00:00:00Z",
+      "sourcePath": "references/lecture.pdf",
+      "page": 0,
+      "sourceWidthPt": 595.0,
+      "sourceHeightPt": 842.0
+    }
+  ],
+  "readingOrder": ["group-001", "image-001", "pdf-001"],
+  "inkLayers": [
+    { "id": "ink-layer-001", "path": "ink/page-001-layer-001.json" }
+  ]
+}
