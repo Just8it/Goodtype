@@ -179,14 +179,6 @@
     startGesture(event, "move");
   }
 
-  function previewScale(event: Event) {
-    scale = Number((event.currentTarget as HTMLInputElement).value);
-  }
-
-  function commitScale() {
-    onTransform({ x, y, layoutWidthPt, scale });
-  }
-
   function updateSource(value: string) {
     draftSource = value;
     onSourceChange(value);
@@ -242,23 +234,6 @@
         <li>{diagnostic.severity}: {diagnostic.message}</li>
       {/each}
     </ul>
-  {/if}
-
-  {#if selected && !editing}
-    <label class="scale-control">
-      <span>Text size</span>
-      <input
-        type="range"
-        min="0.5"
-        max="2"
-        step="0.05"
-        value={scale}
-        aria-label="Typst text size"
-        oninput={previewScale}
-        onchange={commitScale}
-      />
-      <output>{Math.round(scale * 100)}%</output>
-    </label>
   {/if}
 
   <button
@@ -331,46 +306,28 @@
     opacity: 0;
   }
 
-  .scale-control {
-    position: absolute;
-    z-index: 3;
-    bottom: -42px;
-    left: 0;
-    display: flex;
-    height: 32px;
-    align-items: center;
-    gap: 7px;
-    padding: 0 9px;
-    border: 1px solid rgb(255 255 255 / 12%);
-    border-radius: 8px;
-    background: #23272f;
-    box-shadow: 0 10px 24px rgb(0 0 0 / 35%);
-    color: #e9ebee;
-    font: 11px "Segoe UI Variable", "Segoe UI", sans-serif;
-    white-space: nowrap;
-  }
-
-  .scale-control input { width: 92px; accent-color: #4c8df0; }
-  .scale-control output {
-    min-width: 31px;
-    color: #aeb5be;
-    font-family: "Cascadia Mono", Consolas, monospace;
-    text-align: right;
-  }
-
   .selected .handle,
   .editing .handle {
     opacity: 1;
   }
 
   .resize {
-    right: -6px;
-    bottom: -6px;
-    width: 12px;
-    min-width: 12px;
-    height: 12px;
-    min-height: 12px;
-    background: #2f6fdb;
+    right: -14px;
+    bottom: -14px;
+    width: 28px;
+    min-width: 28px;
+    height: 28px;
+    min-height: 28px;
+    border: 0;
+    background: transparent;
     cursor: ew-resize;
+  }
+
+  .resize::after {
+    position: absolute;
+    inset: 8px;
+    border: 1.5px solid white;
+    background: #2f6fdb;
+    content: "";
   }
 </style>

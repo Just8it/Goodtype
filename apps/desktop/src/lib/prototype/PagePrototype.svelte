@@ -71,6 +71,7 @@
     height: number;
   };
   type PinchStart = { distance: number; zoom: number };
+  type TypstScaleEdit = { id: string; transform: TypstTransform };
 
   const PAGE_WIDTH_PT = 595;
   const PAGE_HEIGHT_PT = 842;
@@ -132,6 +133,7 @@
   let metricsOpen = $state(false);
   const touchPoints = new Map<number, Point>();
   let pinchStart: PinchStart | null = null;
+  let typstScaleEdit: TypstScaleEdit | null = null;
 
   onMount(() => {
     void initialize();
@@ -432,6 +434,33 @@
     typstCommitTimer = setTimeout(flushTypstCommit, TYPST_SAVE_DEBOUNCE_MS);
   }
 
+  function previewTypstScale(event: Event) {
+    if (!selectedTypstId) return;
+    const block = typstBlocks.find((candidate) => candidate.id === selectedTypstId);
+    if (!block) return;
+    if (!typstScaleEdit || typstScaleEdit.id !== block.id) {
+      typstScaleEdit = { id: block.id, transform: { ...block.transform } };
+    }
+    const scale = Number((event.currentTarget as HTMLInputElement).value);
+    typstBlocks = typstBlocks.map((candidate) =>
+      candidate.id === block.id
+        ? { ...candidate, transform: { ...candidate.transform, scale } }
+        : candidate,
+    );
+  }
+
+  function commitTypstScale() {
+    if (!typstScaleEdit) return;
+    const edit = typstScaleEdit;
+    const next = typstBlocks.find((block) => block.id === edit.id)?.transform;
+    typstScaleEdit = null;
+    if (!next) return;
+    typstBlocks = typstBlocks.map((block) =>
+      block.id === edit.id ? { ...block, transform: edit.transform } : block,
+    );
+    updateTypstTransform(edit.id, next);
+  }
+
   function addTypstBlock() {
     let number = typstBlocks.length + 1;
     while (typstBlocks.some((block) => block.id === `typst-${String(number).padStart(3, "0")}`)) number += 1;
@@ -521,7 +550,7 @@
     if (
       event.pointerType === "pen" ||
       (event.target instanceof Element &&
-        event.target.closest(".typst-block, .image-object"))
+        event.target.closest(".typst-block, .image-object, .typst-size-control"))
     ) {
       return;
     }
@@ -1198,6 +1227,25 @@
 
   <footer class="status-strip">
     <div class="tool-status"><span class="blue-dot"></span><strong>{currentToolLabel()}</strong><span>{currentToolDetail()}</span></div>
+    {#if selectedTypstId}
+      {@const selectedBlock = typstBlocks.find((block) => block.id === selectedTypstId)}
+      {#if selectedBlock}
+        <label class="typst-size-control">
+          <span>Text size</span>
+          <input
+            type="range"
+            min="0.5"
+            max="2"
+            step="0.05"
+            value={selectedBlock.transform.scale}
+            aria-label="Selected Typst text size"
+            oninput={previewTypstScale}
+            onchange={commitTypstScale}
+          />
+          <output>{Math.round(selectedBlock.transform.scale * 100)}%</output>
+        </label>
+      {/if}
+    {/if}
     <div class:failure={transactionFailed} class="operation-status" title={status}>{status}</div>
     <span class="page-count">Page 1 of 1</span><span class="footer-divider"></span>
     <button type="button" onclick={() => changeZoom(1)}>{Math.round(zoom * 100)}%</button>
@@ -1509,6 +1557,21 @@
 
   .tool-status { flex: none; gap: 6px; }
   .tool-status strong { color: var(--text); font-weight: 500; }
+  .typst-size-control {
+    display: flex;
+    flex: none;
+    align-items: center;
+    gap: 7px;
+    color: var(--text);
+    white-space: nowrap;
+  }
+  .typst-size-control input { width: 108px; accent-color: var(--blueprint); }
+  .typst-size-control output {
+    min-width: 31px;
+    color: var(--muted);
+    font-family: "Cascadia Mono", Consolas, monospace;
+    text-align: right;
+  }
   .operation-status { overflow: hidden; flex: 1; color: var(--quiet); text-align: center; text-overflow: ellipsis; white-space: nowrap; }
   .operation-status.failure, .local-state.failure { color: var(--oxide); }
   .footer-divider { width: 1px; height: 15px; flex: none; background: rgb(255 255 255 / 12%); }
