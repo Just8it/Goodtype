@@ -1,0 +1,11 @@
+{
+  "name": "goodtype",
+  "private": true,
+  "packageManager": "pnpm@11.9.0",
+  "scripts": {
+    "build": "pnpm --filter @goodtype/desktop build",
+    "dev": "pnpm --filter @goodtype/desktop dev",
+    "test": "pnpm --filter @goodtype/desktop test",
+    "tauri": "pnpm --filter @goodtype/desktop tauri"
+  }
+}
