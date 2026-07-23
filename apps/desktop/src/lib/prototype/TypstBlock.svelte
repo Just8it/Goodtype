@@ -239,8 +239,8 @@
   <button
     type="button"
     class="handle resize"
-    aria-label="Resize Typst text box width"
-    title="Drag to change text box width"
+    aria-label="Change Typst layout width"
+    title="Drag to change line wrapping"
     onpointerdown={(event) => startGesture(event, "reflow")}></button
   >
 </section>
@@ -313,11 +313,12 @@
 
   .resize {
     right: -14px;
-    bottom: -14px;
+    top: 50%;
     width: 28px;
     min-width: 28px;
-    height: 28px;
-    min-height: 28px;
+    height: 44px;
+    min-height: 44px;
+    transform: translateY(-50%);
     border: 0;
     background: transparent;
     cursor: ew-resize;
@@ -325,8 +326,12 @@
 
   .resize::after {
     position: absolute;
-    inset: 8px;
+    top: 8px;
+    bottom: 8px;
+    left: 11px;
+    width: 4px;
     border: 1.5px solid white;
+    border-radius: 3px;
     background: #2f6fdb;
     content: "";
   }

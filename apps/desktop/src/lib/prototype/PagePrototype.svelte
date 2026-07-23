@@ -1231,14 +1231,14 @@
       {@const selectedBlock = typstBlocks.find((block) => block.id === selectedTypstId)}
       {#if selectedBlock}
         <label class="typst-size-control">
-          <span>Text size</span>
+          <span>Content size</span>
           <input
             type="range"
             min="0.5"
             max="2"
             step="0.05"
             value={selectedBlock.transform.scale}
-            aria-label="Selected Typst text size"
+            aria-label="Selected Typst content size"
             oninput={previewTypstScale}
             onchange={commitTypstScale}
           />
