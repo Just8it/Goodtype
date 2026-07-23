@@ -17,7 +17,7 @@
   };
 
   type Gesture = {
-    kind: "move" | "scale" | "reflow";
+    kind: "move" | "reflow";
     pointerId: number;
     clientX: number;
     clientY: number;
@@ -150,12 +150,6 @@
     if (gesture.kind === "move") {
       x = gesture.start.x + delta.x;
       y = gesture.start.y + delta.y;
-    } else if (gesture.kind === "scale") {
-      scale = Math.max(
-        0.2,
-        gesture.start.scale *
-          (1 + delta.x / Math.max(gesture.start.layoutWidthPt, 1)),
-      );
     } else {
       layoutWidthPt = Math.max(
         72,
@@ -183,6 +177,14 @@
   function beginMove(event: PointerEvent) {
     onSelect?.();
     startGesture(event, "move");
+  }
+
+  function previewScale(event: Event) {
+    scale = Number((event.currentTarget as HTMLInputElement).value);
+  }
+
+  function commitScale() {
+    onTransform({ x, y, layoutWidthPt, scale });
   }
 
   function updateSource(value: string) {
@@ -242,17 +244,29 @@
     </ul>
   {/if}
 
+  {#if selected && !editing}
+    <label class="scale-control">
+      <span>Text size</span>
+      <input
+        type="range"
+        min="0.5"
+        max="2"
+        step="0.05"
+        value={scale}
+        aria-label="Typst text size"
+        oninput={previewScale}
+        onchange={commitScale}
+      />
+      <output>{Math.round(scale * 100)}%</output>
+    </label>
+  {/if}
+
   <button
     type="button"
-    class="handle side"
-    aria-label="Resize Typst layout width"
+    class="handle resize"
+    aria-label="Resize Typst text box width"
+    title="Drag to change text box width"
     onpointerdown={(event) => startGesture(event, "reflow")}></button
-  >
-  <button
-    type="button"
-    class="handle corner"
-    aria-label="Scale Typst block"
-    onpointerdown={(event) => startGesture(event, "scale")}></button
   >
 </section>
 
@@ -317,23 +331,39 @@
     opacity: 0;
   }
 
+  .scale-control {
+    position: absolute;
+    z-index: 3;
+    bottom: -42px;
+    left: 0;
+    display: flex;
+    height: 32px;
+    align-items: center;
+    gap: 7px;
+    padding: 0 9px;
+    border: 1px solid rgb(255 255 255 / 12%);
+    border-radius: 8px;
+    background: #23272f;
+    box-shadow: 0 10px 24px rgb(0 0 0 / 35%);
+    color: #e9ebee;
+    font: 11px "Segoe UI Variable", "Segoe UI", sans-serif;
+    white-space: nowrap;
+  }
+
+  .scale-control input { width: 92px; accent-color: #4c8df0; }
+  .scale-control output {
+    min-width: 31px;
+    color: #aeb5be;
+    font-family: "Cascadia Mono", Consolas, monospace;
+    text-align: right;
+  }
+
   .selected .handle,
   .editing .handle {
     opacity: 1;
   }
 
-  .side {
-    top: 45%;
-    right: -5px;
-    width: 8px;
-    min-width: 8px;
-    height: 28px;
-    min-height: 28px;
-    border-radius: 4px;
-    cursor: ew-resize;
-  }
-
-  .corner {
+  .resize {
     right: -6px;
     bottom: -6px;
     width: 12px;
@@ -341,6 +371,6 @@
     height: 12px;
     min-height: 12px;
     background: #2f6fdb;
-    cursor: nwse-resize;
+    cursor: ew-resize;
   }
 </style>
