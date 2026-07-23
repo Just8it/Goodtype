@@ -160,7 +160,7 @@
     if (role === "ignore" || gesture) return;
     event.preventDefault();
 
-    surface?.focus();
+    surface?.focus({ preventScroll: true });
     surface?.setPointerCapture(event.pointerId);
     if (role === "erase") {
       gesture = {
