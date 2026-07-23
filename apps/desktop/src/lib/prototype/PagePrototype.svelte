@@ -22,7 +22,7 @@
   import ImageObject from "./ImageObject.svelte";
   import InkSurface from "./InkSurface.svelte";
   import { nearestPaletteDock, type PaletteDock } from "./palette";
-  import ReadOnlyPage from "./ReadOnlyPage.svelte";
+  import LoadedPage from "./LoadedPage.svelte";
   import TypstBlock from "./TypstBlock.svelte";
 
   type StoredFile = { path: string; bytes: number[] };
@@ -98,7 +98,6 @@
   let pageEntries = $state<PageEntry[]>([]);
   let pageOpen = $state(false);
   let busy = $state(true);
-  let activatingPageId = $state<string | null>(null);
   let status = $state("Opening the notebook…");
   let revision = $state(1);
   let zoom = $state(1);
@@ -267,7 +266,7 @@
       modifiedAt: now,
     };
     return {
-      manifest: { ...manifest, modifiedAt: now },
+      manifest,
       page,
       blocks: typstBlocks.map((block) => ({
         path: block.path,
@@ -384,9 +383,9 @@
     selectedTypstId = null;
   }
 
-  async function ensurePageLoaded(pageId: string, refresh = false) {
+  async function ensurePageLoaded(pageId: string) {
     const entry = pageEntries.find((page) => page.id === pageId);
-    if (!entry || (entry.snapshot && !refresh)) return entry?.snapshot ?? null;
+    if (!entry || entry.snapshot) return entry?.snapshot ?? null;
     try {
       const snapshot = await invoke<NotebookSnapshot>("open_page", { root, pageId });
       entry.snapshot = snapshot;
@@ -400,7 +399,11 @@
   function observePage(node: HTMLElement, pageId: string) {
     const observer = new IntersectionObserver(
       (entries) => {
-        if (entries.some((entry) => entry.isIntersecting)) void ensurePageLoaded(pageId);
+        if (!entries.some((entry) => entry.isIntersecting)) return;
+        const index = pageEntries.findIndex((page) => page.id === pageId);
+        for (const page of pageEntries.slice(Math.max(0, index - 1), index + 2)) {
+          void ensurePageLoaded(page.id);
+        }
       },
       { root: pageViewport, rootMargin: "100% 0px" },
     );
@@ -408,25 +411,10 @@
     return { destroy: () => observer.disconnect() };
   }
 
-  async function activatePage(pageId: string) {
-    if (
-      pageId === activePageId ||
-      activatingPageId !== null ||
-      busy ||
-      pendingTransactions > 0
-    ) return;
-    activatingPageId = pageId;
-    try {
-      if (!(await persist())) return;
-      const snapshot = await ensurePageLoaded(pageId, true);
-      if (!snapshot) return;
-      applySnapshot(snapshot);
-      canUndo = false;
-      canRedo = false;
-      status = `Page ${activePageNumber()} ready`;
-    } finally {
-      activatingPageId = null;
-    }
+  function updateLoadedPage(pageId: string, snapshot: NotebookSnapshot) {
+    const entry = pageEntries.find((page) => page.id === pageId);
+    if (entry) entry.snapshot = snapshot;
+    notebookManifest = snapshot.manifest;
   }
 
   async function addPage() {
@@ -438,9 +426,12 @@
         root,
         modifiedAt: new Date().toISOString(),
       });
+      pageEntries = [];
       applySnapshot(snapshot);
       canUndo = false;
       canRedo = false;
+      const previous = snapshot.manifest.pages.at(-2);
+      if (previous) await ensurePageLoaded(previous.id);
       await tick();
       document
         .querySelector<HTMLElement>(`[data-page-id="${snapshot.page.id}"]`)
@@ -1206,8 +1197,6 @@
             aria-label={`Page ${index + 1}`}
             aria-current={entry.id === activePageId ? "page" : undefined}
             use:observePage={entry.id}
-            onpointerenter={() => void activatePage(entry.id)}
-            onfocusin={() => void activatePage(entry.id)}
           >
             <span class="page-number">Page {index + 1}</span>
             {#if entry.id === activePageId}
@@ -1275,9 +1264,18 @@
               </div>
             {:else}
               <div class="page-frame" style:width={`${PAGE_WIDTH_PT * zoom}px`} style:height={`${PAGE_HEIGHT_PT * zoom}px`}>
-                <div class="page read-only-page" style:width={`${PAGE_WIDTH_PT}px`} style:height={`${PAGE_HEIGHT_PT}px`} style:transform={`scale(${zoom})`}>
+                <div class="page loaded-page" style:width={`${PAGE_WIDTH_PT}px`} style:height={`${PAGE_HEIGHT_PT}px`} style:transform={`scale(${zoom})`}>
                   {#if entry.snapshot}
-                    <ReadOnlyPage snapshot={entry.snapshot} {root} {zoom} />
+                    <LoadedPage
+                      snapshot={entry.snapshot}
+                      {root}
+                      {zoom}
+                      {tool}
+                      color={inkColor()}
+                      widthPt={inkWidthPt()}
+                      onCommitted={(snapshot) => updateLoadedPage(entry.id, snapshot)}
+                      onStatus={(next) => (status = next)}
+                    />
                   {:else}
                     <span class="page-loading">Loading page…</span>
                   {/if}
@@ -1557,7 +1555,7 @@
     box-shadow: 0 2px 6px rgb(0 0 0 / 30%), 0 24px 60px rgb(0 0 0 / 45%);
     transform-origin: top left;
   }
-  .read-only-page { pointer-events: none; }
+  .loaded-page { pointer-events: auto; }
   .page-loading { display: grid; height: 100%; color: #8d949d; font-size: 12px; place-items: center; }
 
   .objects, .ink-layer { position: absolute; inset: 0; }
