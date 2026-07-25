@@ -1,13 +1,8 @@
 $ErrorActionPreference = "Stop"
 
 $repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
-$localTypst = Join-Path $repositoryRoot "target\tools\typst.exe"
-$installedTypst = Get-Command typst -ErrorAction SilentlyContinue
-$typstExecutable = if ($installedTypst) { $installedTypst.Source } elseif (Test-Path -LiteralPath $localTypst) { $localTypst } else { $null }
 
-if (-not $typstExecutable) {
-    throw "Typst was not found. Install Typst 0.15.1 or copy typst.exe to target\tools\typst.exe."
-}
+# The Typst compiler is embedded in the app; the demo no longer ships typst.exe.
 
 Push-Location $repositoryRoot
 try {
@@ -38,11 +33,9 @@ if (Test-Path -LiteralPath $zipPath) {
 
 New-Item -ItemType Directory -Path $demoDirectory | Out-Null
 Copy-Item -LiteralPath $releaseExecutable -Destination (Join-Path $demoDirectory "Goodtype.exe")
-Copy-Item -LiteralPath $typstExecutable -Destination (Join-Path $demoDirectory "typst.exe")
 
 @'
 @echo off
-set "GOODTYPE_TYPST_BIN=%~dp0typst.exe"
 start "" "%~dp0Goodtype.exe"
 '@ | Set-Content -LiteralPath (Join-Path $demoDirectory "Start Goodtype.cmd") -Encoding Ascii
 

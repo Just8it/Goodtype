@@ -1,12 +1,14 @@
-//! Restricted Typst process boundary for the Phase 0B prototype.
+//! Restricted Typst compiler boundary.
+//!
+//! The Typst compiler runs in-process via [`embedded`], with a Goodtype-owned
+//! `World`: embedded fonts, notebook-root-scoped file access, and a fixed clock. Remote
+//! packages are gated separately (see the `World` implementation).
 
 pub mod export;
 
-use std::{
-    env, fs,
-    path::{Path, PathBuf},
-    process::Command,
-};
+mod embedded;
+
+use std::path::{Path, PathBuf};
 
 const MAX_SOURCE_BYTES: usize = 1024 * 1024;
 const MAX_WIDTH_PT: f64 = 10_000.0;
@@ -16,6 +18,9 @@ pub struct CompileRequest {
     pub source: String,
     pub width_pt: f64,
     pub generation: u64,
+    /// Allow downloading a Typst Universe package on a cache miss. Cached packages
+    /// resolve either way; this only governs whether a request may be made.
+    pub allow_remote_packages: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -25,6 +30,50 @@ pub struct CompileResult {
     pub width_pt: Option<f64>,
     pub height_pt: Option<f64>,
     pub diagnostics: Vec<Diagnostic>,
+}
+
+/// One completion candidate at a caret.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Completion {
+    /// What is being completed: `function`, `parameter`, `symbol`, `package`, …
+    pub kind: &'static str,
+    /// For a math symbol, the glyph it renders as (`∑`), so it can be shown beside the name.
+    pub symbol: Option<String>,
+    pub label: String,
+    /// Replacement text when it differs from the label; may contain `${…}` placeholders.
+    pub apply: Option<String>,
+    pub detail: Option<String>,
+    /// Byte offset where the replacement starts, so the caller replaces the partial word.
+    pub offset: usize,
+}
+
+/// Complete at `cursor` (a byte offset) inside a block's source.
+///
+/// `explicit` marks a completion the user asked for (Ctrl+Space) rather than one triggered by
+/// typing; Typst offers broader candidates in that case.
+pub fn complete(
+    notebook_root: &Path,
+    source: String,
+    cursor: usize,
+    explicit: bool,
+    allow_remote_packages: bool,
+) -> Result<Vec<Completion>, CompileError> {
+    let root = notebook_root
+        .canonicalize()
+        .map_err(|_| CompileError::InvalidRoot(notebook_root.to_path_buf()))?;
+    if !root.is_dir() {
+        return Err(CompileError::InvalidRoot(root));
+    }
+    if source.len() > MAX_SOURCE_BYTES {
+        return Err(CompileError::SourceTooLarge(source.len()));
+    }
+    Ok(embedded::complete(
+        &root,
+        source,
+        cursor,
+        explicit,
+        allow_remote_packages,
+    ))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -94,135 +143,34 @@ pub fn compile_block(
         return Err(CompileError::SourceTooLarge(request.source.len()));
     }
 
-    let workspace = tempfile::Builder::new()
-        .prefix(".goodtype-typst-")
-        .tempdir_in(&root)?;
-    let input = workspace.path().join("block.typ");
-    let output = workspace.path().join("block.svg");
     let wrapper = format!(
         "#set page(width: {}pt, height: auto, margin: 0pt)\n{}",
         request.width_pt, request.source
     );
-    fs::write(&input, wrapper)?;
 
-    let result = Command::new(typst_compiler())
-        .arg("compile")
-        .arg("--root")
-        .arg(&root)
-        .arg("--diagnostic-format")
-        .arg("short")
-        .arg(&input)
-        .arg(&output)
-        .output()?;
-    let diagnostics = parse_diagnostics(&String::from_utf8_lossy(&result.stderr));
-
-    if !result.status.success() {
-        return Ok(CompileResult {
-            generation: request.generation,
-            svg: None,
-            width_pt: None,
-            height_pt: None,
-            diagnostics,
-        });
-    }
-
-    let svg = fs::read_to_string(output)?;
-    let (width_pt, height_pt) = svg_dimensions_pt(&svg);
-    Ok(CompileResult {
-        generation: request.generation,
-        svg: Some(svg),
-        width_pt,
-        height_pt,
-        diagnostics,
-    })
-}
-
-pub(crate) fn typst_compiler() -> PathBuf {
-    if let Some(path) = env::var_os("GOODTYPE_TYPST_BIN") {
-        return PathBuf::from(path);
-    }
-    let development_cache =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/tools/typst.exe");
-    if development_cache.is_file() {
-        development_cache
-    } else {
-        PathBuf::from("typst")
-    }
-}
-
-fn parse_diagnostics(stderr: &str) -> Vec<Diagnostic> {
-    stderr
-        .lines()
-        .filter_map(|line| {
-            let line = line.trim();
-            let (severity, message) = if let Some(message) = line
-                .strip_prefix("error: ")
-                .or_else(|| line.split_once(": error: ").map(|(_, message)| message))
-            {
-                (DiagnosticSeverity::Error, message)
-            } else {
-                let message = line
-                    .strip_prefix("warning: ")
-                    .or_else(|| line.split_once(": warning: ").map(|(_, message)| message))?;
-                (DiagnosticSeverity::Warning, message)
-            };
-            Some(Diagnostic {
-                severity,
-                message: message.to_owned(),
-            })
-        })
-        .collect()
-}
-
-fn svg_dimensions_pt(svg: &str) -> (Option<f64>, Option<f64>) {
-    (
-        svg_attribute(svg, "width").and_then(svg_length_to_pt),
-        svg_attribute(svg, "height").and_then(svg_length_to_pt),
-    )
-}
-
-fn svg_attribute<'a>(svg: &'a str, name: &str) -> Option<&'a str> {
-    let start = svg.find("<svg")?;
-    let tag = &svg[start..svg[start..].find('>')? + start];
-    let marker = format!("{name}=\"");
-    let value = &tag[tag.find(&marker)? + marker.len()..];
-    Some(&value[..value.find('"')?])
-}
-
-fn svg_length_to_pt(value: &str) -> Option<f64> {
-    if let Some(value) = value.strip_suffix("pt") {
-        return value.parse().ok();
-    }
-    if let Some(value) = value.strip_suffix("px") {
-        return value.parse::<f64>().ok().map(|pixels| pixels * 0.75);
-    }
-    value.parse().ok()
+    Ok(embedded::compile_block(
+        &root,
+        request.generation,
+        wrapper,
+        request.allow_remote_packages,
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn compiler() -> Option<PathBuf> {
-        env::var_os("GOODTYPE_TYPST_BIN").map(PathBuf::from)
-    }
-
     #[test]
     fn compiles_valid_source_and_reports_invalid_source() {
-        let Some(compiler) = compiler() else {
-            eprintln!("GOODTYPE_TYPST_BIN is not set; skipping Typst process test");
-            return;
-        };
-        assert!(compiler.is_file(), "Typst binary does not exist");
-
         let root = tempfile::tempdir().unwrap();
-        let valid_source = include_str!("../../../fixtures/typst/valid.typ").to_owned();
+
         let valid = compile_block(
             root.path(),
             &CompileRequest {
-                source: valid_source,
+                source: include_str!("../../../fixtures/typst/valid.typ").to_owned(),
                 width_pt: 240.0,
                 generation: 7,
+                allow_remote_packages: false,
             },
         )
         .unwrap();
@@ -230,15 +178,20 @@ mod tests {
         assert!(valid.svg.as_deref().is_some_and(|svg| svg.contains("<svg")));
         assert!(valid.width_pt.is_some_and(|width| width > 0.0));
         assert!(valid.height_pt.is_some_and(|height| height > 0.0));
-        assert!(valid.diagnostics.is_empty());
+        assert!(
+            valid
+                .diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic.severity != DiagnosticSeverity::Error)
+        );
 
-        let invalid_source = include_str!("../../../fixtures/typst/invalid.typ").to_owned();
         let invalid = compile_block(
             root.path(),
             &CompileRequest {
-                source: invalid_source,
+                source: include_str!("../../../fixtures/typst/invalid.typ").to_owned(),
                 width_pt: 240.0,
                 generation: 8,
+                allow_remote_packages: false,
             },
         )
         .unwrap();
@@ -252,6 +205,92 @@ mod tests {
         );
     }
 
+    /// An uncached package with downloads off must fail as a diagnostic without reaching the
+    /// network, so `cargo xtask verify` stays offline.
+    #[test]
+    fn uncached_package_is_reported_when_downloads_are_off() {
+        let root = tempfile::tempdir().unwrap();
+        let result = compile_block(
+            root.path(),
+            &CompileRequest {
+                // A namespace/name that cannot exist locally, so this never hits a warm cache.
+                source: "#import \"@preview/goodtype-does-not-exist:9.9.9\": *".to_owned(),
+                width_pt: 240.0,
+                generation: 1,
+                allow_remote_packages: false,
+            },
+        )
+        .unwrap();
+
+        assert!(result.svg.is_none());
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.severity == DiagnosticSeverity::Error)
+        );
+    }
+
+    /// Notebook files stay reachable only through the notebook root: a package path must not
+    /// resolve into the notebook, and a notebook path must not escape it.
+    #[test]
+    fn source_outside_the_notebook_root_is_rejected() {
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret.typ"), "= Secret").unwrap();
+        let root = tempfile::tempdir().unwrap();
+
+        let result = compile_block(
+            root.path(),
+            &CompileRequest {
+                source: "#include \"../secret.typ\"".to_owned(),
+                width_pt: 240.0,
+                generation: 1,
+                allow_remote_packages: false,
+            },
+        )
+        .unwrap();
+
+        assert!(result.svg.is_none());
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.severity == DiagnosticSeverity::Error)
+        );
+    }
+
+    /// Completion must come from the compiler, not a word list: a caret after `#` offers real
+    /// library functions, and a math symbol resolves to its glyph.
+    #[test]
+    fn completes_library_functions_and_math_symbols() {
+        let root = tempfile::tempdir().unwrap();
+
+        let source = "#".to_owned();
+        let functions = complete(root.path(), source.clone(), source.len(), false, false).unwrap();
+        assert!(
+            functions.iter().any(|item| item.label == "image"),
+            "expected a compiler-derived function completion, got {:?}",
+            functions.iter().map(|item| &item.label).collect::<Vec<_>>()
+        );
+
+        let math = "$ sum".to_owned();
+        let symbols = complete(root.path(), math.clone(), math.len(), false, false).unwrap();
+        let sum = symbols.iter().find(|item| item.label == "sum");
+        assert!(sum.is_some(), "expected the `sum` math symbol");
+        assert_eq!(sum.and_then(|item| item.symbol.as_deref()), Some("∑"));
+    }
+
+    /// A caret at an impossible offset must return nothing rather than panic the analyzer.
+    #[test]
+    fn completion_tolerates_an_out_of_range_cursor() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(
+            complete(root.path(), "= Title".to_owned(), 999, false, false)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
     #[test]
     fn rejects_untrusted_root_and_width() {
         let missing = Path::new("does-not-exist");
@@ -262,6 +301,7 @@ mod tests {
                     source: String::new(),
                     width_pt: 240.0,
                     generation: 0,
+                    allow_remote_packages: false,
                 }
             ),
             Err(CompileError::InvalidRoot(_))
@@ -275,6 +315,7 @@ mod tests {
                     source: String::new(),
                     width_pt: f64::NAN,
                     generation: 0,
+                    allow_remote_packages: false,
                 }
             ),
             Err(CompileError::InvalidWidth(_))

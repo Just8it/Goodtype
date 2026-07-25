@@ -5,5 +5,20 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+# The Typst compiler is embedded in-process; there is no external `typst` binary.
 [dependencies]
+goodtype-core = { path = "../goodtype-core" }
 tempfile.workspace = true
+typst = "0.15.1"
+typst-assets = { version = "0.15.1", features = ["fonts"] }
+# In-process completion and analysis, driven by the same World as compilation.
+typst-ide = "0.15.1"
+typst-layout = "0.15.1"
+typst-pdf = "0.15.1"
+typst-svg = "0.15.1"
+# Typst Universe packages, offline-first. Same loader typst-cli uses.
+typst-kit = { version = "0.15.1", default-features = false, features = [
+    "system-downloader",
+    "system-packages",
+    "universe-packages",
+] }
