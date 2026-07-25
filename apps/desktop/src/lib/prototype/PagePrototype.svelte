@@ -6,6 +6,7 @@
     InkLayer,
     NotebookManifest,
     Page,
+    PageBackground,
     PageObject,
     PagePosition,
     Stroke,
@@ -28,6 +29,8 @@
   import { populated, type MenuSection } from "../workspace/menu";
   import AddPageMenu from "../workspace/AddPageMenu.svelte";
   import type { AddPageSource, AddPageWhere } from "../workspace/addPage";
+  import { templateSvg } from "../page/template";
+  import { BUILT_IN_TEMPLATES } from "../page/templates";
   import SideEditor from "./SideEditor.svelte";
   import {
     AssetUrlCache,
@@ -135,6 +138,8 @@
   let activePageId = $state("page-001");
   let activeInkLayerId = $state(INK_LAYER_ID);
   let activeInkLayerPath = $state("ink/page-001-layer-001.json");
+  /** The paper under the active page, kept so committing does not overwrite it. */
+  let activeBackground = $state<PageBackground>({ kind: "plain", color: "#ffffff" });
   let pageEntries = $state<PageEntry[]>([]);
   let pageOpen = $state(false);
   let busy = $state(true);
@@ -563,7 +568,7 @@
       id: activePageId,
       revision,
       geometry: { widthPt: PAGE_WIDTH_PT, heightPt: PAGE_HEIGHT_PT },
-      background: { kind: "plain", color: "#ffffff" },
+      background: activeBackground,
       objects,
       readingOrder: grouped
         ? [GROUP_ID, ...extraTypstIds, ...(image ? ["image-001"] : [])]
@@ -639,6 +644,9 @@
     const activeInk = snapshot.page.inkLayers[0];
     activeInkLayerId = activeInk?.id ?? `${activePageId}-ink-001`;
     activeInkLayerPath = activeInk?.path ?? `ink/${activePageId}-layer-001.json`;
+    // Carried through so `buildSnapshot` can put it back. It used to write a hardcoded white
+    // page, which meant the first stroke on a template erased the paper it was drawn on.
+    activeBackground = snapshot.page.background;
     pageEntries = snapshot.manifest.pages.map((page) => ({
       ...page,
       snapshot:
@@ -1191,7 +1199,7 @@
     }
   }
 
-  async function addPage(position: PagePosition) {
+  async function addPage(position: PagePosition, background: PageBackground | null = null) {
     moreOpen = false;
     addPageOpen = false;
     if (!(await persist())) return;
@@ -1201,6 +1209,7 @@
         root,
         modifiedAt: new Date().toISOString(),
         position,
+        background,
       });
       pageEntries = [];
       applySnapshot(snapshot);
@@ -1222,17 +1231,33 @@
   }
 
   /**
-   * What a new page can be made from. One entry per source, which is the extension point:
-   * templates, an image, and PDF import all arrive here rather than in the menu's markup.
+   * What a new page can be made from. One entry per source, which is the extension point: an
+   * image and PDF import arrive here rather than in the menu's markup.
+   *
+   * A template's definition is copied onto the page rather than referenced, so the notebook
+   * still looks like itself on a machine that never had this build's library — the same rule a
+   * stroke follows when it stores its resolved nib parameters instead of a pen name.
    */
   function addPageSources(): AddPageSource[] {
+    const geometry = { widthPt: PAGE_WIDTH_PT, heightPt: PAGE_HEIGHT_PT };
     return [
       {
-        id: "blank",
-        label: "Blank page",
-        detail: "Notebook default",
-        onSelect: (position) => void addPage(position),
+        id: "same",
+        label: "Same as this page",
+        detail: activeBackground.kind === "template" ? activeBackground.template.name : "Plain",
+        preview:
+          activeBackground.kind === "template"
+            ? templateSvg(activeBackground.template, geometry)
+            : undefined,
+        onSelect: (position) => void addPage(position, activeBackground),
       },
+      ...BUILT_IN_TEMPLATES.map((template) => ({
+        id: template.id,
+        label: template.name,
+        preview: templateSvg(template, geometry),
+        onSelect: (position: PagePosition) =>
+          void addPage(position, { kind: "template", template }),
+      })),
     ];
   }
 
@@ -2381,6 +2406,7 @@
                     results={active ? activeResults : (neighborResults[entry.id] ?? {})}
                     strokes={active ? strokes : neighborStrokesFor(entry)}
                     selectedStrokeIds={active ? selectedStrokeIds : []}
+                    background={active ? activeBackground : (entry.snapshot?.page.background ?? { kind: "plain", color: "#ffffff" })}
                     pageWidthPt={PAGE_WIDTH_PT}
                     pageHeightPt={PAGE_HEIGHT_PT}
                     {zoom}

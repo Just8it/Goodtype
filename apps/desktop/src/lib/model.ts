@@ -17,7 +17,32 @@ export type PageGeometry = { widthPt: number; heightPt: number };
 export type PageDefaults = { geometry: PageGeometry; background: PageBackground };
 export type PageBackground =
   | { kind: "plain"; color: string }
-  | { kind: "pdf"; sourcePath: string; page: number };
+  | { kind: "pdf"; sourcePath: string; page: number }
+  | { kind: "template"; template: PageTemplate };
+
+/**
+ * Ruled, dotted, or squared paper, described as repeat rules rather than drawn. Mirrors
+ * `goodtype_core::template`; the resolver that turns it into geometry is in `page/template.ts`.
+ *
+ * The definition is stored on the page rather than referenced by id, so a notebook opened on a
+ * machine that never had this template still looks like itself.
+ */
+export type PageTemplate = {
+  id: string;
+  name: string;
+  backgroundColor: string;
+  /** Inset from every edge that the repeating elements stay inside. */
+  marginPt: number;
+  elements: TemplateElement[];
+};
+
+export type TemplateElement =
+  | { kind: "horizontal_lines"; spacingPt: number; offsetPt: number; color: string; weightPt: number }
+  | { kind: "vertical_lines"; spacingPt: number; offsetPt: number; color: string; weightPt: number }
+  | { kind: "dots"; spacingPt: number; offsetPt: number; color: string; radiusPt: number }
+  | { kind: "rule"; edge: TemplateEdge; offsetPt: number; color: string; weightPt: number };
+
+export type TemplateEdge = "left" | "right" | "top" | "bottom";
 
 /**
  * Where `create_page` puts the new page. Not part of the stored format — it is an argument to

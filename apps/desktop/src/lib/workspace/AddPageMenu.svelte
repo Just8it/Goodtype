@@ -105,7 +105,7 @@
     z-index: 50;
     top: calc(100% + 8px);
     right: 0;
-    width: 268px;
+    width: 306px;
     padding: 7px;
     border: 1px solid rgb(255 255 255 / 12%);
     border-radius: 11px;
@@ -175,9 +175,14 @@
     cursor: default;
   }
 
+  /* Scrolls rather than growing: the library gets longer every time a template is added, and a
+     menu taller than the window is worse than one that scrolls. */
   .sources {
     display: grid;
-    grid-template-columns: repeat(2, 1fr);
+    overflow-y: auto;
+    max-height: 46vh;
+    padding: 1px;
+    grid-template-columns: repeat(3, 1fr);
     gap: 6px;
   }
 
@@ -185,7 +190,7 @@
     display: flex;
     flex-direction: column;
     align-items: stretch;
-    padding: 7px;
+    padding: 5px;
     border: 1px solid rgb(255 255 255 / 10%);
     border-radius: 8px;
     background: transparent;
@@ -222,12 +227,18 @@
   }
 
   .label {
-    font-size: 11.5px;
+    overflow: hidden;
+    font-size: 10.5px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .detail {
-    margin-top: 2px;
+    overflow: hidden;
+    margin-top: 1px;
     color: var(--quiet);
-    font-size: 10px;
+    font-size: 9.5px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 </style>

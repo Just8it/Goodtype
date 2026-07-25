@@ -1,5 +1,6 @@
 <script lang="ts">
-  import type { Stroke } from "../model";
+  import type { PageBackground, Stroke } from "../model";
+  import PaperLayer from "../page/PaperLayer.svelte";
   import type { StrokePerformance } from "../ink/metrics";
   import type { TypstCompileResult } from "../editor/typst";
   import { getCachedTypst } from "../editor/typstCache";
@@ -30,6 +31,7 @@
     results = {},
     strokes = [],
     selectedStrokeIds = [],
+    background = { kind: "plain", color: "#ffffff" },
     pageWidthPt,
     pageHeightPt,
     zoom = 1,
@@ -67,6 +69,8 @@
     results?: Record<string, TypstCompileResult | null>;
     strokes?: Stroke[];
     selectedStrokeIds?: string[];
+    /** The paper: a flat colour, or a template resolved against this page's geometry. */
+    background?: PageBackground;
     pageWidthPt: number;
     pageHeightPt: number;
     zoom?: number;
@@ -116,6 +120,7 @@
   let editingBlockId = $state<string | null>(null);
 </script>
 
+<PaperLayer {background} widthPt={pageWidthPt} heightPt={pageHeightPt} />
 <div class:interactive class:editing={editingBlockId !== null} class="objects">
   {#each blocks as block (block.id)}
     <TypstBlock
