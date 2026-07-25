@@ -12,15 +12,21 @@
   let {
     where,
     groups,
+    tones,
+    toneId,
     currentPageId,
     pageNumber,
     pageCount,
     canPlaceRelative,
     onWhereChange,
+    onToneChange,
     onClose,
   }: {
     where: AddPageWhere;
     groups: AddPageGroup[];
+    /** Paper colours. Every template below is shown in whichever one is selected. */
+    tones: { id: string; name: string; backgroundColor: string }[];
+    toneId: string;
     /** The page "before" and "after" are relative to. */
     currentPageId: string;
     /** One-based, as the writer sees it. */
@@ -29,6 +35,7 @@
     /** False when no page is open, which leaves appending as the only meaning "add" can have. */
     canPlaceRelative: boolean;
     onWhereChange: (next: AddPageWhere) => void;
+    onToneChange: (next: string) => void;
     onClose: () => void;
   } = $props();
 
@@ -73,6 +80,22 @@
         onclick={() => onWhereChange(choice.value)}
       >
         {choice.label}
+      </button>
+    {/each}
+  </div>
+
+  <div class="menu-heading">Paper</div>
+  <div class="tones" role="group" aria-label="Paper colour">
+    {#each tones as paper (paper.id)}
+      <button
+        type="button"
+        class="tone"
+        class:selected={paper.id === toneId}
+        aria-pressed={paper.id === toneId}
+        onclick={() => onToneChange(paper.id)}
+      >
+        <span class="chip" style:background={paper.backgroundColor} aria-hidden="true"></span>
+        {paper.name}
       </button>
     {/each}
   </div>
@@ -179,6 +202,45 @@
   .where button:disabled {
     opacity: 0.4;
     cursor: default;
+  }
+
+  .tones {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 5px;
+  }
+
+  .tone {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 6px 8px;
+    border: 1px solid rgb(255 255 255 / 10%);
+    border-radius: 7px;
+    background: transparent;
+    color: var(--muted);
+    font: inherit;
+    font-size: 11px;
+    cursor: pointer;
+  }
+
+  .tone:hover {
+    color: var(--text);
+  }
+
+  .tone.selected {
+    border-color: rgb(56 182 198 / 55%);
+    background: rgb(56 182 198 / 12%);
+    color: var(--text);
+  }
+
+  /* Outlined, so a near-white chip and a near-black one both read against the panel. */
+  .chip {
+    width: 13px;
+    height: 13px;
+    border: 1px solid rgb(255 255 255 / 28%);
+    border-radius: 3px;
+    flex: none;
   }
 
   /* Scrolls rather than growing: the library gets longer every time a template is added, and a

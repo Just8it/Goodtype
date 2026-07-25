@@ -31,7 +31,7 @@
   import AddPageMenu from "../workspace/AddPageMenu.svelte";
   import type { AddPageGroup, AddPageSource, AddPageWhere } from "../workspace/addPage";
   import { templatePreviewSvg } from "../page/template";
-  import { TEMPLATE_GROUPS } from "../page/templates";
+  import { PAPER_TONES, templateGroups } from "../page/templates";
   import SideEditor from "./SideEditor.svelte";
   import {
     AssetUrlCache,
@@ -333,6 +333,8 @@
   // Remembered across openings: inserting a run of pages before the current one should not mean
   // re-picking "Before" every single time.
   let addPageWhere = $state<AddPageWhere>("after");
+  /** Paper colour the picker is showing. Remembered for the same reason the position is. */
+  let addPageToneId = $state(PAPER_TONES[0].id);
   let metricsOpen = $state(false);
   const touchPoints = new Map<number, Point>();
   let pinchStart: PinchStart | null = null;
@@ -1266,7 +1268,7 @@
           },
         ],
       },
-      ...TEMPLATE_GROUPS.map((group) => ({
+      ...templateGroups(PAPER_TONES.find((paper) => paper.id === addPageToneId) ?? PAPER_TONES[0]).map((group) => ({
         id: group.id,
         title: group.title,
         sources: group.templates.map(template),
@@ -2327,11 +2329,14 @@
             <AddPageMenu
               where={addPageWhere}
               groups={addPageGroups()}
+              tones={PAPER_TONES}
+              toneId={addPageToneId}
               currentPageId={activePageId}
               {pageNumber}
               {pageCount}
               canPlaceRelative={pageCount > 0 && Boolean(activePageId)}
               onWhereChange={(next) => (addPageWhere = next)}
+              onToneChange={(next) => (addPageToneId = next)}
               onClose={() => (addPageOpen = false)}
             />
           {/if}
