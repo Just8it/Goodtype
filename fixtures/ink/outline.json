@@ -1,0 +1,58 @@
+[
+  {
+    "name": "constant width along a horizontal stroke",
+    "points": [[0, 0, 1], [10, 0, 1]],
+    "width_pt": 4,
+    "pressure": false,
+    "taper": 0,
+    "expected": [[0, 2], [10, 2], [10, -2], [0, -2]]
+  },
+  {
+    "name": "pressure widens the silhouette from one end to the other",
+    "points": [[0, 0, 0], [10, 0, 1]],
+    "width_pt": 4,
+    "pressure": true,
+    "taper": 0,
+    "expected": [[0, 0.5], [10, 2], [10, -2], [0, -0.5]]
+  },
+  {
+    "name": "pressure is ignored when the nib does not respond to it",
+    "points": [[0, 0, 0], [10, 0, 1]],
+    "width_pt": 4,
+    "pressure": false,
+    "taper": 0,
+    "expected": [[0, 2], [10, 2], [10, -2], [0, -2]]
+  },
+  {
+    "name": "a vertical stroke offsets along x",
+    "points": [[0, 0, 1], [0, 10, 1]],
+    "width_pt": 2,
+    "pressure": false,
+    "taper": 0,
+    "expected": [[-1, 0], [-1, 10], [1, 10], [1, 0]]
+  },
+  {
+    "name": "a single point still leaves a mark",
+    "points": [[5, 5, 1]],
+    "width_pt": 2,
+    "pressure": false,
+    "taper": 0,
+    "expected": [[4, 4], [6, 4], [6, 6], [4, 6]]
+  },
+  {
+    "name": "repeated samples do not create a zero-length direction",
+    "points": [[0, 0, 1], [0, 0, 1], [10, 0, 1]],
+    "width_pt": 4,
+    "pressure": false,
+    "taper": 0,
+    "expected": [[0, 2], [10, 2], [10, -2], [0, -2]]
+  },
+  {
+    "name": "taper brings both ends to a point",
+    "points": [[0, 0, 1], [5, 0, 1], [10, 0, 1]],
+    "width_pt": 4,
+    "pressure": false,
+    "taper": 0.5,
+    "expected": [[0, 0], [5, 2], [10, 0], [10, 0], [5, -2], [0, 0]]
+  }
+]
