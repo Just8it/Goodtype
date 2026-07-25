@@ -237,8 +237,8 @@
   }
 
   .where button.selected {
-    background: rgb(56 182 198 / 18%);
-    color: #38b6c6;
+    background: rgb(76 141 240 / 16%);
+    color: var(--blueprint);
   }
 
   .where button:disabled {
@@ -269,8 +269,8 @@
 
   .sizes button.selected,
   .orientation button.selected {
-    border-color: rgb(56 182 198 / 55%);
-    background: rgb(56 182 198 / 12%);
+    border-color: rgb(76 141 240 / 60%);
+    background: rgb(76 141 240 / 16%);
     color: var(--text);
   }
 
@@ -321,8 +321,8 @@
   }
 
   .tone.selected {
-    border-color: rgb(56 182 198 / 55%);
-    background: rgb(56 182 198 / 12%);
+    border-color: rgb(76 141 240 / 60%);
+    background: rgb(76 141 240 / 16%);
     color: var(--text);
   }
 
@@ -364,7 +364,7 @@
   }
 
   .source:hover:enabled {
-    border-color: rgb(56 182 198 / 45%);
+    border-color: rgb(76 141 240 / 60%);
     background: rgb(255 255 255 / 5%);
   }
 

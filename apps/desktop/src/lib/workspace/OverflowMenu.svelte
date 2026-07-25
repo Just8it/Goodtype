@@ -159,9 +159,8 @@
     cursor: default;
   }
 
-  /* Oxide, from the palette's own presets rather than a red invented for this menu. */
   .destructive {
-    color: #e5645e;
+    color: var(--oxide);
   }
 
   .destructive:hover:enabled {
@@ -213,7 +212,7 @@
   }
 
   .menu-row input:focus-visible {
-    outline: 2px solid #38b6c6;
+    outline: 2px solid var(--blueprint);
     outline-offset: 1px;
   }
 
@@ -238,7 +237,7 @@
   }
 
   .menu-switch.on {
-    background: #38b6c6;
+    background: var(--blueprint);
   }
 
   .menu-switch.on::after {
