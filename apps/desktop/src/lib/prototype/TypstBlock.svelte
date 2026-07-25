@@ -9,6 +9,7 @@
     type TypstCompileResult,
   } from "../editor/typst";
   import type { CachedTypst } from "../editor/typstCache";
+  import { keepOnPage } from "../geometry/placement";
 
   type Transform = {
     x: number;
@@ -37,6 +38,8 @@
     root = null,
     selected = false,
     toPageDelta,
+    pageWidthPt,
+    pageHeightPt,
     onSelect,
     onDeselect,
     onCompile,
@@ -58,6 +61,9 @@
     root?: string | null;
     selected?: boolean;
     toPageDelta: (screenDx: number, screenDy: number) => { x: number; y: number };
+    /** The sheet this block has to stay reachable on. */
+    pageWidthPt: number;
+    pageHeightPt: number;
     onSelect?: () => void;
     onDeselect?: () => void;
     onCompile: (request: {
@@ -89,6 +95,10 @@
   let preview = $state(emptyTypstPreview());
   let svgUrl = $state<string | null>(null);
   let compileTimer: ReturnType<typeof setTimeout> | undefined;
+
+  // What the block actually occupies. Falls back to a line's worth while a first compile is
+  // still in flight, so a brand-new block is clamped by something rather than by zero.
+  const renderedHeightPt = $derived(preview.heightPt || 48);
 
   onMount(() => {
     x = initialX;
@@ -199,8 +209,15 @@
     );
 
     if (gesture.kind === "move") {
-      x = gesture.start.x + delta.x;
-      y = gesture.start.y + delta.y;
+      // Clamped while dragging rather than on drop, so the limit is something you feel rather
+      // than something that snaps the block back after you let go.
+      const held = keepOnPage(
+        { x: gesture.start.x + delta.x, y: gesture.start.y + delta.y },
+        { widthPt: layoutWidthPt * scale, heightPt: renderedHeightPt * scale },
+        { widthPt: pageWidthPt, heightPt: pageHeightPt },
+      );
+      x = held.x;
+      y = held.y;
     } else {
       layoutWidthPt = Math.max(
         72,

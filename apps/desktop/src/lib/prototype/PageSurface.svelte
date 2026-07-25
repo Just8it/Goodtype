@@ -135,6 +135,8 @@
       {root}
       selected={interactive && selectedBlockId === block.id}
       {toPageDelta}
+      {pageWidthPt}
+      {pageHeightPt}
       onSelect={interactive ? () => onSelectBlock?.(block.id) : undefined}
       onDeselect={interactive ? () => onDeselectBlock?.() : undefined}
       onCompile={(request) => onCompile(block.id, request)}
@@ -157,6 +159,8 @@
       scale={image.scale}
       selected={interactive && selectedImageId === image.id}
       {toPageDelta}
+      {pageWidthPt}
+      {pageHeightPt}
       onSelect={interactive ? () => onSelectImage?.(image.id) : undefined}
       onMove={(position) => onMoveImage?.(image.id, position)}
       onScale={(scale) => onScaleImage?.(image.id, scale)}

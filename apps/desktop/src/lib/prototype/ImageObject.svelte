@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { keepOnPage } from "../geometry/placement";
+
   type Position = { x: number; y: number };
   type Gesture =
     | {
@@ -27,6 +29,9 @@
     scale: number;
     selected?: boolean;
     toPageDelta?: (screenDx: number, screenDy: number) => Position;
+    /** The sheet this image has to stay reachable on. */
+    pageWidthPt: number;
+    pageHeightPt: number;
     onSelect?: () => void;
     onMove?: (position: Position) => void;
     onScale?: (scale: number) => void;
@@ -42,6 +47,8 @@
     scale,
     selected = false,
     toPageDelta = (screenDx, screenDy) => ({ x: screenDx, y: screenDy }),
+    pageWidthPt,
+    pageHeightPt,
     onSelect,
     onMove,
     onScale,
@@ -97,8 +104,15 @@
       event.clientY - gesture.clientY,
     );
     if (gesture.kind === "move") {
-      previewX = gesture.x + delta.x;
-      previewY = gesture.y + delta.y;
+      // Clamped while dragging rather than on drop, so the limit is something you feel rather
+      // than something that snaps the image back after you let go.
+      const held = keepOnPage(
+        { x: gesture.x + delta.x, y: gesture.y + delta.y },
+        { widthPt: widthPt * previewScale, heightPt: heightPt * previewScale },
+        { widthPt: pageWidthPt, heightPt: pageHeightPt },
+      );
+      previewX = held.x;
+      previewY = held.y;
     } else {
       previewScale = Math.max(0.1, gesture.scale + delta.x / widthPt);
     }
@@ -129,7 +143,15 @@
     };
     if (moves[event.key]) {
       event.preventDefault();
-      onMove?.(moves[event.key]);
+      // Nudging is bounded like dragging is; an arrow key held down would otherwise walk the
+      // image off the sheet just as effectively.
+      onMove?.(
+        keepOnPage(
+          moves[event.key],
+          { widthPt: widthPt * scale, heightPt: heightPt * scale },
+          { widthPt: pageWidthPt, heightPt: pageHeightPt },
+        ),
+      );
     } else if (event.key === "+" || event.key === "=") {
       event.preventDefault();
       onScale?.(scale + 0.1);
