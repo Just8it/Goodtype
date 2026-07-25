@@ -1,0 +1,14 @@
+# Normalise to LF in the repository. Checkouts still get native endings, so this only stops
+# Windows and non-Windows contributors from producing whole-file diffs against each other.
+* text=auto eol=lf
+
+# Windows launchers are read by cmd.exe, which wants CRLF.
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+*.png binary
+*.jpg binary
+*.pdf binary
+*.ttf binary
+*.otf binary
+*.zip binary

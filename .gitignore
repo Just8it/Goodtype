@@ -4,3 +4,14 @@ node_modules/
 /apps/desktop/src-tauri/gen/
 /.pnpm-store/
 *.log
+
+# Working notes and planning material. The repository ships the source needed to build and test
+# Goodtype; design reviews, phase specs, and agent instructions are kept locally.
+/docs/
+/specs/
+/AGENTS.md
+/AGENT_DOC.md
+
+# Local scratch output.
+/scratch-*.html
+/apps/desktop/gate-results.txt
