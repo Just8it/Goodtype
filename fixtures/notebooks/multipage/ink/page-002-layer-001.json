@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "page-002-ink-001",
+  "pageId": "page-002",
+  "strokes": [
+    {
+      "id": "page-002-stroke-0001",
+      "tool": "highlighter",
+      "color": "#e0912b",
+      "widthPt": 6.0,
+      "pressure": false,
+      "taper": 0.0,
+      "opacity": 0.6,
+      "groupId": null,
+      "points": [
+        { "x": 150.0, "y": 210.0, "pressure": 0.5, "timeMs": 0.0, "tiltX": 0.0, "tiltY": 0.0 },
+        { "x": 240.0, "y": 214.0, "pressure": 0.5, "timeMs": 12.0, "tiltX": 0.0, "tiltY": 0.0 }
+      ],
+      "transform": { "translateX": 0.0, "translateY": 0.0, "scaleX": 1.0, "scaleY": 1.0, "rotation": 0.0 }
+    }
+  ]
+}

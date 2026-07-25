@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "id": "page-002",
+  "revision": 1,
+  "geometry": { "widthPt": 595.0, "heightPt": 842.0 },
+  "background": { "kind": "plain", "color": "#ffffff" },
+  "objects": [
+    {
+      "type": "image",
+      "id": "page-002-image-001",
+      "x": 140.0,
+      "y": 200.0,
+      "rotation": 0.0,
+      "scale": 1.0,
+      "zIndex": 1,
+      "readingOrder": 0,
+      "groupId": null,
+      "createdAt": "2026-07-23T00:00:00Z",
+      "modifiedAt": "2026-07-23T00:00:00Z",
+      "sourcePath": "assets/diagram.svg",
+      "widthPt": 120.0,
+      "heightPt": 80.0,
+      "altText": "Fixture diagram"
+    }
+  ],
+  "readingOrder": ["page-002-image-001"],
+  "inkLayers": [{ "id": "page-002-ink-001", "path": "ink/page-002-layer-001.json" }]
+}

@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "id": "page-003",
+  "revision": 1,
+  "geometry": { "widthPt": 595.0, "heightPt": 842.0 },
+  "background": { "kind": "plain", "color": "#ffffff" },
+  "objects": [
+    {
+      "type": "typst",
+      "id": "page-003-typst-001",
+      "x": 72.0,
+      "y": 120.0,
+      "rotation": 0.0,
+      "scale": 1.0,
+      "zIndex": 1,
+      "readingOrder": 0,
+      "groupId": null,
+      "createdAt": "2026-07-23T00:00:00Z",
+      "modifiedAt": "2026-07-23T00:00:00Z",
+      "sourcePath": "blocks/page-003-summary.typ",
+      "layoutWidthPt": 300.0,
+      "measuredWidthPt": 260.0,
+      "measuredHeightPt": 64.0
+    }
+  ],
+  "readingOrder": ["page-003-typst-001"],
+  "inkLayers": [{ "id": "page-003-ink-001", "path": "ink/page-003-layer-001.json" }]
+}
