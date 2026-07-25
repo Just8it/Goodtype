@@ -8,6 +8,7 @@
     TYPST_IDLE_DEBOUNCE_MS,
     type TypstCompileResult,
   } from "../editor/typst";
+  import type { CachedTypst } from "../editor/typstCache";
 
   type Transform = {
     x: number;
@@ -32,6 +33,8 @@
     initialLayoutWidthPt,
     initialScale = 1,
     compileResult = null,
+    cached = null,
+    root = null,
     selected = false,
     toPageDelta,
     onSelect,
@@ -39,6 +42,9 @@
     onCompile,
     onSourceChange,
     onTransform,
+    onEditingChange,
+    inlineEditing = true,
+    onRequestEdit,
   }: {
     id: string;
     source: string;
@@ -47,6 +53,9 @@
     initialLayoutWidthPt: number;
     initialScale?: number;
     compileResult?: TypstCompileResult | null;
+    cached?: CachedTypst | null;
+    /** Notebook root, forwarded so the editor can ask Rust for completions. */
+    root?: string | null;
     selected?: boolean;
     toPageDelta: (screenDx: number, screenDy: number) => { x: number; y: number };
     onSelect?: () => void;
@@ -58,6 +67,12 @@
     }) => void;
     onSourceChange: (source: string) => void;
     onTransform: (transform: Transform) => void;
+    /** Lets the page lift the whole object layer while this block is being edited. */
+    onEditingChange?: (editing: boolean) => void;
+    /** False while the side view is open: editing happens there instead of on the page. */
+    inlineEditing?: boolean;
+    /** Asks the page to edit this block in the side view. */
+    onRequestEdit?: () => void;
   } = $props();
 
   let x = $state(0);
@@ -66,6 +81,10 @@
   let scale = $state(1);
   let draftSource = $state("");
   let editing = $state(false);
+  let blockElement = $state<HTMLElement>();
+  let editorAbove = $state(false);
+  /// Roughly the docked editor's height (10 lines plus chrome); used only to choose a side.
+  const DOCKED_EDITOR_HEIGHT_PX = 260;
   let gesture = $state<Gesture | null>(null);
   let preview = $state(emptyTypstPreview());
   let svgUrl = $state<string | null>(null);
@@ -77,6 +96,19 @@
     layoutWidthPt = initialLayoutWidthPt;
     scale = initialScale;
     draftSource = source;
+    // Paint a cached SVG synchronously so a block that scrolls into view never flashes blank
+    // for a frame before its (cache-served) compile resolves.
+    if (cached?.svg) {
+      preview = {
+        requestedGeneration: 0,
+        appliedGeneration: 0,
+        svg: cached.svg,
+        widthPt: cached.widthPt,
+        heightPt: cached.heightPt,
+        diagnostics: cached.diagnostics,
+      };
+      svgUrl = URL.createObjectURL(new Blob([cached.svg], { type: "image/svg+xml" }));
+    }
     requestCompile(0);
   });
 
@@ -108,6 +140,25 @@
 
   $effect(() => {
     if (!selected) editing = false;
+  });
+
+  // The side view takes over editing while it is open; never show both surfaces at once.
+  $effect(() => {
+    if (!inlineEditing) editing = false;
+  });
+
+  $effect(() => {
+    onEditingChange?.(editing);
+  });
+
+  // The docked editor opens below the block, or above it when the block sits too close to the
+  // bottom of the window for the panel to fit.
+  $effect(() => {
+    if (!editing || !blockElement) return;
+    const rect = blockElement.getBoundingClientRect();
+    editorAbove =
+      rect.bottom + DOCKED_EDITOR_HEIGHT_PX > window.innerHeight &&
+      rect.top > DOCKED_EDITOR_HEIGHT_PX;
   });
 
   onDestroy(() => {
@@ -187,6 +238,7 @@
 </script>
 
 <section
+  bind:this={blockElement}
   class="typst-block"
   class:editing
   class:selected
@@ -201,15 +253,20 @@
   onpointercancel={finishGesture}
 >
   {#if editing}
-    <TypstEditor
-      value={draftSource}
-      ariaLabel={`Source for Typst block ${id}`}
-      onChange={updateSource}
-      onExit={() => {
-        editing = false;
-        onDeselect?.();
-      }}
-    />
+    <!-- Floated out of flow so opening the editor never shifts the rendered block: the preview
+         stays exactly where it was and the source docks beside it. -->
+    <div class="editor-dock" class:above={editorAbove}>
+      <TypstEditor
+        value={draftSource}
+        {root}
+        ariaLabel={`Source for Typst block ${id}`}
+        onChange={updateSource}
+        onExit={() => {
+          editing = false;
+          onDeselect?.();
+        }}
+      />
+    </div>
   {/if}
 
   <button
@@ -218,7 +275,7 @@
     aria-label={`Select Typst block ${id}; double-click to edit`}
     title="Click to select; double-click to edit"
     onpointerdown={beginMove}
-    ondblclick={() => (editing = true)}
+    ondblclick={() => (inlineEditing ? (editing = true) : onRequestEdit?.())}
     onclick={onSelect}
   >
     {#if svgUrl}
@@ -250,6 +307,9 @@
     position: absolute;
     box-sizing: border-box;
     transform-origin: top left;
+    /* Sits above sibling objects while being edited; the page lifts the whole object layer over
+       the ink so the editing surface is never buried under strokes. */
+    z-index: 0;
     border: 1px solid rgb(30 35 43 / 14%);
     border-radius: 4px;
     background: #fff;
@@ -262,6 +322,24 @@
   .typst-block.editing {
     outline: 1.5px solid #2f6fdb;
     outline-offset: 0;
+  }
+
+  .typst-block.editing {
+    z-index: 3;
+  }
+
+  /* Out of flow, so the rendered block never moves when the source opens. */
+  .editor-dock {
+    position: absolute;
+    top: calc(100% + 6px);
+    left: 0;
+    z-index: 4;
+    min-width: 100%;
+  }
+
+  .editor-dock.above {
+    top: auto;
+    bottom: calc(100% + 6px);
   }
 
   .preview:focus-visible,
