@@ -86,6 +86,15 @@ export type Stroke = {
   tool: "pen" | "highlighter";
   color: string;
   widthPt: number;
+  /**
+   * Whether this stroke's width followed stylus pressure. Resolved from the nib at draw time and
+   * then stored, never inferred from `tool` — nibs differ, and export must not re-decide.
+   */
+  pressure: boolean;
+  /** Fraction of the stroke's length over which each end tapers to a point; 0 disables it. */
+  taper: number;
+  /** Ink opacity, 0–1. A highlighter sweep is translucent where a pen is not. */
+  opacity: number;
   groupId: string | null;
   points: StrokePoint[];
   transform: Transform;

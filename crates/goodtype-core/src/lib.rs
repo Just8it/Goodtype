@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+pub mod outline;
 pub mod storage;
 
 pub const SCHEMA_VERSION: u32 = 1;
@@ -156,6 +157,16 @@ pub struct Stroke {
     pub tool: StrokeTool,
     pub color: String,
     pub width_pt: f64,
+    /// Whether this stroke's width followed stylus pressure. Resolved from the nib when the
+    /// stroke was drawn and then stored, rather than inferred from `tool`: nibs genuinely differ —
+    /// a technical pen is deliberately even where a fountain pen swells — and a notebook has to
+    /// render identically on a machine that has never seen the nib it was written with.
+    pub pressure: bool,
+    /// Fraction of the stroke's length over which each end tapers to a point; 0 disables it.
+    pub taper: f64,
+    /// Ink opacity, 0–1. Stored per stroke because a highlighter sweep is translucent and a pen
+    /// is not, and because the setting can change after the stroke was laid down.
+    pub opacity: f64,
     pub group_id: Option<String>,
     pub points: Vec<StrokePoint>,
     pub transform: Transform,
@@ -271,5 +282,15 @@ mod tests {
             ),
             (1.0, 1.0)
         );
+    }
+
+    /// A stroke carries the nib parameters it was drawn with, so the export never has to guess
+    /// them back from the tool — that guess is how pressure drifted out of the PDF before.
+    #[test]
+    fn strokes_carry_the_nib_parameters_they_were_drawn_with() {
+        let page: Page = load("pages/page-001.json");
+        let ink: InkLayer = load(&page.ink_layers[0].path);
+        assert!(ink.strokes[0].pressure);
+        assert_eq!(ink.strokes[0].taper, 0.12);
     }
 }

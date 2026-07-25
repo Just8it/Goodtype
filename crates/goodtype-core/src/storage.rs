@@ -19,8 +19,14 @@ use crate::{
 
 pub const MAX_IMAGE_BYTES: usize = 20 * 1024 * 1024;
 const MAX_JSON_BYTES: usize = 8 * 1024 * 1024;
+// Ink grows with handwriting rather than with structure, so it has its own ceiling.
+// MAX_INK_POINTS_PER_LAYER is the bound that is actually enforced before a write;
+// MAX_INK_BYTES only has to stay above what that many quantized samples can serialize to.
+const MAX_INK_BYTES: usize = 64 * 1024 * 1024;
+const MAX_INK_STROKES_PER_LAYER: usize = 20_000;
+const MAX_INK_POINTS_PER_LAYER: usize = 750_000;
 const MAX_BLOCK_BYTES: usize = 1024 * 1024;
-const MAX_RECOVERY_BYTES: usize = 64 * 1024 * 1024;
+const MAX_RECOVERY_BYTES: usize = 192 * 1024 * 1024;
 const HISTORY_LIMIT: usize = 100;
 const RECOVERY_CANDIDATE_LIMIT: usize = 10;
 const PENDING_TRANSACTION_PATH: &str = ".goodtype/pending-transaction.json";
@@ -115,7 +121,7 @@ pub fn create_notebook(
     if root.join("goodtype.json").exists() {
         return Err(StorageError::AlreadyExists("goodtype.json".into()));
     }
-    save_to_root(&root, snapshot)
+    save_to_root(&root, snapshot).map(|_| ())
 }
 
 pub fn save_notebook(
@@ -128,7 +134,7 @@ pub fn save_notebook(
             "goodtype.json does not exist".into(),
         ));
     }
-    save_to_root(&root, snapshot)
+    save_to_root(&root, snapshot).map(|_| ())
 }
 
 pub fn open_notebook(selected_root: &Path) -> Result<NotebookSnapshot, StorageError> {
@@ -165,7 +171,7 @@ fn load_page(
     let ink_layers = page
         .ink_layers
         .iter()
-        .map(|reference| read_json(root, &reference.path))
+        .map(|reference| read_json_limited(root, &reference.path, MAX_INK_BYTES))
         .collect::<Result<Vec<_>, _>>()?;
 
     let block_paths = referenced_block_paths(&manifest, &page);
@@ -198,6 +204,19 @@ pub fn observe_page(
 ) -> Result<NotebookSnapshot, StorageError> {
     let snapshot = open_page(selected_root, page_id)?;
     observe_snapshot(selected_root, history, snapshot)
+}
+
+/// Observe a page and report its undo/redo availability. Used when focus moves between pages so
+/// the frontend can target the viewed page and show its real history state. A page's history is
+/// preserved across focus changes as long as its files are unchanged, so returning to a page you
+/// edited keeps its undo stack.
+pub fn focus_page(
+    selected_root: &Path,
+    page_id: &str,
+    history: &mut NotebookHistory,
+) -> Result<HistoryResult, StorageError> {
+    let snapshot = observe_page(selected_root, page_id, history)?;
+    Ok(history_result(snapshot, history))
 }
 
 fn observe_snapshot(
@@ -234,23 +253,7 @@ pub fn create_page(
     validate_manifest(&manifest)?;
     validate_manifest_files(&root, &manifest)?;
 
-    let mut number = manifest.pages.len() + 1;
-    let (id, page_path, ink_id, ink_path) = loop {
-        let id = format!("page-{number:03}");
-        let page_path = format!("pages/{id}.json");
-        let ink_id = format!("{id}-ink-001");
-        let ink_path = format!("ink/{id}-layer-001.json");
-        if !manifest
-            .pages
-            .iter()
-            .any(|page| page.id == id || page.path == page_path)
-            && !root.join(&page_path).exists()
-            && !root.join(&ink_path).exists()
-        {
-            break (id, page_path, ink_id, ink_path);
-        }
-        number += 1;
-    };
+    let (id, page_path, ink_id, ink_path) = fresh_page_identifiers(&root, &manifest);
 
     manifest.pages.push(PageReference {
         id: id.clone(),
@@ -290,6 +293,368 @@ pub fn create_page(
     open_page(&root, &snapshot.page.id)
 }
 
+fn fresh_page_identifiers(
+    root: &Path,
+    manifest: &NotebookManifest,
+) -> (String, String, String, String) {
+    let mut number = manifest.pages.len() + 1;
+    loop {
+        let id = format!("page-{number:03}");
+        let page_path = format!("pages/{id}.json");
+        let ink_id = format!("{id}-ink-001");
+        let ink_path = format!("ink/{id}-layer-001.json");
+        if !manifest
+            .pages
+            .iter()
+            .any(|page| page.id == id || page.path == page_path)
+            && !root.join(&page_path).exists()
+            && !root.join(&ink_path).exists()
+        {
+            return (id, page_path, ink_id, ink_path);
+        }
+        number += 1;
+    }
+}
+
+/// Duplicate one page with fresh page, object, group, ink-layer, stroke, and block IDs.
+/// Original assets stay shared by reference; the shared style stays shared. The new page is
+/// inserted directly after its source in the manifest.
+pub fn duplicate_page(
+    selected_root: &Path,
+    page_id: &str,
+    modified_at: &str,
+) -> Result<NotebookSnapshot, StorageError> {
+    if modified_at.is_empty() || modified_at.len() > 64 {
+        return invalid("page timestamp must be present and bounded");
+    }
+    let root = canonical_root(selected_root)?;
+    recover_interrupted_transaction(&root)?;
+    let manifest_bytes = read_limited(resolve_existing(&root, "goodtype.json")?, MAX_JSON_BYTES)?;
+    let source = open_page(&root, page_id)?;
+    let mut manifest = source.manifest.clone();
+
+    let (new_id, new_page_path, _, _) = fresh_page_identifiers(&root, &manifest);
+
+    // Remap every ID the page owns. Assets and the shared style are shared references and
+    // keep their canonical paths; everything else gets a fresh identity.
+    let mut object_ids: HashMap<&str, String> = HashMap::new();
+    for (index, object) in source.page.objects.iter().enumerate() {
+        object_ids.insert(
+            object.fields().id.as_str(),
+            format!("{new_id}-obj-{:03}", index + 1),
+        );
+    }
+    let mut layer_ids: HashMap<&str, String> = HashMap::new();
+    let mut layer_paths: HashMap<&str, String> = HashMap::new();
+    for (index, reference) in source.page.ink_layers.iter().enumerate() {
+        layer_ids.insert(
+            reference.id.as_str(),
+            format!("{new_id}-ink-{:03}", index + 1),
+        );
+        layer_paths.insert(
+            reference.path.as_str(),
+            format!("ink/{new_id}-layer-{:03}.json", index + 1),
+        );
+    }
+    let mut block_paths: HashMap<&str, String> = HashMap::new();
+    let mut block_number = 0usize;
+    for object in &source.page.objects {
+        if let PageObject::Typst { source_path, .. } = object
+            && !block_paths.contains_key(source_path.as_str())
+        {
+            block_number += 1;
+            block_paths.insert(
+                source_path.as_str(),
+                format!("blocks/{new_id}-block-{block_number:03}.typ"),
+            );
+        }
+    }
+    let remap = |id: &str| -> Result<String, StorageError> {
+        object_ids
+            .get(id)
+            .cloned()
+            .ok_or_else(|| invalid_error("page references an unknown object"))
+    };
+
+    let mut stroke_counter = 0usize;
+    let ink_layers = source
+        .ink_layers
+        .iter()
+        .map(|layer| {
+            let strokes = layer
+                .strokes
+                .iter()
+                .map(|stroke| {
+                    stroke_counter += 1;
+                    Ok(crate::Stroke {
+                        id: format!("{new_id}-stroke-{stroke_counter:04}"),
+                        group_id: stroke.group_id.as_deref().map(&remap).transpose()?,
+                        ..stroke.clone()
+                    })
+                })
+                .collect::<Result<Vec<_>, StorageError>>()?;
+            Ok(InkLayer {
+                schema_version: layer.schema_version,
+                id: layer_ids
+                    .get(layer.id.as_str())
+                    .cloned()
+                    .ok_or_else(|| invalid_error("page references an unknown ink layer"))?,
+                page_id: new_id.clone(),
+                strokes,
+            })
+        })
+        .collect::<Result<Vec<_>, StorageError>>()?;
+
+    // Stroke IDs changed, so remap ink-group membership by position within each layer.
+    let stroke_id_map: HashMap<&str, &str> = source
+        .ink_layers
+        .iter()
+        .zip(&ink_layers)
+        .flat_map(|(old, new)| {
+            old.strokes
+                .iter()
+                .zip(&new.strokes)
+                .map(|(old, new)| (old.id.as_str(), new.id.as_str()))
+        })
+        .collect();
+
+    let objects = source
+        .page
+        .objects
+        .iter()
+        .map(|object| {
+            let mut fields = object.fields().clone();
+            fields.id = remap(&fields.id)?;
+            fields.group_id = fields.group_id.as_deref().map(&remap).transpose()?;
+            fields.created_at = modified_at.to_owned();
+            fields.modified_at = modified_at.to_owned();
+            Ok(match object {
+                PageObject::Typst {
+                    source_path,
+                    layout_width_pt,
+                    measured_width_pt,
+                    measured_height_pt,
+                    ..
+                } => PageObject::Typst {
+                    fields,
+                    source_path: block_paths
+                        .get(source_path.as_str())
+                        .cloned()
+                        .expect("every Typst path was mapped"),
+                    layout_width_pt: *layout_width_pt,
+                    measured_width_pt: *measured_width_pt,
+                    measured_height_pt: *measured_height_pt,
+                },
+                PageObject::Image {
+                    source_path,
+                    width_pt,
+                    height_pt,
+                    alt_text,
+                    ..
+                } => PageObject::Image {
+                    fields,
+                    source_path: source_path.clone(),
+                    width_pt: *width_pt,
+                    height_pt: *height_pt,
+                    alt_text: alt_text.clone(),
+                },
+                PageObject::PdfMaterial {
+                    source_path,
+                    page,
+                    source_width_pt,
+                    source_height_pt,
+                    ..
+                } => PageObject::PdfMaterial {
+                    fields,
+                    source_path: source_path.clone(),
+                    page: *page,
+                    source_width_pt: *source_width_pt,
+                    source_height_pt: *source_height_pt,
+                },
+                PageObject::InkGroup {
+                    ink_layer_id,
+                    stroke_ids,
+                    ..
+                } => PageObject::InkGroup {
+                    fields,
+                    ink_layer_id: layer_ids
+                        .get(ink_layer_id.as_str())
+                        .cloned()
+                        .ok_or_else(|| invalid_error("ink group references an unknown layer"))?,
+                    stroke_ids: stroke_ids
+                        .iter()
+                        .map(|id| {
+                            stroke_id_map
+                                .get(id.as_str())
+                                .map(|new| (*new).to_owned())
+                                .ok_or_else(|| {
+                                    invalid_error("ink group references an unknown stroke")
+                                })
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
+                },
+                PageObject::Group { child_ids, .. } => PageObject::Group {
+                    fields,
+                    child_ids: child_ids
+                        .iter()
+                        .map(|id| remap(id))
+                        .collect::<Result<Vec<_>, _>>()?,
+                },
+            })
+        })
+        .collect::<Result<Vec<_>, StorageError>>()?;
+
+    let page = Page {
+        schema_version: SCHEMA_VERSION,
+        id: new_id.clone(),
+        revision: 1,
+        geometry: source.page.geometry.clone(),
+        background: source.page.background.clone(),
+        objects,
+        reading_order: source
+            .page
+            .reading_order
+            .iter()
+            .map(|id| remap(id))
+            .collect::<Result<Vec<_>, _>>()?,
+        ink_layers: source
+            .page
+            .ink_layers
+            .iter()
+            .map(|reference| {
+                Ok(InkLayerReference {
+                    id: layer_ids
+                        .get(reference.id.as_str())
+                        .cloned()
+                        .ok_or_else(|| invalid_error("unknown ink layer reference"))?,
+                    path: layer_paths
+                        .get(reference.path.as_str())
+                        .cloned()
+                        .ok_or_else(|| invalid_error("unknown ink layer path"))?,
+                })
+            })
+            .collect::<Result<Vec<_>, StorageError>>()?,
+    };
+
+    let source_index = manifest
+        .pages
+        .iter()
+        .position(|reference| reference.id == page_id)
+        .ok_or_else(|| invalid_error("page is not referenced by the notebook manifest"))?;
+    manifest.pages.insert(
+        source_index + 1,
+        PageReference {
+            id: new_id.clone(),
+            path: new_page_path,
+        },
+    );
+    manifest.modified_at = modified_at.to_owned();
+
+    let blocks = source
+        .blocks
+        .iter()
+        .map(|file| StoredFile {
+            path: block_paths
+                .get(file.path.as_str())
+                .cloned()
+                .unwrap_or_else(|| file.path.clone()),
+            bytes: file.bytes.clone(),
+        })
+        .collect();
+
+    let snapshot = NotebookSnapshot {
+        manifest,
+        page,
+        blocks,
+        assets: Vec::new(),
+        ink_layers,
+    };
+    validate_snapshot(&root, &snapshot)?;
+    if read_limited(resolve_existing(&root, "goodtype.json")?, MAX_JSON_BYTES)? != manifest_bytes {
+        return invalid("external change detected; reopen the notebook before duplicating a page");
+    }
+    save_to_root(&root, &snapshot)?;
+    open_page(&root, &new_id)
+}
+
+/// Remove one page's manifest reference transactionally. Canonical page, ink, block, and asset
+/// files are retained for recovery; only the reference disappears. Returns the bundle of the
+/// nearest remaining page.
+pub fn delete_page(
+    selected_root: &Path,
+    page_id: &str,
+    modified_at: &str,
+) -> Result<NotebookSnapshot, StorageError> {
+    if modified_at.is_empty() || modified_at.len() > 64 {
+        return invalid("page timestamp must be present and bounded");
+    }
+    let root = canonical_root(selected_root)?;
+    recover_interrupted_transaction(&root)?;
+    let manifest_bytes = read_limited(resolve_existing(&root, "goodtype.json")?, MAX_JSON_BYTES)?;
+    let mut manifest: NotebookManifest = serde_json::from_slice(&manifest_bytes)?;
+    validate_manifest(&manifest)?;
+    if manifest.pages.len() < 2 {
+        return invalid("the final remaining page cannot be deleted");
+    }
+    let index = manifest
+        .pages
+        .iter()
+        .position(|reference| reference.id == page_id)
+        .ok_or_else(|| invalid_error("page is not referenced by the notebook manifest"))?;
+    manifest.pages.remove(index);
+    manifest.modified_at = modified_at.to_owned();
+
+    if read_limited(resolve_existing(&root, "goodtype.json")?, MAX_JSON_BYTES)? != manifest_bytes {
+        return invalid("external change detected; reopen the notebook before deleting a page");
+    }
+    write_json(&root, "goodtype.json", &manifest)?;
+    let neighbor = manifest.pages[index.min(manifest.pages.len() - 1)]
+        .id
+        .clone();
+    open_page(&root, &neighbor)
+}
+
+/// Reorder the manifest page list. `ordered_ids` must be a permutation of the current page IDs;
+/// page files, IDs, and paths are untouched.
+pub fn reorder_pages(
+    selected_root: &Path,
+    ordered_ids: &[String],
+    modified_at: &str,
+    active_page_id: &str,
+) -> Result<NotebookSnapshot, StorageError> {
+    if modified_at.is_empty() || modified_at.len() > 64 {
+        return invalid("page timestamp must be present and bounded");
+    }
+    let root = canonical_root(selected_root)?;
+    recover_interrupted_transaction(&root)?;
+    let manifest_bytes = read_limited(resolve_existing(&root, "goodtype.json")?, MAX_JSON_BYTES)?;
+    let mut manifest: NotebookManifest = serde_json::from_slice(&manifest_bytes)?;
+    validate_manifest(&manifest)?;
+
+    let current: HashSet<&str> = manifest.pages.iter().map(|page| page.id.as_str()).collect();
+    let requested: HashSet<&str> = ordered_ids.iter().map(String::as_str).collect();
+    if ordered_ids.len() != manifest.pages.len() || current != requested {
+        return invalid("reorder must list every current page exactly once");
+    }
+
+    let mut by_id: HashMap<&str, PageReference> = manifest
+        .pages
+        .iter()
+        .map(|page| (page.id.as_str(), page.clone()))
+        .collect();
+    manifest.pages = ordered_ids
+        .iter()
+        .map(|id| by_id.remove(id.as_str()).expect("validated permutation"))
+        .collect();
+    manifest.modified_at = modified_at.to_owned();
+
+    if read_limited(resolve_existing(&root, "goodtype.json")?, MAX_JSON_BYTES)? != manifest_bytes {
+        return invalid("external change detected; reopen the notebook before reordering pages");
+    }
+    write_json(&root, "goodtype.json", &manifest)?;
+    open_page(&root, active_page_id)
+}
+
 pub fn commit_notebook(
     selected_root: &Path,
     history: &mut NotebookHistory,
@@ -299,13 +664,12 @@ pub fn commit_notebook(
     let current = open_page(selected_root, &snapshot.page.id)?;
     ensure_current(&root, history, &current, snapshot.page.revision)?;
     snapshot.page.revision = current.page.revision + 1;
-    save_transactional(&root, &current, &snapshot)?;
-    let saved = open_page(&root, &snapshot.page.id)?;
+    let (saved, fingerprint) = save_and_return(&root, &current, &snapshot)?;
     push_history(&mut history.undo, history_snapshot(current));
     history.redo.clear();
     history.current_page_id = Some(saved.page.id.clone());
     history.current_revision = Some(saved.page.revision);
-    history.current_fingerprint = Some(canonical_fingerprint(&root, &saved)?);
+    history.current_fingerprint = Some(fingerprint);
     Ok(history_result(saved, history))
 }
 
@@ -346,8 +710,7 @@ fn restore_notebook(
         .cloned()
         .ok_or_else(|| StorageError::InvalidNotebook("nothing to undo or redo".into()))?;
     target.page.revision = current.page.revision + 1;
-    save_transactional(&root, &current, &target)?;
-    let restored = open_page(&root, &page_id)?;
+    let (restored, fingerprint) = save_and_return(&root, &current, &target)?;
 
     if undo {
         history.undo.pop();
@@ -358,7 +721,7 @@ fn restore_notebook(
     }
     history.current_page_id = Some(restored.page.id.clone());
     history.current_revision = Some(restored.page.revision);
-    history.current_fingerprint = Some(canonical_fingerprint(&root, &restored)?);
+    history.current_fingerprint = Some(fingerprint);
     Ok(history_result(restored, history))
 }
 
@@ -415,25 +778,54 @@ fn canonical_fingerprint(root: &Path, snapshot: &NotebookSnapshot) -> Result<u64
             .page
             .ink_layers
             .iter()
-            .map(|reference| (reference.path.as_str(), MAX_JSON_BYTES)),
+            .map(|reference| (reference.path.as_str(), MAX_INK_BYTES)),
     );
     files.sort_unstable_by_key(|(path, _)| *path);
     files.dedup_by_key(|(path, _)| *path);
 
-    // ponytail: this process-local fingerprint detects changes; it is not a security signature.
-    let mut fingerprint = DefaultHasher::new();
-    for (relative, maximum) in files {
-        relative.hash(&mut fingerprint);
-        read_limited(resolve_existing(root, relative)?, maximum)?.hash(&mut fingerprint);
-    }
-    Ok(fingerprint.finish())
+    let bytes = files
+        .into_iter()
+        .map(|(relative, maximum)| {
+            Ok((
+                relative,
+                read_limited(resolve_existing(root, relative)?, maximum)?,
+            ))
+        })
+        .collect::<Result<Vec<(&str, Vec<u8>)>, StorageError>>()?;
+    let entries = bytes
+        .iter()
+        .map(|(path, value)| (*path, value.as_slice()))
+        .collect::<Vec<_>>();
+    Ok(fingerprint_files(&entries))
+}
+
+/// Writes `candidate` transactionally and returns it as the frontend will see it — the written
+/// canonical state plus its originals — together with the fingerprint of what was written.
+/// The canonical files equal `candidate` after the write, so only assets are read back rather
+/// than re-parsing and re-hashing the whole page.
+fn save_and_return(
+    root: &Path,
+    previous: &NotebookSnapshot,
+    candidate: &NotebookSnapshot,
+) -> Result<(NotebookSnapshot, u64), StorageError> {
+    let fingerprint = save_transactional(root, previous, candidate)?;
+    let assets = read_stored_files(
+        root,
+        &referenced_asset_paths(&candidate.page),
+        MAX_IMAGE_BYTES,
+    )?;
+    let saved = NotebookSnapshot {
+        assets,
+        ..candidate.clone()
+    };
+    Ok((saved, fingerprint))
 }
 
 fn save_transactional(
     root: &Path,
     previous: &NotebookSnapshot,
     candidate: &NotebookSnapshot,
-) -> Result<(), StorageError> {
+) -> Result<u64, StorageError> {
     validate_snapshot(root, candidate)?;
     ensure_recovery_capacity(root)?;
     for asset in &candidate.assets {
@@ -447,12 +839,15 @@ fn save_transactional(
         candidate: history_snapshot(candidate.clone()),
     };
     write_recovery_intent(root, &intent)?;
-    save_to_root(root, candidate)?;
-    remove_pending_transaction(root)
+    let fingerprint = save_to_root(root, candidate)?;
+    remove_pending_transaction(root)?;
+    Ok(fingerprint)
 }
 
 fn write_recovery_intent(root: &Path, intent: &RecoveryIntent) -> Result<(), StorageError> {
-    let mut bytes = serde_json::to_vec_pretty(intent)?;
+    // Internal, disposable, machine-read only: it carries two full page snapshots and is the
+    // largest write per commit on a heavy page, so it is stored compact rather than pretty.
+    let mut bytes = serde_json::to_vec(intent)?;
     bytes.push(b'\n');
     if bytes.len() > MAX_RECOVERY_BYTES {
         return Err(StorageError::InvalidNotebook(format!(
@@ -538,6 +933,203 @@ fn archive_pending_transaction(root: &Path, revision: u64) -> Result<(), Storage
     ))
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecoveryCandidate {
+    pub file_name: String,
+    pub page_id: String,
+    pub confirmed_revision: u64,
+    pub candidate_revision: u64,
+}
+
+fn validate_candidate_file_name(file_name: &str) -> Result<(), StorageError> {
+    let valid = file_name.strip_prefix("interrupted-r").is_some_and(|rest| {
+        rest.strip_suffix(".json").is_some_and(|stem| {
+            let mut parts = stem.split('-');
+            parts.clone().count() == 3 && parts.all(|part| part.bytes().all(|b| b.is_ascii_digit()))
+        })
+    });
+    if valid {
+        Ok(())
+    } else {
+        Err(StorageError::InvalidPath(file_name.into()))
+    }
+}
+
+fn read_candidate_intent(root: &Path, file_name: &str) -> Result<RecoveryIntent, StorageError> {
+    validate_candidate_file_name(file_name)?;
+    let bytes = read_limited(
+        resolve_existing(root, &format!(".goodtype/recovery/{file_name}"))?,
+        MAX_RECOVERY_BYTES,
+    )?;
+    let intent: RecoveryIntent = serde_json::from_slice(&bytes)?;
+    if intent.version != 1 {
+        return invalid("unsupported recovery intent version");
+    }
+    Ok(intent)
+}
+
+/// List retained interrupted-transaction candidates, oldest first. Unreadable entries are
+/// skipped rather than blocking the readable ones.
+pub fn list_recovery_candidates(
+    selected_root: &Path,
+) -> Result<Vec<RecoveryCandidate>, StorageError> {
+    let root = canonical_root(selected_root)?;
+    let recovery = root.join(".goodtype").join("recovery");
+    if !recovery.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut names: Vec<String> = fs::read_dir(recovery)?
+        .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+        .filter(|name| validate_candidate_file_name(name).is_ok())
+        .collect();
+    names.sort_unstable();
+    Ok(names
+        .into_iter()
+        .filter_map(|file_name| {
+            let intent = read_candidate_intent(&root, &file_name).ok()?;
+            Some(RecoveryCandidate {
+                file_name,
+                page_id: intent.candidate.page.id,
+                confirmed_revision: intent.previous.page.revision,
+                candidate_revision: intent.candidate.page.revision,
+            })
+        })
+        .collect())
+}
+
+/// Restore a retained candidate as a new committed revision of its page. The current manifest
+/// is kept — restore never resurrects an old page list — and the restored state becomes an
+/// ordinary undoable commit. The candidate file is removed after a successful restore.
+pub fn restore_recovery_candidate(
+    selected_root: &Path,
+    history: &mut NotebookHistory,
+    file_name: &str,
+) -> Result<HistoryResult, StorageError> {
+    let root = canonical_root(selected_root)?;
+    let intent = read_candidate_intent(&root, file_name)?;
+    let mut candidate = intent.candidate;
+    let current = observe_page(&root, &candidate.page.id, history)?;
+
+    let current_reference = page_reference(&current.manifest, &candidate.page.id)?;
+    let candidate_reference = page_reference(&candidate.manifest, &candidate.page.id)?;
+    if current_reference.path != candidate_reference.path {
+        return invalid("the recovery candidate no longer matches the notebook layout");
+    }
+    // The candidate carries the manifest as it looked when interrupted; pages added or
+    // reordered since then must survive a restore.
+    candidate.manifest = current.manifest.clone();
+    candidate.page.revision = current.page.revision + 1;
+
+    let (restored, fingerprint) = save_and_return(&root, &current, &candidate)?;
+    push_history(&mut history.undo, history_snapshot(current));
+    history.redo.clear();
+    history.current_page_id = Some(restored.page.id.clone());
+    history.current_revision = Some(restored.page.revision);
+    history.current_fingerprint = Some(fingerprint);
+    discard_recovery_candidate(&root, file_name)?;
+    Ok(history_result(restored, history))
+}
+
+/// Remove one retained candidate after the user confirms it is no longer needed.
+pub fn discard_recovery_candidate(
+    selected_root: &Path,
+    file_name: &str,
+) -> Result<(), StorageError> {
+    let root = canonical_root(selected_root)?;
+    validate_candidate_file_name(file_name)?;
+    let path = resolve_existing(&root, &format!(".goodtype/recovery/{file_name}"))?;
+    fs::remove_file(path)?;
+    Ok(())
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchHit {
+    pub page_id: String,
+    pub page_number: usize,
+    pub object_id: String,
+    pub excerpt: String,
+}
+
+const MAX_SEARCH_RESULTS: usize = 200;
+
+/// Case-insensitive search across the notebook's Typst block sources, in manifest page order.
+/// The index is the canonical files themselves; nothing is cached or persisted.
+pub fn search_notebook(selected_root: &Path, query: &str) -> Result<Vec<SearchHit>, StorageError> {
+    let trimmed = query.trim();
+    if trimmed.is_empty() || trimmed.len() > 200 {
+        return invalid("search text must be between 1 and 200 characters");
+    }
+    let root = canonical_root(selected_root)?;
+    let manifest: NotebookManifest = read_json(&root, "goodtype.json")?;
+    validate_manifest(&manifest)?;
+    let needle = trimmed.to_lowercase();
+
+    let mut hits = Vec::new();
+    for (page_index, reference) in manifest.pages.iter().enumerate() {
+        let Ok(page) = read_json::<Page>(&root, &reference.path) else {
+            continue;
+        };
+        for object in &page.objects {
+            let PageObject::Typst {
+                fields,
+                source_path,
+                ..
+            } = object
+            else {
+                continue;
+            };
+            let Ok(bytes) = read_limited(
+                match resolve_existing(&root, source_path) {
+                    Ok(path) => path,
+                    Err(_) => continue,
+                },
+                MAX_BLOCK_BYTES,
+            ) else {
+                continue;
+            };
+            let source = String::from_utf8_lossy(&bytes);
+            let lowered = source.to_lowercase();
+            let Some(position) = lowered.find(&needle) else {
+                continue;
+            };
+            hits.push(SearchHit {
+                page_id: page.id.clone(),
+                page_number: page_index + 1,
+                object_id: fields.id.clone(),
+                excerpt: excerpt_around(&source, position, needle.len()),
+            });
+            if hits.len() >= MAX_SEARCH_RESULTS {
+                return Ok(hits);
+            }
+        }
+    }
+    Ok(hits)
+}
+
+fn excerpt_around(source: &str, position: usize, length: usize) -> String {
+    const CONTEXT: usize = 40;
+    // The match position was found in a lowercased copy whose byte offsets can differ from the
+    // original for non-ASCII text; clamp and slice only at original char boundaries.
+    let position = position.min(source.len());
+    let start = source
+        .char_indices()
+        .map(|(index, _)| index)
+        .take_while(|index| *index <= position.saturating_sub(CONTEXT))
+        .last()
+        .unwrap_or(0);
+    let end = source
+        .char_indices()
+        .map(|(index, _)| index)
+        .find(|index| *index >= (position + length + CONTEXT).min(source.len()))
+        .unwrap_or(source.len());
+    source[start..end]
+        .replace(['\n', '\r'], " ")
+        .trim()
+        .to_owned()
+}
+
 fn history_snapshot(mut snapshot: NotebookSnapshot) -> NotebookSnapshot {
     snapshot.assets.clear();
     snapshot
@@ -577,14 +1169,22 @@ pub fn store_pasted_image(
     Ok(relative)
 }
 
-fn save_to_root(root: &Path, snapshot: &NotebookSnapshot) -> Result<(), StorageError> {
+/// Persists every file in the snapshot and returns the canonical fingerprint of the files
+/// it wrote. Computing the fingerprint here, from the bytes just written, saves reading every
+/// canonical file back a second time on the commit and undo/redo paths.
+fn save_to_root(root: &Path, snapshot: &NotebookSnapshot) -> Result<u64, StorageError> {
     validate_snapshot(root, snapshot)?;
     let page_path = page_reference(&snapshot.manifest, &snapshot.page.id)?
         .path
         .clone();
 
+    // Retain the exact bytes of each canonical (non-asset) file so the fingerprint matches what
+    // reading the file back would produce.
+    let mut written: HashMap<String, Vec<u8>> = HashMap::new();
+
     for file in &snapshot.blocks {
         write_atomic(root, &file.path, &file.bytes)?;
+        written.insert(file.path.clone(), file.bytes.clone());
     }
     for file in &snapshot.assets {
         write_once(root, &file.path, &file.bytes)?;
@@ -595,10 +1195,39 @@ fn save_to_root(root: &Path, snapshot: &NotebookSnapshot) -> Result<(), StorageE
             .iter()
             .find(|layer| layer.id == reference.id)
             .expect("validated ink reference");
-        write_json(root, &reference.path, layer)?;
+        let bytes = write_json_compact(root, &reference.path, layer)?;
+        written.insert(reference.path.clone(), bytes);
     }
-    write_json(root, &page_path, &snapshot.page)?;
-    write_json(root, "goodtype.json", &snapshot.manifest)
+    written.insert(
+        page_path.clone(),
+        write_json(root, &page_path, &snapshot.page)?,
+    );
+    written.insert(
+        "goodtype.json".to_owned(),
+        write_json(root, "goodtype.json", &snapshot.manifest)?,
+    );
+
+    // The fingerprint file set must match `canonical_fingerprint` exactly, so derive its paths
+    // the same way and hash the bytes just persisted.
+    let mut paths = vec!["goodtype.json", page_path.as_str()];
+    paths.extend(referenced_block_paths(&snapshot.manifest, &snapshot.page));
+    paths.extend(
+        snapshot
+            .page
+            .ink_layers
+            .iter()
+            .map(|reference| reference.path.as_str()),
+    );
+    let entries = paths
+        .into_iter()
+        .map(|path| {
+            written
+                .get(path)
+                .map(|bytes| (path, bytes.as_slice()))
+                .ok_or_else(|| invalid_error("a fingerprinted file was not written"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(fingerprint_files(&entries))
 }
 
 fn validate_manifest(manifest: &NotebookManifest) -> Result<(), StorageError> {
@@ -839,12 +1468,35 @@ fn validate_ink(
         if layer.id.is_empty() || layers.insert(layer.id.as_str(), layer).is_some() {
             return invalid("ink-layer IDs must be non-empty and unique");
         }
+        // Refuse an oversized layer here, before `save_to_root` writes anything. Relying on the
+        // read ceiling alone would let a commit write a layer it can never read back, which
+        // leaves the notebook unopenable.
+        if layer.strokes.len() > MAX_INK_STROKES_PER_LAYER {
+            return Err(StorageError::InvalidNotebook(format!(
+                "ink layer {} holds {} strokes; maximum is {MAX_INK_STROKES_PER_LAYER}",
+                layer.id,
+                layer.strokes.len(),
+            )));
+        }
+        let points = layer
+            .strokes
+            .iter()
+            .map(|stroke| stroke.points.len())
+            .sum::<usize>();
+        if points > MAX_INK_POINTS_PER_LAYER {
+            return Err(StorageError::InvalidNotebook(format!(
+                "ink layer {} holds {points} samples; maximum is {MAX_INK_POINTS_PER_LAYER}",
+                layer.id,
+            )));
+        }
         for stroke in &layer.strokes {
             if stroke.id.is_empty()
                 || strokes
                     .insert(stroke.id.as_str(), (layer.id.as_str(), stroke))
                     .is_some()
                 || !positive(stroke.width_pt)
+                || !(0.0..=1.0).contains(&stroke.taper)
+                || !(0.0..=1.0).contains(&stroke.opacity)
                 || stroke.points.is_empty()
                 || !positive(stroke.transform.scale_x)
                 || !positive(stroke.transform.scale_y)
@@ -852,7 +1504,7 @@ fn validate_ink(
                 || !stroke.transform.translate_y.is_finite()
                 || !stroke.transform.rotation.is_finite()
             {
-                return invalid("stroke IDs, points, widths, and transforms must be valid");
+                return invalid("stroke IDs, points, widths, tapers, and transforms must be valid");
             }
             if stroke.points.iter().any(|point| {
                 !point.x.is_finite()
@@ -1030,14 +1682,59 @@ fn read_stored_files(
 }
 
 fn read_json<T: DeserializeOwned>(root: &Path, relative: &str) -> Result<T, StorageError> {
-    let bytes = read_limited(resolve_existing(root, relative)?, MAX_JSON_BYTES)?;
+    read_json_limited(root, relative, MAX_JSON_BYTES)
+}
+
+fn read_json_limited<T: DeserializeOwned>(
+    root: &Path,
+    relative: &str,
+    maximum: usize,
+) -> Result<T, StorageError> {
+    let bytes = read_limited(resolve_existing(root, relative)?, maximum)?;
     Ok(serde_json::from_slice(&bytes)?)
 }
 
-fn write_json<T: Serialize>(root: &Path, relative: &str, value: &T) -> Result<(), StorageError> {
+// Returns the exact bytes persisted, so a caller writing a set of canonical files can
+// fingerprint them without reading them all back from disk.
+fn write_json<T: Serialize>(
+    root: &Path,
+    relative: &str,
+    value: &T,
+) -> Result<Vec<u8>, StorageError> {
     let mut bytes = serde_json::to_vec_pretty(value)?;
     bytes.push(b'\n');
-    write_atomic(root, relative, &bytes)
+    write_atomic(root, relative, &bytes)?;
+    Ok(bytes)
+}
+
+// Ink is machine-written sample data, not hand-edited structure. Pretty-printing it costs
+// roughly 1.5x the bytes of every stroke on every commit for no inspection benefit that
+// `jq` does not already provide.
+fn write_json_compact<T: Serialize>(
+    root: &Path,
+    relative: &str,
+    value: &T,
+) -> Result<Vec<u8>, StorageError> {
+    let mut bytes = serde_json::to_vec(value)?;
+    bytes.push(b'\n');
+    write_atomic(root, relative, &bytes)?;
+    Ok(bytes)
+}
+
+// One hashing procedure shared by the read path (`canonical_fingerprint`) and the write path
+// (`save_to_root`) so a fingerprint computed from freshly written bytes equals one computed by
+// reading the same files back. The fingerprint is process-local change detection, not a
+// security signature.
+fn fingerprint_files(entries: &[(&str, &[u8])]) -> u64 {
+    let mut entries = entries.to_vec();
+    entries.sort_unstable_by_key(|(path, _)| *path);
+    entries.dedup_by_key(|(path, _)| *path);
+    let mut fingerprint = DefaultHasher::new();
+    for (path, bytes) in entries {
+        path.hash(&mut fingerprint);
+        bytes.hash(&mut fingerprint);
+    }
+    fingerprint.finish()
 }
 
 fn write_atomic(root: &Path, relative: &str, bytes: &[u8]) -> Result<(), StorageError> {
@@ -1329,6 +2026,9 @@ mod tests {
                     tool: StrokeTool::Pen,
                     color: "#111111".into(),
                     width_pt: 2.0,
+                    pressure: true,
+                    taper: 0.0,
+                    opacity: 1.0,
                     group_id: None,
                     points: vec![StrokePoint {
                         x: 80.0,
@@ -1633,5 +2333,350 @@ mod tests {
             fs::read(temporary.path().join(relative)).unwrap(),
             IMAGE_BYTES
         );
+    }
+
+    /// Samples shaped like the frontend writes them: quantized to the precision in
+    /// `apps/desktop/src/lib/ink/pipeline.ts`, so the size this test measures is the
+    /// size a real notebook reaches.
+    fn handwriting_layer(strokes: usize, points_per_stroke: usize) -> InkLayer {
+        InkLayer {
+            schema_version: SCHEMA_VERSION,
+            id: "ink-layer-001".into(),
+            page_id: "page-001".into(),
+            strokes: (0..strokes)
+                .map(|stroke| Stroke {
+                    id: format!("stroke-{stroke:06}"),
+                    tool: StrokeTool::Pen,
+                    color: "#101418".into(),
+                    width_pt: 1.6,
+                    pressure: true,
+                    taper: 0.0,
+                    opacity: 1.0,
+                    group_id: None,
+                    points: (0..points_per_stroke)
+                        .map(|point| {
+                            let step = (stroke * points_per_stroke + point) as f64;
+                            StrokePoint {
+                                x: ((step * 7.31) % 59500.0).round() / 100.0,
+                                y: ((step * 11.17) % 84200.0).round() / 100.0,
+                                pressure: ((step % 1000.0) / 1000.0 * 1000.0).round() / 1000.0,
+                                time_ms: (step * 83.0).round() / 10.0,
+                                tilt_x: ((step % 900.0) / 10.0 - 45.0).round(),
+                                tilt_y: ((step % 700.0) / 10.0 - 35.0).round(),
+                            }
+                        })
+                        .collect(),
+                    transform: Transform {
+                        translate_x: 0.0,
+                        translate_y: 0.0,
+                        scale_x: 1.0,
+                        scale_y: 1.0,
+                        rotation: 0.0,
+                    },
+                })
+                .collect(),
+        }
+    }
+
+    /// The Phase 1 gate: a page carrying five thousand strokes must commit, reopen, and
+    /// still be readable. This is the check that the 8 MiB `MAX_JSON_BYTES` ceiling used
+    /// to fail — after the write had already landed, leaving the notebook unopenable.
+    #[test]
+    fn commits_and_reopens_a_five_thousand_stroke_page() {
+        const STROKES: usize = 5_000;
+        const POINTS: usize = 60;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let notebook_root = temporary.path().join("notebook");
+        create_notebook(&notebook_root, &snapshot()).unwrap();
+
+        let mut history = NotebookHistory::default();
+        let mut heavy = observe_notebook(&notebook_root, &mut history).unwrap();
+        heavy.ink_layers = vec![handwriting_layer(STROKES, POINTS)];
+        commit_notebook(&notebook_root, &mut history, heavy).unwrap();
+
+        let reopened = open_notebook(&notebook_root).unwrap();
+        assert_eq!(reopened.page.revision, 2);
+        assert_eq!(reopened.ink_layers[0].strokes.len(), STROKES);
+        assert_eq!(reopened.ink_layers[0].strokes[0].points.len(), POINTS);
+        assert_eq!(
+            reopened.ink_layers[0].strokes[STROKES - 1].id,
+            format!("stroke-{:06}", STROKES - 1)
+        );
+
+        let written = fs::metadata(notebook_root.join("ink/page-001-layer-001.json"))
+            .unwrap()
+            .len();
+        assert!(
+            written < MAX_INK_BYTES as u64,
+            "a {STROKES}-stroke layer serialized to {written} bytes, at or above the \
+             {MAX_INK_BYTES}-byte read ceiling; it would reopen as a broken notebook"
+        );
+        assert!(
+            written > MAX_JSON_BYTES as u64,
+            "a {STROKES}-stroke layer now serializes to {written} bytes, inside the \
+             {MAX_JSON_BYTES}-byte structural ceiling. If the ink format got smaller, \
+             retune the ink ceilings and drop this assertion."
+        );
+    }
+
+    /// Locks the optimization that computes the post-write fingerprint from the bytes just
+    /// written instead of reading every canonical file back. If that fingerprint ever diverged
+    /// from what the files hash to on disk, the next commit's `ensure_current` would falsely
+    /// report an external change — so five commits in a row, each reusing the returned
+    /// snapshot, prove the two agree.
+    #[test]
+    fn commits_repeatedly_without_a_false_external_change() {
+        let temporary = tempfile::tempdir().unwrap();
+        let notebook_root = temporary.path().join("notebook");
+        create_notebook(&notebook_root, &snapshot()).unwrap();
+
+        let mut history = NotebookHistory::default();
+        let mut working = observe_notebook(&notebook_root, &mut history).unwrap();
+        for revision in 2..=6 {
+            let mut stroke = snapshot().ink_layers[0].strokes[0].clone();
+            stroke.id = format!("stroke-{revision:03}");
+            working.ink_layers[0].strokes.push(stroke);
+            let result = commit_notebook(&notebook_root, &mut history, working).unwrap();
+            assert_eq!(result.snapshot.page.revision, revision);
+            working = result.snapshot;
+        }
+
+        let reopened = open_notebook(&notebook_root).unwrap();
+        assert_eq!(reopened.page.revision, 6);
+        assert_eq!(reopened.ink_layers[0].strokes.len(), 6);
+    }
+
+    #[test]
+    fn multipage_fixture_opens_every_page_without_loading_all() {
+        let fixture =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/notebooks/multipage");
+
+        let first = open_notebook(&fixture).unwrap();
+        assert_eq!(first.manifest.pages.len(), 3);
+        assert_eq!(first.page.id, "page-001");
+        assert_eq!(first.ink_layers[0].strokes.len(), 1);
+
+        let second = open_page(&fixture, "page-002").unwrap();
+        assert!(matches!(second.page.objects[0], PageObject::Image { .. }));
+        assert_eq!(second.ink_layers[0].strokes[0].id, "page-002-stroke-0001");
+
+        let third = open_page(&fixture, "page-003").unwrap();
+        assert!(third.ink_layers[0].strokes.is_empty());
+
+        // Search reaches every page's Typst source in manifest order.
+        let hits = search_notebook(&fixture, "momentum").unwrap();
+        assert_eq!(
+            hits.iter().map(|hit| hit.page_number).collect::<Vec<_>>(),
+            [1, 3]
+        );
+    }
+
+    #[test]
+    fn duplicates_a_page_with_fresh_ids_and_shared_originals() {
+        let temporary = tempfile::tempdir().unwrap();
+        let notebook_root = temporary.path().join("notebook");
+        create_notebook(&notebook_root, &snapshot()).unwrap();
+
+        let copy = duplicate_page(&notebook_root, "page-001", "2026-07-23T19:00:00Z").unwrap();
+        assert_eq!(copy.page.id, "page-002");
+        assert_eq!(copy.page.revision, 1);
+        assert_eq!(copy.page.objects.len(), 2);
+        assert_eq!(copy.ink_layers[0].strokes.len(), 1);
+        // Fresh identity everywhere the page owns one.
+        assert!(
+            copy.page
+                .objects
+                .iter()
+                .all(|object| { object.fields().id.starts_with("page-002-obj-") })
+        );
+        assert!(copy.ink_layers[0].id.starts_with("page-002-ink-"));
+        assert!(
+            copy.ink_layers[0].strokes[0]
+                .id
+                .starts_with("page-002-stroke-")
+        );
+        let PageObject::Typst { source_path, .. } = &copy.page.objects[0] else {
+            panic!("typst object missing");
+        };
+        assert!(source_path.starts_with("blocks/page-002-block-"));
+        // Shared originals stay shared.
+        let PageObject::Image { source_path, .. } = &copy.page.objects[1] else {
+            panic!("image object missing");
+        };
+        assert_eq!(source_path, "assets/diagram.png");
+
+        // The source page is untouched and both pages reopen.
+        let original = open_page(&notebook_root, "page-001").unwrap();
+        assert_eq!(original.page.revision, 1);
+        assert_eq!(original.ink_layers[0].strokes[0].id, "stroke-001");
+        assert_eq!(
+            copy.manifest
+                .pages
+                .iter()
+                .map(|page| page.id.as_str())
+                .collect::<Vec<_>>(),
+            ["page-001", "page-002"]
+        );
+    }
+
+    #[test]
+    fn deletes_and_reorders_pages_with_guards() {
+        let temporary = tempfile::tempdir().unwrap();
+        let notebook_root = temporary.path().join("notebook");
+        create_notebook(&notebook_root, &snapshot()).unwrap();
+        create_page(&notebook_root, "2026-07-23T19:00:00Z").unwrap();
+        create_page(&notebook_root, "2026-07-23T19:01:00Z").unwrap();
+
+        let reordered = reorder_pages(
+            &notebook_root,
+            &["page-003".into(), "page-001".into(), "page-002".into()],
+            "2026-07-23T19:02:00Z",
+            "page-001",
+        )
+        .unwrap();
+        assert_eq!(
+            reordered
+                .manifest
+                .pages
+                .iter()
+                .map(|page| page.id.as_str())
+                .collect::<Vec<_>>(),
+            ["page-003", "page-001", "page-002"]
+        );
+
+        let error = reorder_pages(
+            &notebook_root,
+            &["page-001".into(), "page-002".into()],
+            "2026-07-23T19:03:00Z",
+            "page-001",
+        )
+        .unwrap_err();
+        assert!(matches!(error, StorageError::InvalidNotebook(_)));
+
+        let after_delete = delete_page(&notebook_root, "page-001", "2026-07-23T19:04:00Z").unwrap();
+        assert_eq!(after_delete.manifest.pages.len(), 2);
+        // Deletion removes the reference, never the canonical files.
+        assert!(notebook_root.join("pages/page-001.json").is_file());
+        assert!(notebook_root.join("ink/page-001-layer-001.json").is_file());
+
+        delete_page(&notebook_root, "page-002", "2026-07-23T19:05:00Z").unwrap();
+        let error = delete_page(&notebook_root, "page-003", "2026-07-23T19:06:00Z").unwrap_err();
+        assert!(matches!(error, StorageError::InvalidNotebook(_)));
+    }
+
+    #[test]
+    fn lists_restores_and_discards_recovery_candidates() {
+        let temporary = tempfile::tempdir().unwrap();
+        let notebook_root = temporary.path().join("notebook");
+        create_notebook(&notebook_root, &snapshot()).unwrap();
+        let root = fs::canonicalize(&notebook_root).unwrap();
+
+        // Simulate an interrupted transaction whose candidate was never written: reopen rolls
+        // back to the confirmed state and archives the candidate.
+        let previous = open_notebook(&notebook_root).unwrap();
+        let mut candidate = history_snapshot(previous.clone());
+        candidate.page.revision = 2;
+        let mut extra = candidate.ink_layers[0].strokes[0].clone();
+        extra.id = "stroke-recovered".into();
+        candidate.ink_layers[0].strokes.push(extra);
+        write_recovery_intent(
+            &root,
+            &RecoveryIntent {
+                version: 1,
+                previous: history_snapshot(previous.clone()),
+                candidate,
+            },
+        )
+        .unwrap();
+        let reopened = open_notebook(&notebook_root).unwrap();
+        assert_eq!(reopened.page.revision, 1);
+
+        let candidates = list_recovery_candidates(&notebook_root).unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].page_id, "page-001");
+        assert_eq!(candidates[0].candidate_revision, 2);
+
+        // Restoring lands the candidate's work as a fresh committed revision.
+        let mut history = NotebookHistory::default();
+        let restored =
+            restore_recovery_candidate(&notebook_root, &mut history, &candidates[0].file_name)
+                .unwrap();
+        assert_eq!(restored.snapshot.page.revision, 2);
+        assert_eq!(restored.snapshot.ink_layers[0].strokes.len(), 2);
+        assert!(restored.can_undo);
+        assert!(list_recovery_candidates(&notebook_root).unwrap().is_empty());
+
+        // Discard removes without applying.
+        let previous = open_notebook(&notebook_root).unwrap();
+        let mut candidate = history_snapshot(previous.clone());
+        candidate.page.revision = 3;
+        write_recovery_intent(
+            &root,
+            &RecoveryIntent {
+                version: 1,
+                previous: history_snapshot(previous),
+                candidate,
+            },
+        )
+        .unwrap();
+        open_notebook(&notebook_root).unwrap();
+        let candidates = list_recovery_candidates(&notebook_root).unwrap();
+        assert_eq!(candidates.len(), 1);
+        discard_recovery_candidate(&notebook_root, &candidates[0].file_name).unwrap();
+        assert!(list_recovery_candidates(&notebook_root).unwrap().is_empty());
+        assert!(matches!(
+            discard_recovery_candidate(&notebook_root, "../../goodtype.json"),
+            Err(StorageError::InvalidPath(_))
+        ));
+    }
+
+    #[test]
+    fn searches_typst_sources_across_pages() {
+        let temporary = tempfile::tempdir().unwrap();
+        let notebook_root = temporary.path().join("notebook");
+        create_notebook(&notebook_root, &snapshot()).unwrap();
+        duplicate_page(&notebook_root, "page-001", "2026-07-23T19:00:00Z").unwrap();
+
+        let hits = search_notebook(&notebook_root, "F = m a").unwrap();
+        assert_eq!(hits.len(), 2);
+        assert_eq!(
+            (hits[0].page_number, hits[0].page_id.as_str()),
+            (1, "page-001")
+        );
+        assert_eq!(
+            (hits[1].page_number, hits[1].page_id.as_str()),
+            (2, "page-002")
+        );
+        assert!(hits[0].excerpt.contains("F = m a"));
+        // Case-insensitive; no hit for absent text.
+        assert_eq!(search_notebook(&notebook_root, "f = M A").unwrap().len(), 2);
+        assert!(
+            search_notebook(&notebook_root, "entropy")
+                .unwrap()
+                .is_empty()
+        );
+        assert!(search_notebook(&notebook_root, "   ").is_err());
+    }
+
+    /// An over-budget layer must be refused before anything reaches disk, so the previous
+    /// confirmed revision stays openable.
+    #[test]
+    fn refuses_an_oversized_ink_layer_without_writing_it() {
+        let temporary = tempfile::tempdir().unwrap();
+        let notebook_root = temporary.path().join("notebook");
+        create_notebook(&notebook_root, &snapshot()).unwrap();
+
+        let mut history = NotebookHistory::default();
+        let mut oversized = observe_notebook(&notebook_root, &mut history).unwrap();
+        oversized.ink_layers = vec![handwriting_layer(MAX_INK_STROKES_PER_LAYER + 1, 1)];
+
+        let error = commit_notebook(&notebook_root, &mut history, oversized).unwrap_err();
+        assert!(matches!(error, StorageError::InvalidNotebook(_)));
+
+        let confirmed = open_notebook(&notebook_root).unwrap();
+        assert_eq!(confirmed.page.revision, 1);
+        assert_eq!(confirmed.ink_layers[0].strokes.len(), 1);
+        assert!(!notebook_root.join(PENDING_TRANSACTION_PATH).exists());
     }
 }
