@@ -7,6 +7,7 @@
     NotebookManifest,
     Page,
     PageObject,
+    PagePosition,
     Stroke,
   } from "../model";
   import {
@@ -25,6 +26,8 @@
   import PageSurface from "./PageSurface.svelte";
   import OverflowMenu from "../workspace/OverflowMenu.svelte";
   import { populated, type MenuSection } from "../workspace/menu";
+  import AddPageMenu from "../workspace/AddPageMenu.svelte";
+  import type { AddPageSource, AddPageWhere } from "../workspace/addPage";
   import SideEditor from "./SideEditor.svelte";
   import {
     AssetUrlCache,
@@ -320,6 +323,10 @@
       : chipBox.left + chipBox.width / 2 - barBox.left;
   }
   let moreOpen = $state(false);
+  let addPageOpen = $state(false);
+  // Remembered across openings: inserting a run of pages before the current one should not mean
+  // re-picking "Before" every single time.
+  let addPageWhere = $state<AddPageWhere>("after");
   let metricsOpen = $state(false);
   const touchPoints = new Map<number, Point>();
   let pinchStart: PinchStart | null = null;
@@ -1070,8 +1077,9 @@
     return populated([
       {
         entries: [
+          // Adding a page is not here: it has its own header button, because choosing where the
+          // page goes and what it is made of needs more than one row.
           { kind: "action", id: "duplicate", label: "Duplicate Page", onSelect: duplicateActivePage },
-          { kind: "action", id: "insert", label: "Insert Page Below", onSelect: addPage },
           { kind: "action", id: "up", label: "Move Page Up", disabled: !many || pageNumber === 1, onSelect: () => void moveActivePage(-1) },
           { kind: "action", id: "down", label: "Move Page Down", disabled: !many || pageNumber === pageCount, onSelect: () => void moveActivePage(1) },
           { kind: "number", id: "goto", label: "Go to Page", value: pageNumber, min: 1, max: pageCount, hint: `of ${pageCount}`, disabled: !many, onCommit: (number) => void goToPageNumber(number) },
@@ -1183,21 +1191,26 @@
     }
   }
 
-  async function addPage() {
+  async function addPage(position: PagePosition) {
     moreOpen = false;
+    addPageOpen = false;
     if (!(await persist())) return;
     busy = true;
     try {
       const snapshot = await invoke<NotebookSnapshot>("create_page", {
         root,
         modifiedAt: new Date().toISOString(),
+        position,
       });
       pageEntries = [];
       applySnapshot(snapshot);
       canUndo = false;
       canRedo = false;
-      const previous = snapshot.manifest.pages.at(-2);
-      if (previous) await ensurePageLoaded(previous.id);
+      // Load whatever now sits above the new page so the scroll lands with context above it
+      // rather than against the top of an otherwise empty run.
+      const index = snapshot.manifest.pages.findIndex((page) => page.id === snapshot.page.id);
+      const above = index > 0 ? snapshot.manifest.pages[index - 1] : undefined;
+      if (above) await ensurePageLoaded(above.id);
       await tick();
       scrollToPage(snapshot.page.id);
       status = `Added page ${activePageNumber()}`;
@@ -1206,6 +1219,21 @@
     } finally {
       busy = false;
     }
+  }
+
+  /**
+   * What a new page can be made from. One entry per source, which is the extension point:
+   * templates, an image, and PDF import all arrive here rather than in the menu's markup.
+   */
+  function addPageSources(): AddPageSource[] {
+    return [
+      {
+        id: "blank",
+        label: "Blank page",
+        detail: "Notebook default",
+        onSelect: (position) => void addPage(position),
+      },
+    ];
   }
 
   function activePageNumber() {
@@ -1933,6 +1961,7 @@
       searchOpen = false;
       settingsOpen = false;
       moreOpen = false;
+      addPageOpen = false;
       metricsOpen = false;
       selectedTypstId = null;
       selectedImage = false;
@@ -2250,6 +2279,25 @@
         </button>
       {:else}
         <button class="export-button" type="button" onclick={reopen} disabled={busy}>Reopen notebook</button>
+      {/if}
+      {#if pageOpen}
+        <div class="add-page-anchor">
+          <button class="icon-button" class:active={addPageOpen} type="button" aria-label="Add page" aria-expanded={addPageOpen} title="Add page" disabled={busy} onclick={() => (addPageOpen = !addPageOpen)}>
+            <svg class="stroke-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M13 3.5H7a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h6"></path><path d="M18 9.5v9"></path><path d="M13.5 14h9"></path></svg>
+          </button>
+          {#if addPageOpen}
+            <AddPageMenu
+              where={addPageWhere}
+              sources={addPageSources()}
+              currentPageId={activePageId}
+              {pageNumber}
+              {pageCount}
+              canPlaceRelative={pageCount > 0 && Boolean(activePageId)}
+              onWhereChange={(next) => (addPageWhere = next)}
+              onClose={() => (addPageOpen = false)}
+            />
+          {/if}
+        </div>
       {/if}
       <button class="icon-button" class:active={searchOpen} type="button" aria-label="Search typed content" title="Search (Ctrl+F)" onclick={() => (searchOpen = !searchOpen)}>
         <svg class="stroke-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.6-3.6"></path></svg>
@@ -2776,6 +2824,11 @@
   .icon-button svg { width: 20px; fill: currentColor; }
   .icon-button svg.stroke-icon { fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
   .export-button:hover, .icon-button:hover, .icon-button.active { background: rgb(255 255 255 / 8%); }
+  .icon-button:disabled { opacity: 0.45; cursor: default; }
+
+  /* The add-page popout hangs off its own button rather than the strip's right edge, so the
+     button can move without the menu drifting away from it. */
+  .add-page-anchor { position: relative; display: flex; }
 
 
   /* The source view is a sibling of the canvas, not an overlay on it, so opening the panel

@@ -1,12 +1,12 @@
 <script lang="ts">
+  import { dismissable } from "./dismiss";
   import type { MenuEntry, MenuSection } from "./menu";
 
   /**
    * The overflow menu. Renders whatever `sections` describe, so a new page-level feature costs
    * one entry in the caller rather than markup here.
    *
-   * Closing is the component's job, not the caller's: a menu that outlives a press somewhere else
-   * is the bug every popout in this app has had at least once.
+   * Closing is the component's job, not the caller's — see `dismissable`.
    */
   let {
     title,
@@ -21,26 +21,6 @@
     sections: MenuSection[];
     onClose: () => void;
   } = $props();
-
-  let panel = $state<HTMLElement>();
-
-  // Pointer rather than click, so the menu is gone before the press lands on what is underneath.
-  $effect(() => {
-    const dismiss = (event: PointerEvent) => {
-      if (panel && !panel.contains(event.target as Node)) onClose();
-    };
-    const key = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
-    };
-    // Deferred a frame: the same press that opened the menu is still propagating.
-    const timer = setTimeout(() => window.addEventListener("pointerdown", dismiss, true));
-    window.addEventListener("keydown", key);
-    return () => {
-      clearTimeout(timer);
-      window.removeEventListener("pointerdown", dismiss, true);
-      window.removeEventListener("keydown", key);
-    };
-  });
 
   function run(entry: MenuEntry) {
     if (entry.disabled) return;
@@ -62,7 +42,7 @@
   }
 </script>
 
-<aside bind:this={panel} class="overflow-menu" aria-label={title}>
+<aside use:dismissable={onClose} class="overflow-menu" aria-label={title}>
   <div class="menu-subject">
     <strong>{title}</strong>
     {#if subtitle}<span title={subtitle}>{subtitle}</span>{/if}
