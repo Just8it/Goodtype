@@ -14,11 +14,11 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" fill="none" role="img" aria-label="Goodtype">
   <rect width="1024" height="1024" rx="225.0" fill="#1B1E24"/>
   <rect x="8" y="8" width="1008" height="1008" rx="217.0" stroke="#2B2F37" stroke-width="16"/>
-  <g transform="translate(54.3 203.93) scale(8.8019)">
+  <g transform="translate(20.48 181.17) scale(9.4523)">
     <rect x="6" y="6" width="92" height="58" rx="7" stroke="#E9EBEE" stroke-width="6"/>
-    <path d="M18 36 C 24 24, 30 24, 34 34 C 37 41, 41 41, 45 32 C 48 25, 53 25, 57 30 C 60 34, 64 34, 67 29"
+    <path d="M18 30 C 24 18, 30 18, 34 28 C 37 35, 41 35, 45 26 C 48 19, 53 19, 57 24 C 60 28, 64 28, 67 23"
           stroke="#38B6C6" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round"/>
-    <rect x="18" y="46" width="52" height="5.5" rx="2.75" fill="#E9EBEE"/>
-    <rect x="18" y="54" width="38" height="5.5" rx="2.75" fill="#8A929C"/>
+    <rect x="18" y="40" width="52" height="5.5" rx="2.75" fill="#E9EBEE"/>
+    <rect x="18" y="48" width="38" height="5.5" rx="2.75" fill="#8A929C"/>
   </g>
 </svg>

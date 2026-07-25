@@ -35,7 +35,7 @@
   const pageWidth = $derived(detail === "full" ? 6 : 7);
 
   const SIGNATURE =
-    "M18 36 C 24 24, 30 24, 34 34 C 37 41, 41 41, 45 32 C 48 25, 53 25, 57 30 C 60 34, 64 34, 67 29";
+    "M18 30 C 24 18, 30 18, 34 28 C 37 35, 41 35, 45 26 C 48 19, 53 19, 57 24 C 60 28, 64 28, 67 23";
 </script>
 
 <svg
@@ -61,18 +61,20 @@
 
   <path
     d={SIGNATURE}
-    transform={detail === "minimal" ? "translate(0 -1) scale(1.16) translate(-7 -3)" : undefined}
+    transform={detail === "minimal"
+      ? "translate(52 35) scale(1.68) translate(-42.5 -26.5)"
+      : undefined}
     stroke={palette.hand}
-    stroke-width={detail === "minimal" ? 11 : detail === "medium" ? 5.95 : 5.5}
+    stroke-width={detail === "minimal" ? 10 : detail === "medium" ? 5.95 : 5.5}
     stroke-linecap="round"
     stroke-linejoin="round"
   />
 
   {#if detail === "full"}
-    <rect x="18" y="46" width="52" height="5.5" rx="2.75" fill={palette.ink} />
-    <rect x="18" y="54" width="38" height="5.5" rx="2.75" fill={palette.set} />
+    <rect x="18" y="40" width="52" height="5.5" rx="2.75" fill={palette.ink} />
+    <rect x="18" y="48" width="38" height="5.5" rx="2.75" fill={palette.set} />
   {:else if detail === "medium"}
-    <rect x="18" y="47" width="52" height="6.5" rx="3.25" fill={palette.ink} />
+    <rect x="18" y="41" width="52" height="6.5" rx="3.25" fill={palette.ink} />
   {/if}
 </svg>
 
