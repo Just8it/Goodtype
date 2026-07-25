@@ -117,8 +117,11 @@
   type PinchStart = { distance: number; zoom: number };
   type TypstScaleEdit = { id: string; transform: TypstTransform };
 
-  const PAGE_WIDTH_PT = 595;
-  const PAGE_HEIGHT_PT = 842;
+  // A4 exactly: 210mm x 297mm at 72pt/inch. It was rounded to 595x842, which is a tenth of a
+  // millimetre narrow — invisible on its own, and wrong the moment a template promises 5mm
+  // squares measured against it.
+  const PAGE_WIDTH_PT = 595.2756;
+  const PAGE_HEIGHT_PT = 841.8898;
   const MAIN_TYPST_ID = "typst-001";
   const BLOCK_PATH = "blocks/equation.typ";
   const INK_LAYER_ID = "ink-layer-001";

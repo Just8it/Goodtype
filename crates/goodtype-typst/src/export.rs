@@ -617,7 +617,7 @@ mod tests {
     /// to be the *same* paper the screen drew, which is what the shared fixture guarantees.
     #[test]
     fn a_template_exports_as_paper_under_the_ink() {
-        use goodtype_core::template::{PageTemplate, TemplateElement};
+        use goodtype_core::template::{Area, PageTemplate, TemplateElement};
 
         let mut page = page();
         page.background = PageBackground::Template {
@@ -625,10 +625,14 @@ mod tests {
                 id: "ruled".to_owned(),
                 name: "Ruled".to_owned(),
                 background_color: "#FCFCFA".to_owned(),
-                margin_pt: 36.0,
                 elements: vec![TemplateElement::HorizontalLines {
+                    area: Area {
+                        top_pt: 36.0,
+                        right_pt: 36.0,
+                        bottom_pt: 36.0,
+                        left_pt: 36.0,
+                    },
                     spacing_pt: 24.0,
-                    offset_pt: 0.0,
                     color: "#D4DAE0".to_owned(),
                     weight_pt: 0.5,
                 }],
@@ -642,13 +646,17 @@ mod tests {
         let ink = source.find("ink-0.svg").expect("ink placed");
         assert!(paper < ink, "paper must be placed before the ink: {source}");
 
+        // 842pt tall, 36pt margins, 24pt ruling: 32 whole steps span 768pt of the 770pt
+        // available, so the leftover 2pt is split — 1pt above the first line and 1pt below the
+        // last, rather than the whole remainder piling up against the bottom margin.
         let svg = template_svg(&page).expect("a template renders");
         assert!(
-            svg.contains(r##"<line x1="36" y1="36" x2="559" y2="36" stroke="#D4DAE0""##),
+            svg.contains(r##"<line x1="36" y1="37" x2="559" y2="37" stroke="#D4DAE0""##),
             "{svg}"
         );
-        // Ruling stops at the margin rather than running off the page.
-        assert!(!svg.contains(r#"y1="820""#), "{svg}");
+        assert!(svg.contains(r#"y1="805""#), "{svg}");
+        // Ruling stops inside the margin rather than running off the page.
+        assert!(!svg.contains(r#"y1="829""#), "{svg}");
 
         // Plain paper does not pay for an SVG it would not draw.
         let mut plain = super::tests::page();

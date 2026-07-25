@@ -1,14 +1,15 @@
 // Resolving a page template into geometry, and drawing it.
 //
-// The mirror of `crates/goodtype-core/src/template.rs`. The canvas needs this in the webview and
-// export needs it in Rust, so it exists twice — and both are asserted against
-// `fixtures/templates/resolved.json`, which is what stops the screen and the PDF disagreeing
-// about where a line goes.
+// The mirror of `crates/goodtype-core/src/template.rs`, which carries the reasoning for why a
+// template is numbers rather than artwork and why repeating elements are laid out symmetrically
+// about the centre of their area. The canvas needs this in the webview and export needs it in
+// Rust, so it exists twice — and both are asserted against `fixtures/templates/resolved.json`,
+// which is what stops the screen and the PDF disagreeing about where a line goes.
 //
-// Steps are computed as `start + index * spacing` rather than accumulated, so the two
+// Steps are computed as `first + index * spacing` rather than accumulated, so the two
 // implementations agree bit for bit instead of drifting one rounding error at a time.
 
-import type { PageGeometry, PageTemplate, TemplateElement } from "../model";
+import type { Area, PageGeometry, PageTemplate, TemplateElement } from "../model";
 
 /** Matches `MIN_SPACING_PT`: below this a template stops being paper and becomes a fill pattern. */
 export const MIN_SPACING_PT = 3;
@@ -18,47 +19,36 @@ export type TemplateShape =
   | { kind: "line"; x1: number; y1: number; x2: number; y2: number; color: string; weightPt: number }
   | { kind: "dot"; cx: number; cy: number; radiusPt: number; color: string };
 
+type Bounds = { left: number; top: number; right: number; bottom: number };
+
 export function resolveTemplate(template: PageTemplate, geometry: PageGeometry): TemplateShape[] {
-  const left = template.marginPt;
-  const top = template.marginPt;
-  const right = geometry.widthPt - template.marginPt;
-  const bottom = geometry.heightPt - template.marginPt;
   const shapes: TemplateShape[] = [];
-  if (right <= left || bottom <= top) return shapes;
 
   for (const element of template.elements) {
+    const box = bounds(element.area, geometry);
+    if (!box) continue;
     switch (element.kind) {
-      case "horizontal_lines": {
-        const start = top + element.offsetPt;
-        for (let index = 0; index < steps(start, bottom, element.spacingPt); index += 1) {
-          const y = start + index * element.spacingPt;
-          shapes.push({ kind: "line", x1: left, y1: y, x2: right, y2: y, color: element.color, weightPt: element.weightPt });
+      case "horizontal_lines":
+        for (const y of centred(box.top, box.bottom, element.spacingPt)) {
+          shapes.push({ kind: "line", x1: box.left, y1: y, x2: box.right, y2: y, color: element.color, weightPt: element.weightPt });
         }
         break;
-      }
-      case "vertical_lines": {
-        const start = left + element.offsetPt;
-        for (let index = 0; index < steps(start, right, element.spacingPt); index += 1) {
-          const x = start + index * element.spacingPt;
-          shapes.push({ kind: "line", x1: x, y1: top, x2: x, y2: bottom, color: element.color, weightPt: element.weightPt });
+      case "vertical_lines":
+        for (const x of centred(box.left, box.right, element.spacingPt)) {
+          shapes.push({ kind: "line", x1: x, y1: box.top, x2: x, y2: box.bottom, color: element.color, weightPt: element.weightPt });
         }
         break;
-      }
       case "dots": {
-        const startY = top + element.offsetPt;
-        const startX = left + element.offsetPt;
-        const rows = steps(startY, bottom, element.spacingPt);
-        const columns = steps(startX, right, element.spacingPt);
-        for (let row = 0; row < rows; row += 1) {
-          const cy = startY + row * element.spacingPt;
-          for (let column = 0; column < columns; column += 1) {
-            shapes.push({ kind: "dot", cx: startX + column * element.spacingPt, cy, radiusPt: element.radiusPt, color: element.color });
+        const columns = centred(box.left, box.right, element.spacingPt);
+        for (const cy of centred(box.top, box.bottom, element.spacingPt)) {
+          for (const cx of columns) {
+            shapes.push({ kind: "dot", cx, cy, radiusPt: element.radiusPt, color: element.color });
           }
         }
         break;
       }
       case "rule":
-        shapes.push(rule(element, geometry));
+        shapes.push(rule(element, box, geometry));
         break;
     }
     if (shapes.length >= MAX_SHAPES) {
@@ -69,29 +59,52 @@ export function resolveTemplate(template: PageTemplate, geometry: PageGeometry):
   return shapes;
 }
 
-// Measured from the page edge rather than the margin: a legal pad's rule is a margin of its own,
-// so making it relative to another one reads backwards.
+// Measured from the page edge rather than the area, because the offset is the whole point of it:
+// "1.75in from the left" has to mean that.
 function rule(
   element: Extract<TemplateElement, { kind: "rule" }>,
+  box: Bounds,
   geometry: PageGeometry,
 ): TemplateShape {
-  const { offsetPt, color, weightPt } = element;
-  switch (element.edge) {
-    case "left":
-      return { kind: "line", x1: offsetPt, y1: 0, x2: offsetPt, y2: geometry.heightPt, color, weightPt };
-    case "right":
-      return { kind: "line", x1: geometry.widthPt - offsetPt, y1: 0, x2: geometry.widthPt - offsetPt, y2: geometry.heightPt, color, weightPt };
-    case "top":
-      return { kind: "line", x1: 0, y1: offsetPt, x2: geometry.widthPt, y2: offsetPt, color, weightPt };
-    case "bottom":
-      return { kind: "line", x1: 0, y1: geometry.heightPt - offsetPt, x2: geometry.widthPt, y2: geometry.heightPt - offsetPt, color, weightPt };
-  }
+  const { color, weightPt, offsetPt, edge } = element;
+  const along =
+    edge === "left" || edge === "top"
+      ? offsetPt
+      : edge === "right"
+        ? geometry.widthPt - offsetPt
+        : edge === "bottom"
+          ? geometry.heightPt - offsetPt
+          : edge === "center_x"
+            ? geometry.widthPt / 2 + offsetPt
+            : geometry.heightPt / 2 + offsetPt;
+  return edge === "left" || edge === "right" || edge === "center_x"
+    ? { kind: "line", x1: along, y1: box.top, x2: along, y2: box.bottom, color, weightPt }
+    : { kind: "line", x1: box.left, y1: along, x2: box.right, y2: along, color, weightPt };
 }
 
-/** How many steps of `spacing` fit from `start` up to and including `end`. */
-function steps(start: number, end: number, spacing: number): number {
-  if (!Number.isFinite(spacing) || spacing < MIN_SPACING_PT || start > end) return 0;
-  return Math.floor((end - start) / spacing) + 1;
+function bounds(area: Area, geometry: PageGeometry): Bounds | null {
+  const box = {
+    left: area.leftPt,
+    top: area.topPt,
+    right: geometry.widthPt - area.rightPt,
+    bottom: geometry.heightPt - area.bottomPt,
+  };
+  return box.right > box.left && box.bottom > box.top ? box : null;
+}
+
+/**
+ * Positions of `spacing`-apart steps laid out symmetrically about the middle of `start..end`.
+ *
+ * This is what gives equal margins on both sides and makes multiples of a spacing land on each
+ * other. See the Rust module comment for why that matters.
+ */
+function centred(start: number, end: number, spacing: number): number[] {
+  if (!Number.isFinite(spacing) || spacing < MIN_SPACING_PT || end <= start) return [];
+  const centre = (start + end) / 2;
+  // Whole steps that fit between the centre and either edge.
+  const reach = Math.floor((end - start) / 2 / spacing);
+  const first = centre - reach * spacing;
+  return Array.from({ length: reach * 2 + 1 }, (_, index) => first + index * spacing);
 }
 
 /**

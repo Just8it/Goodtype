@@ -31,18 +31,28 @@ export type PageTemplate = {
   id: string;
   name: string;
   backgroundColor: string;
-  /** Inset from every edge that the repeating elements stay inside. */
-  marginPt: number;
   elements: TemplateElement[];
 };
 
-export type TemplateElement =
-  | { kind: "horizontal_lines"; spacingPt: number; offsetPt: number; color: string; weightPt: number }
-  | { kind: "vertical_lines"; spacingPt: number; offsetPt: number; color: string; weightPt: number }
-  | { kind: "dots"; spacingPt: number; offsetPt: number; color: string; radiusPt: number }
-  | { kind: "rule"; edge: TemplateEdge; offsetPt: number; color: string; weightPt: number };
+/**
+ * The rectangle an element lives in, as insets from each page edge. Carried per element because
+ * that is what the layouts need — a legal pad wants a wider left inset than the rest, and
+ * Cornell's ruling has to start at the cue column and stop at the summary band.
+ */
+export type Area = { topPt: number; rightPt: number; bottomPt: number; leftPt: number };
 
-export type TemplateEdge = "left" | "right" | "top" | "bottom";
+export type TemplateElement =
+  | { kind: "horizontal_lines"; area: Area; spacingPt: number; color: string; weightPt: number }
+  | { kind: "vertical_lines"; area: Area; spacingPt: number; color: string; weightPt: number }
+  | { kind: "dots"; area: Area; spacingPt: number; color: string; radiusPt: number }
+  | { kind: "rule"; area: Area; edge: TemplateEdge; offsetPt: number; color: string; weightPt: number };
+
+/**
+ * What a rule's offset is measured from. The centre variants exist because a column divider has
+ * to stay in the middle whatever the page size, and a fixed distance from an edge cannot say
+ * that.
+ */
+export type TemplateEdge = "left" | "right" | "top" | "bottom" | "center_x" | "center_y";
 
 /**
  * Where `create_page` puts the new page. Not part of the stored format — it is an argument to

@@ -8,18 +8,31 @@
 // organised, not something a page needs to record. Nothing on disk should have to change when
 // the shelves get rearranged.
 //
-// Spacings are in points, because that is what the page is measured in. The familiar paper sizes
-// in millimetres are noted where they came from.
+// Rulings are quoted in millimetres, because that is how paper is sold, and converted once. The
+// resolver centres each grid in its area, so these spacings are exact on any page size — a 5mm
+// square is 5mm on A5 and on A3, with the leftover split evenly between both margins rather than
+// dumped against one edge.
 
-import type { PageTemplate } from "../model";
+import type { Area, PageTemplate, TemplateElement } from "../model";
 
-/** 1mm in points. Rulings are quoted in millimetres everywhere paper is sold. */
+/** 1mm in points. */
 const MM = 72 / 25.4;
 
 /** Half an inch. Wide enough that a rule near the edge does not read as a printing error. */
 const MARGIN_PT = 36;
 /** 8.7mm, the ruling on a standard college pad. */
 const RULED_PT = 8.7 * MM;
+/** 1.75in — the cue column on a Cornell sheet. */
+const CORNELL_CUE_PT = 126;
+/** 2in — the summary band along the bottom of a Cornell sheet. */
+const CORNELL_SUMMARY_PT = 144;
+/** The margin rule on a legal pad, and the inset the ruling starts at to clear it. */
+const LEGAL_RULE_PT = 42;
+
+/** Insets from every edge. */
+function inset(all: number): Area {
+  return { topPt: all, rightPt: all, bottomPt: all, leftPt: all };
+}
 
 /**
  * Paper colour, and the rulings that go with it.
@@ -86,13 +99,21 @@ export type TemplateGroup = {
  * exist wherever the notebook is opened next.
  */
 export function templateGroups(tone: PaperTone): TemplateGroup[] {
-  const PAPER = tone.backgroundColor;
-  const RULE = tone.rule;
-  const RULE_STRONG = tone.ruleStrong;
-  const DOT = tone.dot;
-  const ACCENT = tone.accent;
+  const page = inset(MARGIN_PT);
   // Kept distinct per tone so a "recent templates" list can tell white ruled from black ruled.
   const at = (id: string) => `${id}-${tone.id}`;
+
+  const ruled = (area: Area, spacingPt: number): TemplateElement => ({
+    kind: "horizontal_lines",
+    area,
+    spacingPt,
+    color: tone.rule,
+    weightPt: 0.5,
+  });
+  const grid = (spacingPt: number, weightPt: number, color: string): TemplateElement[] => [
+    { kind: "horizontal_lines", area: page, spacingPt, color, weightPt },
+    { kind: "vertical_lines", area: page, spacingPt, color, weightPt },
+  ];
 
   return [
     {
@@ -101,7 +122,7 @@ export function templateGroups(tone: PaperTone): TemplateGroup[] {
       templates: [
         // Cream used to be a template of its own. It is a paper colour, and every template can
         // have it now, so it does not need to be a separate sheet.
-        { id: at("blank"), name: "Blank", backgroundColor: PAPER, marginPt: 0, elements: [] },
+        { id: at("blank"), name: "Blank", backgroundColor: tone.backgroundColor, elements: [] },
       ],
     },
     {
@@ -111,53 +132,89 @@ export function templateGroups(tone: PaperTone): TemplateGroup[] {
         {
           id: at("ruled-wide"),
           name: "Ruled",
-          backgroundColor: PAPER,
-          marginPt: MARGIN_PT,
-          elements: [
-            { kind: "horizontal_lines", spacingPt: RULED_PT, offsetPt: 0, color: RULE, weightPt: 0.5 },
-          ],
+          backgroundColor: tone.backgroundColor,
+          elements: [ruled(page, RULED_PT)],
         },
         {
           id: at("ruled-narrow"),
           name: "Ruled narrow",
-          backgroundColor: PAPER,
-          marginPt: MARGIN_PT,
-          elements: [
-            { kind: "horizontal_lines", spacingPt: 6 * MM, offsetPt: 0, color: RULE, weightPt: 0.5 },
-          ],
+          backgroundColor: tone.backgroundColor,
+          elements: [ruled(page, 6 * MM)],
         },
         {
           id: at("legal"),
           name: "Legal pad",
-          backgroundColor: PAPER,
-          // Wider on the left so the ruling starts clear of the margin rule.
-          marginPt: 54,
+          backgroundColor: tone.backgroundColor,
           elements: [
-            { kind: "rule", edge: "left", offsetPt: 42, color: ACCENT, weightPt: 0.7 },
-            { kind: "horizontal_lines", spacingPt: RULED_PT, offsetPt: 0, color: RULE, weightPt: 0.5 },
+            {
+              kind: "rule",
+              area: inset(MARGIN_PT),
+              edge: "left",
+              offsetPt: LEGAL_RULE_PT,
+              color: tone.accent,
+              weightPt: 0.7,
+            },
+            // Starts clear of the margin rule rather than crossing it.
+            ruled(
+              { topPt: MARGIN_PT, rightPt: MARGIN_PT, bottomPt: MARGIN_PT, leftPt: LEGAL_RULE_PT },
+              RULED_PT,
+            ),
           ],
         },
         {
           id: at("cornell"),
           name: "Cornell",
-          backgroundColor: PAPER,
-          marginPt: MARGIN_PT,
-          // The cue column 1.75in from the left and the summary band 2in up from the bottom are
-          // what make it Cornell rather than ruled paper.
+          backgroundColor: tone.backgroundColor,
+          // The cue column and the summary band are what make it Cornell rather than ruled
+          // paper, and they only work if they bound the ruling instead of being drawn over it.
           elements: [
-            { kind: "horizontal_lines", spacingPt: RULED_PT, offsetPt: 0, color: RULE, weightPt: 0.5 },
-            { kind: "rule", edge: "left", offsetPt: 126, color: RULE_STRONG, weightPt: 0.9 },
-            { kind: "rule", edge: "bottom", offsetPt: 144, color: RULE_STRONG, weightPt: 0.9 },
+            {
+              kind: "rule",
+              area: {
+                topPt: MARGIN_PT,
+                rightPt: MARGIN_PT,
+                bottomPt: CORNELL_SUMMARY_PT,
+                leftPt: MARGIN_PT,
+              },
+              edge: "left",
+              offsetPt: CORNELL_CUE_PT,
+              color: tone.ruleStrong,
+              weightPt: 0.9,
+            },
+            {
+              kind: "rule",
+              area: inset(MARGIN_PT),
+              edge: "bottom",
+              offsetPt: CORNELL_SUMMARY_PT,
+              color: tone.ruleStrong,
+              weightPt: 0.9,
+            },
+            ruled(
+              {
+                topPt: MARGIN_PT,
+                rightPt: MARGIN_PT,
+                bottomPt: CORNELL_SUMMARY_PT,
+                leftPt: CORNELL_CUE_PT,
+              },
+              RULED_PT,
+            ),
           ],
         },
         {
           id: at("columns-two"),
           name: "Two columns",
-          backgroundColor: PAPER,
-          marginPt: MARGIN_PT,
+          backgroundColor: tone.backgroundColor,
           elements: [
-            { kind: "rule", edge: "left", offsetPt: 297.64, color: RULE_STRONG, weightPt: 0.7 },
-            { kind: "horizontal_lines", spacingPt: RULED_PT, offsetPt: 0, color: RULE, weightPt: 0.5 },
+            {
+              kind: "rule",
+              area: inset(MARGIN_PT),
+              // Centre-relative, so the divider stays in the middle on A5 and A3 alike.
+              edge: "center_x",
+              offsetPt: 0,
+              color: tone.ruleStrong,
+              weightPt: 0.7,
+            },
+            ruled(page, RULED_PT),
           ],
         },
       ],
@@ -169,35 +226,25 @@ export function templateGroups(tone: PaperTone): TemplateGroup[] {
         {
           id: at("squared-5mm"),
           name: "Squared",
-          backgroundColor: PAPER,
-          marginPt: MARGIN_PT,
-          elements: [
-            { kind: "horizontal_lines", spacingPt: 5 * MM, offsetPt: 0, color: RULE, weightPt: 0.4 },
-            { kind: "vertical_lines", spacingPt: 5 * MM, offsetPt: 0, color: RULE, weightPt: 0.4 },
-          ],
+          backgroundColor: tone.backgroundColor,
+          elements: grid(5 * MM, 0.4, tone.rule),
         },
         {
           id: at("squared-10mm"),
           name: "Squared wide",
-          backgroundColor: PAPER,
-          marginPt: MARGIN_PT,
-          elements: [
-            { kind: "horizontal_lines", spacingPt: 10 * MM, offsetPt: 0, color: RULE, weightPt: 0.4 },
-            { kind: "vertical_lines", spacingPt: 10 * MM, offsetPt: 0, color: RULE, weightPt: 0.4 },
-          ],
+          backgroundColor: tone.backgroundColor,
+          elements: grid(10 * MM, 0.4, tone.rule),
         },
         {
           id: at("graph-5mm"),
           name: "Graph",
-          backgroundColor: PAPER,
-          marginPt: MARGIN_PT,
-          // Every fifth line heavier, which is what makes a graph grid countable rather than just
-          // dense. Both spacings share an origin, so the heavy lines land on light ones.
+          backgroundColor: tone.backgroundColor,
+          // Every fifth line heavier, which is what makes a graph grid countable rather than
+          // just dense. 25mm is a multiple of 5mm and both share this area, so the resolver's
+          // centring puts the heavy lines exactly on light ones.
           elements: [
-            { kind: "horizontal_lines", spacingPt: 5 * MM, offsetPt: 0, color: RULE, weightPt: 0.3 },
-            { kind: "vertical_lines", spacingPt: 5 * MM, offsetPt: 0, color: RULE, weightPt: 0.3 },
-            { kind: "horizontal_lines", spacingPt: 25 * MM, offsetPt: 0, color: RULE_STRONG, weightPt: 0.7 },
-            { kind: "vertical_lines", spacingPt: 25 * MM, offsetPt: 0, color: RULE_STRONG, weightPt: 0.7 },
+            ...grid(5 * MM, 0.3, tone.rule),
+            ...grid(25 * MM, 0.7, tone.ruleStrong),
           ],
         },
       ],
@@ -209,16 +256,14 @@ export function templateGroups(tone: PaperTone): TemplateGroup[] {
         {
           id: at("dotted-5mm"),
           name: "Dotted",
-          backgroundColor: PAPER,
-          marginPt: MARGIN_PT,
-          elements: [{ kind: "dots", spacingPt: 5 * MM, offsetPt: 0, color: DOT, radiusPt: 0.6 }],
+          backgroundColor: tone.backgroundColor,
+          elements: [{ kind: "dots", area: page, spacingPt: 5 * MM, color: tone.dot, radiusPt: 0.6 }],
         },
         {
           id: at("dotted-10mm"),
           name: "Dotted wide",
-          backgroundColor: PAPER,
-          marginPt: MARGIN_PT,
-          elements: [{ kind: "dots", spacingPt: 10 * MM, offsetPt: 0, color: DOT, radiusPt: 0.7 }],
+          backgroundColor: tone.backgroundColor,
+          elements: [{ kind: "dots", area: page, spacingPt: 10 * MM, color: tone.dot, radiusPt: 0.7 }],
         },
       ],
     },
