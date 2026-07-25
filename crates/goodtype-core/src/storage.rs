@@ -260,6 +260,7 @@ pub fn create_page(
     selected_root: &Path,
     modified_at: &str,
     position: &PagePosition,
+    background: Option<&PageBackground>,
 ) -> Result<NotebookSnapshot, StorageError> {
     if modified_at.is_empty() || modified_at.len() > 64 {
         return invalid("page timestamp must be present and bounded");
@@ -291,7 +292,11 @@ pub fn create_page(
         id: id.clone(),
         revision: 1,
         geometry: manifest.default_page.geometry.clone(),
-        background: manifest.default_page.background.clone(),
+        // The notebook default is the fallback, not the rule: picking a template for one page
+        // should not change what the next blank page looks like.
+        background: background
+            .cloned()
+            .unwrap_or_else(|| manifest.default_page.background.clone()),
         objects: Vec::new(),
         reading_order: Vec::new(),
         ink_layers: vec![InkLayerReference {
@@ -1618,12 +1623,20 @@ fn invalid_error(message: &str) -> StorageError {
 }
 
 fn validate_background(root: &Path, background: &PageBackground) -> Result<(), StorageError> {
-    if let PageBackground::Pdf { source_path, .. } = background {
-        validate_relative(source_path)?;
-        if !is_in_directory(source_path, "references") {
-            return Err(StorageError::InvalidPath(source_path.clone()));
+    match background {
+        PageBackground::Plain { .. } => {}
+        PageBackground::Pdf { source_path, .. } => {
+            validate_relative(source_path)?;
+            if !is_in_directory(source_path, "references") {
+                return Err(StorageError::InvalidPath(source_path.clone()));
+            }
+            resolve_existing(root, source_path)?;
         }
-        resolve_existing(root, source_path)?;
+        // Checked on the way in so that anything already on disk can be resolved and drawn
+        // without a renderer having to second-guess it.
+        PageBackground::Template { template } => {
+            crate::template::validate(template).map_err(invalid_error)?
+        }
     }
     Ok(())
 }
@@ -2116,8 +2129,13 @@ mod tests {
         let notebook_root = temporary.path().join("notebook");
         create_notebook(&notebook_root, &snapshot()).unwrap();
 
-        let second =
-            create_page(&notebook_root, "2026-07-23T18:00:00Z", &PagePosition::Last).unwrap();
+        let second = create_page(
+            &notebook_root,
+            "2026-07-23T18:00:00Z",
+            &PagePosition::Last,
+            None,
+        )
+        .unwrap();
         assert_eq!(second.manifest.pages.len(), 2);
         assert_eq!(second.page.id, "page-002");
         assert!(second.page.objects.is_empty());
@@ -2572,8 +2590,13 @@ mod tests {
                 .collect()
         };
 
-        let appended =
-            create_page(&notebook_root, "2026-07-25T09:00:00Z", &PagePosition::Last).unwrap();
+        let appended = create_page(
+            &notebook_root,
+            "2026-07-25T09:00:00Z",
+            &PagePosition::Last,
+            None,
+        )
+        .unwrap();
         assert_eq!(order(&appended), ["page-001", "page-002"]);
 
         let before = create_page(
@@ -2582,6 +2605,7 @@ mod tests {
             &PagePosition::Before {
                 page_id: "page-001".into(),
             },
+            None,
         )
         .unwrap();
         assert_eq!(order(&before), ["page-003", "page-001", "page-002"]);
@@ -2593,6 +2617,7 @@ mod tests {
             &PagePosition::After {
                 page_id: "page-001".into(),
             },
+            None,
         )
         .unwrap();
         assert_eq!(
@@ -2608,6 +2633,7 @@ mod tests {
                 &PagePosition::After {
                     page_id: "page-404".into(),
                 },
+                None,
             )
             .is_err()
         );
@@ -2618,8 +2644,20 @@ mod tests {
         let temporary = tempfile::tempdir().unwrap();
         let notebook_root = temporary.path().join("notebook");
         create_notebook(&notebook_root, &snapshot()).unwrap();
-        create_page(&notebook_root, "2026-07-23T19:00:00Z", &PagePosition::Last).unwrap();
-        create_page(&notebook_root, "2026-07-23T19:01:00Z", &PagePosition::Last).unwrap();
+        create_page(
+            &notebook_root,
+            "2026-07-23T19:00:00Z",
+            &PagePosition::Last,
+            None,
+        )
+        .unwrap();
+        create_page(
+            &notebook_root,
+            "2026-07-23T19:01:00Z",
+            &PagePosition::Last,
+            None,
+        )
+        .unwrap();
 
         let reordered = reorder_pages(
             &notebook_root,

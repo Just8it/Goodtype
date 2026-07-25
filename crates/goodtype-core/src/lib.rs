@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod outline;
 pub mod storage;
+pub mod template;
 
 pub const SCHEMA_VERSION: u32 = 1;
 
@@ -39,15 +40,27 @@ pub struct PageGeometry {
     pub height_pt: f64,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(
     tag = "kind",
     rename_all = "snake_case",
     rename_all_fields = "camelCase"
 )]
 pub enum PageBackground {
-    Plain { color: String },
-    Pdf { source_path: String, page: u32 },
+    Plain {
+        color: String,
+    },
+    Pdf {
+        source_path: String,
+        page: u32,
+    },
+    /// Ruled, dotted, or squared paper. The definition is stored on the page rather than
+    /// referenced by id, for the same reason a stroke stores its resolved nib parameters instead
+    /// of a pen name: a notebook opened on a machine that never had the template still has to
+    /// look like itself.
+    Template {
+        template: template::PageTemplate,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
