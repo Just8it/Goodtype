@@ -9,7 +9,7 @@ use goodtype_core::storage::{
     SearchHit,
 };
 
-use goodtype_core::PageBackground;
+use goodtype_core::{PageBackground, PageGeometry};
 
 use crate::workspace::{AllowedRoots, ensure_allowed};
 
@@ -116,12 +116,19 @@ pub async fn create_page(
     modified_at: String,
     position: PagePosition,
     background: Option<PageBackground>,
+    geometry: Option<PageGeometry>,
 ) -> Result<NotebookSnapshot, String> {
     let root = ensure_allowed(&roots, &root)?;
     let histories = NotebookHistories(histories.0.clone());
     tauri::async_runtime::spawn_blocking(move || {
-        let snapshot = storage::create_page(&root, &modified_at, &position, background.as_ref())
-            .map_err(message)?;
+        let snapshot = storage::create_page(
+            &root,
+            &modified_at,
+            &position,
+            background.as_ref(),
+            geometry.as_ref(),
+        )
+        .map_err(message)?;
         let page_id = snapshot.page.id;
         with_history(&histories, root, page_id.clone(), |root, history| {
             storage::observe_page(root, &page_id, history)

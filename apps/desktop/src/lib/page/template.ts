@@ -38,6 +38,35 @@ export function resolveTemplate(template: PageTemplate, geometry: PageGeometry):
           shapes.push({ kind: "line", x1: x, y1: box.top, x2: x, y2: box.bottom, color: element.color, weightPt: element.weightPt });
         }
         break;
+      case "grid": {
+        const xs = centred(box.left, box.right, element.spacingPt);
+        const ys = centred(box.top, box.bottom, element.spacingPt);
+        if (xs.length === 0 || ys.length === 0) break;
+        const x0 = xs[0];
+        const x1 = xs[xs.length - 1];
+        const y0 = ys[0];
+        const y1 = ys[ys.length - 1];
+        const major = element.major;
+        const heavy = (index: number, count: number) =>
+          major && major.every > 0 && Math.abs(index - Math.floor(count / 2)) % major.every === 0
+            ? major
+            : null;
+        // Minor lines first, then the major ones over them, so a heavy rule reads as sitting on
+        // the grid rather than being interrupted by it.
+        for (const wantMajor of [false, true]) {
+          ys.forEach((y, index) => {
+            const found = heavy(index, ys.length);
+            if (Boolean(found) !== wantMajor) return;
+            shapes.push({ kind: "line", x1: x0, y1: y, x2: x1, y2: y, color: found?.color ?? element.color, weightPt: found?.weightPt ?? element.weightPt });
+          });
+          xs.forEach((x, index) => {
+            const found = heavy(index, xs.length);
+            if (Boolean(found) !== wantMajor) return;
+            shapes.push({ kind: "line", x1: x, y1: y0, x2: x, y2: y1, color: found?.color ?? element.color, weightPt: found?.weightPt ?? element.weightPt });
+          });
+        }
+        break;
+      }
       case "dots": {
         const columns = centred(box.left, box.right, element.spacingPt);
         for (const cy of centred(box.top, box.bottom, element.spacingPt)) {

@@ -13,13 +13,17 @@
 // square is 5mm on A5 and on A3, with the leftover split evenly between both margins rather than
 // dumped against one edge.
 
-import type { Area, PageTemplate, TemplateElement } from "../model";
+import type { Area, GridMajor, PageTemplate, TemplateElement } from "../model";
 
 /** 1mm in points. */
 const MM = 72 / 25.4;
 
-/** Half an inch. Wide enough that a rule near the edge does not read as a printing error. */
-const MARGIN_PT = 36;
+/**
+ * 5mm. Half an inch was a printer's margin, and it wasted a band of page all the way round on a
+ * surface that has no printer and no gutter — the ruling should reach nearly to the edge, the
+ * way squared paper in a pad does.
+ */
+const MARGIN_PT = 5 * MM;
 /** 8.7mm, the ruling on a standard college pad. */
 const RULED_PT = 8.7 * MM;
 /** 1.75in — the cue column on a Cornell sheet. */
@@ -110,10 +114,14 @@ export function templateGroups(tone: PaperTone): TemplateGroup[] {
     color: tone.rule,
     weightPt: 0.5,
   });
-  const grid = (spacingPt: number, weightPt: number, color: string): TemplateElement[] => [
-    { kind: "horizontal_lines", area: page, spacingPt, color, weightPt },
-    { kind: "vertical_lines", area: page, spacingPt, color, weightPt },
-  ];
+  const grid = (spacingPt: number, weightPt: number, major: GridMajor | null): TemplateElement => ({
+    kind: "grid",
+    area: page,
+    spacingPt,
+    color: tone.rule,
+    weightPt,
+    major,
+  });
 
   return [
     {
@@ -227,25 +235,22 @@ export function templateGroups(tone: PaperTone): TemplateGroup[] {
           id: at("squared-5mm"),
           name: "Squared",
           backgroundColor: tone.backgroundColor,
-          elements: grid(5 * MM, 0.4, tone.rule),
+          elements: [grid(5 * MM, 0.4, null)],
         },
         {
           id: at("squared-10mm"),
           name: "Squared wide",
           backgroundColor: tone.backgroundColor,
-          elements: grid(10 * MM, 0.4, tone.rule),
+          elements: [grid(10 * MM, 0.4, null)],
         },
         {
           id: at("graph-5mm"),
           name: "Graph",
           backgroundColor: tone.backgroundColor,
           // Every fifth line heavier, which is what makes a graph grid countable rather than
-          // just dense. 25mm is a multiple of 5mm and both share this area, so the resolver's
-          // centring puts the heavy lines exactly on light ones.
-          elements: [
-            ...grid(5 * MM, 0.3, tone.rule),
-            ...grid(25 * MM, 0.7, tone.ruleStrong),
-          ],
+          // just dense. As one grid rather than two, the heavy lines are the same lines — they
+          // cannot drift off the fine ones or stop short of them.
+          elements: [grid(5 * MM, 0.3, { every: 5, color: tone.ruleStrong, weightPt: 0.7 })],
         },
       ],
     },

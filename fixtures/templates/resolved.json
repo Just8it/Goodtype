@@ -1,7 +1,10 @@
 [
   {
     "name": "ruling is centred in its area, so the gap at each edge is the same",
-    "geometry": { "widthPt": 100, "heightPt": 100 },
+    "geometry": {
+      "widthPt": 100,
+      "heightPt": 100
+    },
     "template": {
       "id": "ruled-test",
       "name": "Ruled",
@@ -9,7 +12,12 @@
       "elements": [
         {
           "kind": "horizontal_lines",
-          "area": { "topPt": 10, "rightPt": 10, "bottomPt": 10, "leftPt": 10 },
+          "area": {
+            "topPt": 10,
+            "rightPt": 10,
+            "bottomPt": 10,
+            "leftPt": 10
+          },
           "spacingPt": 25,
           "color": "#DDE1E6",
           "weightPt": 0.5
@@ -17,14 +25,41 @@
       ]
     },
     "expected": [
-      { "kind": "line", "x1": 10, "y1": 25, "x2": 90, "y2": 25, "color": "#DDE1E6", "weightPt": 0.5 },
-      { "kind": "line", "x1": 10, "y1": 50, "x2": 90, "y2": 50, "color": "#DDE1E6", "weightPt": 0.5 },
-      { "kind": "line", "x1": 10, "y1": 75, "x2": 90, "y2": 75, "color": "#DDE1E6", "weightPt": 0.5 }
+      {
+        "kind": "line",
+        "x1": 10,
+        "y1": 25,
+        "x2": 90,
+        "y2": 25,
+        "color": "#DDE1E6",
+        "weightPt": 0.5
+      },
+      {
+        "kind": "line",
+        "x1": 10,
+        "y1": 50,
+        "x2": 90,
+        "y2": 50,
+        "color": "#DDE1E6",
+        "weightPt": 0.5
+      },
+      {
+        "kind": "line",
+        "x1": 10,
+        "y1": 75,
+        "x2": 90,
+        "y2": 75,
+        "color": "#DDE1E6",
+        "weightPt": 0.5
+      }
     ]
   },
   {
     "name": "an exact fit puts a line on each margin and none left over",
-    "geometry": { "widthPt": 100, "heightPt": 100 },
+    "geometry": {
+      "widthPt": 100,
+      "heightPt": 100
+    },
     "template": {
       "id": "exact-test",
       "name": "Exact",
@@ -32,7 +67,12 @@
       "elements": [
         {
           "kind": "horizontal_lines",
-          "area": { "topPt": 10, "rightPt": 10, "bottomPt": 10, "leftPt": 10 },
+          "area": {
+            "topPt": 10,
+            "rightPt": 10,
+            "bottomPt": 10,
+            "leftPt": 10
+          },
           "spacingPt": 20,
           "color": "#DDE1E6",
           "weightPt": 0.5
@@ -40,94 +80,409 @@
       ]
     },
     "expected": [
-      { "kind": "line", "x1": 10, "y1": 10, "x2": 90, "y2": 10, "color": "#DDE1E6", "weightPt": 0.5 },
-      { "kind": "line", "x1": 10, "y1": 30, "x2": 90, "y2": 30, "color": "#DDE1E6", "weightPt": 0.5 },
-      { "kind": "line", "x1": 10, "y1": 50, "x2": 90, "y2": 50, "color": "#DDE1E6", "weightPt": 0.5 },
-      { "kind": "line", "x1": 10, "y1": 70, "x2": 90, "y2": 70, "color": "#DDE1E6", "weightPt": 0.5 },
-      { "kind": "line", "x1": 10, "y1": 90, "x2": 90, "y2": 90, "color": "#DDE1E6", "weightPt": 0.5 }
+      {
+        "kind": "line",
+        "x1": 10,
+        "y1": 10,
+        "x2": 90,
+        "y2": 10,
+        "color": "#DDE1E6",
+        "weightPt": 0.5
+      },
+      {
+        "kind": "line",
+        "x1": 10,
+        "y1": 30,
+        "x2": 90,
+        "y2": 30,
+        "color": "#DDE1E6",
+        "weightPt": 0.5
+      },
+      {
+        "kind": "line",
+        "x1": 10,
+        "y1": 50,
+        "x2": 90,
+        "y2": 50,
+        "color": "#DDE1E6",
+        "weightPt": 0.5
+      },
+      {
+        "kind": "line",
+        "x1": 10,
+        "y1": 70,
+        "x2": 90,
+        "y2": 70,
+        "color": "#DDE1E6",
+        "weightPt": 0.5
+      },
+      {
+        "kind": "line",
+        "x1": 10,
+        "y1": 90,
+        "x2": 90,
+        "y2": 90,
+        "color": "#DDE1E6",
+        "weightPt": 0.5
+      }
     ]
   },
   {
-    "name": "squared paper is both axes of the same grid, horizontals first",
-    "geometry": { "widthPt": 90, "heightPt": 70 },
+    "name": "a grid closes its corners: every rule stops on the outermost line of the other axis",
+    "geometry": {
+      "widthPt": 90,
+      "heightPt": 70
+    },
     "template": {
-      "id": "squared-test",
-      "name": "Squared",
+      "id": "grid-test",
+      "name": "Grid",
       "backgroundColor": "#FBFBF9",
       "elements": [
         {
-          "kind": "horizontal_lines",
-          "area": { "topPt": 10, "rightPt": 10, "bottomPt": 10, "leftPt": 10 },
+          "kind": "grid",
+          "area": {
+            "topPt": 10,
+            "rightPt": 10,
+            "bottomPt": 10,
+            "leftPt": 10
+          },
           "spacingPt": 25,
           "color": "#DDE1E6",
-          "weightPt": 0.4
-        },
-        {
-          "kind": "vertical_lines",
-          "area": { "topPt": 10, "rightPt": 10, "bottomPt": 10, "leftPt": 10 },
-          "spacingPt": 30,
-          "color": "#DDE1E6",
-          "weightPt": 0.4
+          "weightPt": 0.4,
+          "major": null
         }
       ]
     },
     "expected": [
-      { "kind": "line", "x1": 10, "y1": 10, "x2": 80, "y2": 10, "color": "#DDE1E6", "weightPt": 0.4 },
-      { "kind": "line", "x1": 10, "y1": 35, "x2": 80, "y2": 35, "color": "#DDE1E6", "weightPt": 0.4 },
-      { "kind": "line", "x1": 10, "y1": 60, "x2": 80, "y2": 60, "color": "#DDE1E6", "weightPt": 0.4 },
-      { "kind": "line", "x1": 15, "y1": 10, "x2": 15, "y2": 60, "color": "#DDE1E6", "weightPt": 0.4 },
-      { "kind": "line", "x1": 45, "y1": 10, "x2": 45, "y2": 60, "color": "#DDE1E6", "weightPt": 0.4 },
-      { "kind": "line", "x1": 75, "y1": 10, "x2": 75, "y2": 60, "color": "#DDE1E6", "weightPt": 0.4 }
+      {
+        "kind": "line",
+        "x1": 20.0,
+        "y1": 10.0,
+        "x2": 70.0,
+        "y2": 10.0,
+        "color": "#DDE1E6",
+        "weightPt": 0.4
+      },
+      {
+        "kind": "line",
+        "x1": 20.0,
+        "y1": 35.0,
+        "x2": 70.0,
+        "y2": 35.0,
+        "color": "#DDE1E6",
+        "weightPt": 0.4
+      },
+      {
+        "kind": "line",
+        "x1": 20.0,
+        "y1": 60.0,
+        "x2": 70.0,
+        "y2": 60.0,
+        "color": "#DDE1E6",
+        "weightPt": 0.4
+      },
+      {
+        "kind": "line",
+        "x1": 20.0,
+        "y1": 10.0,
+        "x2": 20.0,
+        "y2": 60.0,
+        "color": "#DDE1E6",
+        "weightPt": 0.4
+      },
+      {
+        "kind": "line",
+        "x1": 45.0,
+        "y1": 10.0,
+        "x2": 45.0,
+        "y2": 60.0,
+        "color": "#DDE1E6",
+        "weightPt": 0.4
+      },
+      {
+        "kind": "line",
+        "x1": 70.0,
+        "y1": 10.0,
+        "x2": 70.0,
+        "y2": 60.0,
+        "color": "#DDE1E6",
+        "weightPt": 0.4
+      }
     ]
   },
   {
-    "name": "a coarse spacing lands on the fine one it is a multiple of",
-    "geometry": { "widthPt": 100, "heightPt": 40 },
+    "name": "major lines are the same lines, drawn heavier, counted out from the centre",
+    "geometry": {
+      "widthPt": 100,
+      "heightPt": 100
+    },
     "template": {
-      "id": "graph-test",
-      "name": "Graph",
+      "id": "grid-test",
+      "name": "Grid",
       "backgroundColor": "#FBFBF9",
       "elements": [
         {
-          "kind": "vertical_lines",
-          "area": { "topPt": 10, "rightPt": 13, "bottomPt": 10, "leftPt": 13 },
+          "kind": "grid",
+          "area": {
+            "topPt": 10,
+            "rightPt": 10,
+            "bottomPt": 10,
+            "leftPt": 10
+          },
           "spacingPt": 6,
           "color": "#DDE1E6",
-          "weightPt": 0.3
-        },
-        {
-          "kind": "vertical_lines",
-          "area": { "topPt": 10, "rightPt": 13, "bottomPt": 10, "leftPt": 13 },
-          "spacingPt": 18,
-          "color": "#BFC7D0",
-          "weightPt": 0.7
+          "weightPt": 0.3,
+          "major": {
+            "every": 3,
+            "color": "#BFC7D0",
+            "weightPt": 0.7
+          }
         }
       ]
     },
     "expected": [
-      { "kind": "line", "x1": 14, "y1": 10, "x2": 14, "y2": 30, "color": "#DDE1E6", "weightPt": 0.3 },
-      { "kind": "line", "x1": 20, "y1": 10, "x2": 20, "y2": 30, "color": "#DDE1E6", "weightPt": 0.3 },
-      { "kind": "line", "x1": 26, "y1": 10, "x2": 26, "y2": 30, "color": "#DDE1E6", "weightPt": 0.3 },
-      { "kind": "line", "x1": 32, "y1": 10, "x2": 32, "y2": 30, "color": "#DDE1E6", "weightPt": 0.3 },
-      { "kind": "line", "x1": 38, "y1": 10, "x2": 38, "y2": 30, "color": "#DDE1E6", "weightPt": 0.3 },
-      { "kind": "line", "x1": 44, "y1": 10, "x2": 44, "y2": 30, "color": "#DDE1E6", "weightPt": 0.3 },
-      { "kind": "line", "x1": 50, "y1": 10, "x2": 50, "y2": 30, "color": "#DDE1E6", "weightPt": 0.3 },
-      { "kind": "line", "x1": 56, "y1": 10, "x2": 56, "y2": 30, "color": "#DDE1E6", "weightPt": 0.3 },
-      { "kind": "line", "x1": 62, "y1": 10, "x2": 62, "y2": 30, "color": "#DDE1E6", "weightPt": 0.3 },
-      { "kind": "line", "x1": 68, "y1": 10, "x2": 68, "y2": 30, "color": "#DDE1E6", "weightPt": 0.3 },
-      { "kind": "line", "x1": 74, "y1": 10, "x2": 74, "y2": 30, "color": "#DDE1E6", "weightPt": 0.3 },
-      { "kind": "line", "x1": 80, "y1": 10, "x2": 80, "y2": 30, "color": "#DDE1E6", "weightPt": 0.3 },
-      { "kind": "line", "x1": 86, "y1": 10, "x2": 86, "y2": 30, "color": "#DDE1E6", "weightPt": 0.3 },
-      { "kind": "line", "x1": 14, "y1": 10, "x2": 14, "y2": 30, "color": "#BFC7D0", "weightPt": 0.7 },
-      { "kind": "line", "x1": 32, "y1": 10, "x2": 32, "y2": 30, "color": "#BFC7D0", "weightPt": 0.7 },
-      { "kind": "line", "x1": 50, "y1": 10, "x2": 50, "y2": 30, "color": "#BFC7D0", "weightPt": 0.7 },
-      { "kind": "line", "x1": 68, "y1": 10, "x2": 68, "y2": 30, "color": "#BFC7D0", "weightPt": 0.7 },
-      { "kind": "line", "x1": 86, "y1": 10, "x2": 86, "y2": 30, "color": "#BFC7D0", "weightPt": 0.7 }
+      {
+        "kind": "line",
+        "x1": 14.0,
+        "y1": 20.0,
+        "x2": 86.0,
+        "y2": 20.0,
+        "color": "#DDE1E6",
+        "weightPt": 0.3
+      },
+      {
+        "kind": "line",
+        "x1": 14.0,
+        "y1": 26.0,
+        "x2": 86.0,
+        "y2": 26.0,
+        "color": "#DDE1E6",
+        "weightPt": 0.3
+      },
+      {
+        "kind": "line",
+        "x1": 14.0,
+        "y1": 38.0,
+        "x2": 86.0,
+        "y2": 38.0,
+        "color": "#DDE1E6",
+        "weightPt": 0.3
+      },
+      {
+        "kind": "line",
+        "x1": 14.0,
+        "y1": 44.0,
+        "x2": 86.0,
+        "y2": 44.0,
+        "color": "#DDE1E6",
+        "weightPt": 0.3
+      },
+      {
+        "kind": "line",
+        "x1": 14.0,
+        "y1": 56.0,
+        "x2": 86.0,
+        "y2": 56.0,
+        "color": "#DDE1E6",
+        "weightPt": 0.3
+      },
+      {
+        "kind": "line",
+        "x1": 14.0,
+        "y1": 62.0,
+        "x2": 86.0,
+        "y2": 62.0,
+        "color": "#DDE1E6",
+        "weightPt": 0.3
+      },
+      {
+        "kind": "line",
+        "x1": 14.0,
+        "y1": 74.0,
+        "x2": 86.0,
+        "y2": 74.0,
+        "color": "#DDE1E6",
+        "weightPt": 0.3
+      },
+      {
+        "kind": "line",
+        "x1": 14.0,
+        "y1": 80.0,
+        "x2": 86.0,
+        "y2": 80.0,
+        "color": "#DDE1E6",
+        "weightPt": 0.3
+      },
+      {
+        "kind": "line",
+        "x1": 20.0,
+        "y1": 14.0,
+        "x2": 20.0,
+        "y2": 86.0,
+        "color": "#DDE1E6",
+        "weightPt": 0.3
+      },
+      {
+        "kind": "line",
+        "x1": 26.0,
+        "y1": 14.0,
+        "x2": 26.0,
+        "y2": 86.0,
+        "color": "#DDE1E6",
+        "weightPt": 0.3
+      },
+      {
+        "kind": "line",
+        "x1": 38.0,
+        "y1": 14.0,
+        "x2": 38.0,
+        "y2": 86.0,
+        "color": "#DDE1E6",
+        "weightPt": 0.3
+      },
+      {
+        "kind": "line",
+        "x1": 44.0,
+        "y1": 14.0,
+        "x2": 44.0,
+        "y2": 86.0,
+        "color": "#DDE1E6",
+        "weightPt": 0.3
+      },
+      {
+        "kind": "line",
+        "x1": 56.0,
+        "y1": 14.0,
+        "x2": 56.0,
+        "y2": 86.0,
+        "color": "#DDE1E6",
+        "weightPt": 0.3
+      },
+      {
+        "kind": "line",
+        "x1": 62.0,
+        "y1": 14.0,
+        "x2": 62.0,
+        "y2": 86.0,
+        "color": "#DDE1E6",
+        "weightPt": 0.3
+      },
+      {
+        "kind": "line",
+        "x1": 74.0,
+        "y1": 14.0,
+        "x2": 74.0,
+        "y2": 86.0,
+        "color": "#DDE1E6",
+        "weightPt": 0.3
+      },
+      {
+        "kind": "line",
+        "x1": 80.0,
+        "y1": 14.0,
+        "x2": 80.0,
+        "y2": 86.0,
+        "color": "#DDE1E6",
+        "weightPt": 0.3
+      },
+      {
+        "kind": "line",
+        "x1": 14.0,
+        "y1": 14.0,
+        "x2": 86.0,
+        "y2": 14.0,
+        "color": "#BFC7D0",
+        "weightPt": 0.7
+      },
+      {
+        "kind": "line",
+        "x1": 14.0,
+        "y1": 32.0,
+        "x2": 86.0,
+        "y2": 32.0,
+        "color": "#BFC7D0",
+        "weightPt": 0.7
+      },
+      {
+        "kind": "line",
+        "x1": 14.0,
+        "y1": 50.0,
+        "x2": 86.0,
+        "y2": 50.0,
+        "color": "#BFC7D0",
+        "weightPt": 0.7
+      },
+      {
+        "kind": "line",
+        "x1": 14.0,
+        "y1": 68.0,
+        "x2": 86.0,
+        "y2": 68.0,
+        "color": "#BFC7D0",
+        "weightPt": 0.7
+      },
+      {
+        "kind": "line",
+        "x1": 14.0,
+        "y1": 86.0,
+        "x2": 86.0,
+        "y2": 86.0,
+        "color": "#BFC7D0",
+        "weightPt": 0.7
+      },
+      {
+        "kind": "line",
+        "x1": 14.0,
+        "y1": 14.0,
+        "x2": 14.0,
+        "y2": 86.0,
+        "color": "#BFC7D0",
+        "weightPt": 0.7
+      },
+      {
+        "kind": "line",
+        "x1": 32.0,
+        "y1": 14.0,
+        "x2": 32.0,
+        "y2": 86.0,
+        "color": "#BFC7D0",
+        "weightPt": 0.7
+      },
+      {
+        "kind": "line",
+        "x1": 50.0,
+        "y1": 14.0,
+        "x2": 50.0,
+        "y2": 86.0,
+        "color": "#BFC7D0",
+        "weightPt": 0.7
+      },
+      {
+        "kind": "line",
+        "x1": 68.0,
+        "y1": 14.0,
+        "x2": 68.0,
+        "y2": 86.0,
+        "color": "#BFC7D0",
+        "weightPt": 0.7
+      },
+      {
+        "kind": "line",
+        "x1": 86.0,
+        "y1": 14.0,
+        "x2": 86.0,
+        "y2": 86.0,
+        "color": "#BFC7D0",
+        "weightPt": 0.7
+      }
     ]
   },
   {
     "name": "a dot grid runs rows outer, columns inner",
-    "geometry": { "widthPt": 40, "heightPt": 40 },
+    "geometry": {
+      "widthPt": 40,
+      "heightPt": 40
+    },
     "template": {
       "id": "dotted-test",
       "name": "Dotted",
@@ -135,7 +490,12 @@
       "elements": [
         {
           "kind": "dots",
-          "area": { "topPt": 10, "rightPt": 10, "bottomPt": 10, "leftPt": 10 },
+          "area": {
+            "topPt": 10,
+            "rightPt": 10,
+            "bottomPt": 10,
+            "leftPt": 10
+          },
           "spacingPt": 10,
           "color": "#C7CDD4",
           "radiusPt": 0.6
@@ -143,20 +503,77 @@
       ]
     },
     "expected": [
-      { "kind": "dot", "cx": 10, "cy": 10, "radiusPt": 0.6, "color": "#C7CDD4" },
-      { "kind": "dot", "cx": 20, "cy": 10, "radiusPt": 0.6, "color": "#C7CDD4" },
-      { "kind": "dot", "cx": 30, "cy": 10, "radiusPt": 0.6, "color": "#C7CDD4" },
-      { "kind": "dot", "cx": 10, "cy": 20, "radiusPt": 0.6, "color": "#C7CDD4" },
-      { "kind": "dot", "cx": 20, "cy": 20, "radiusPt": 0.6, "color": "#C7CDD4" },
-      { "kind": "dot", "cx": 30, "cy": 20, "radiusPt": 0.6, "color": "#C7CDD4" },
-      { "kind": "dot", "cx": 10, "cy": 30, "radiusPt": 0.6, "color": "#C7CDD4" },
-      { "kind": "dot", "cx": 20, "cy": 30, "radiusPt": 0.6, "color": "#C7CDD4" },
-      { "kind": "dot", "cx": 30, "cy": 30, "radiusPt": 0.6, "color": "#C7CDD4" }
+      {
+        "kind": "dot",
+        "cx": 10,
+        "cy": 10,
+        "radiusPt": 0.6,
+        "color": "#C7CDD4"
+      },
+      {
+        "kind": "dot",
+        "cx": 20,
+        "cy": 10,
+        "radiusPt": 0.6,
+        "color": "#C7CDD4"
+      },
+      {
+        "kind": "dot",
+        "cx": 30,
+        "cy": 10,
+        "radiusPt": 0.6,
+        "color": "#C7CDD4"
+      },
+      {
+        "kind": "dot",
+        "cx": 10,
+        "cy": 20,
+        "radiusPt": 0.6,
+        "color": "#C7CDD4"
+      },
+      {
+        "kind": "dot",
+        "cx": 20,
+        "cy": 20,
+        "radiusPt": 0.6,
+        "color": "#C7CDD4"
+      },
+      {
+        "kind": "dot",
+        "cx": 30,
+        "cy": 20,
+        "radiusPt": 0.6,
+        "color": "#C7CDD4"
+      },
+      {
+        "kind": "dot",
+        "cx": 10,
+        "cy": 30,
+        "radiusPt": 0.6,
+        "color": "#C7CDD4"
+      },
+      {
+        "kind": "dot",
+        "cx": 20,
+        "cy": 30,
+        "radiusPt": 0.6,
+        "color": "#C7CDD4"
+      },
+      {
+        "kind": "dot",
+        "cx": 30,
+        "cy": 30,
+        "radiusPt": 0.6,
+        "color": "#C7CDD4"
+      }
     ]
   },
   {
     "name": "rules are measured from the page edge and span their own area",
-    "geometry": { "widthPt": 100, "heightPt": 80 },
+    "geometry": {
+      "widthPt": 100,
+      "heightPt": 80
+    },
     "template": {
       "id": "rules-test",
       "name": "Rules",
@@ -164,7 +581,12 @@
       "elements": [
         {
           "kind": "rule",
-          "area": { "topPt": 10, "rightPt": 10, "bottomPt": 20, "leftPt": 10 },
+          "area": {
+            "topPt": 10,
+            "rightPt": 10,
+            "bottomPt": 20,
+            "leftPt": 10
+          },
           "edge": "left",
           "offsetPt": 24,
           "color": "#E5645E",
@@ -172,7 +594,12 @@
         },
         {
           "kind": "rule",
-          "area": { "topPt": 10, "rightPt": 10, "bottomPt": 20, "leftPt": 10 },
+          "area": {
+            "topPt": 10,
+            "rightPt": 10,
+            "bottomPt": 20,
+            "leftPt": 10
+          },
           "edge": "right",
           "offsetPt": 8,
           "color": "#C7CDD4",
@@ -180,7 +607,12 @@
         },
         {
           "kind": "rule",
-          "area": { "topPt": 10, "rightPt": 10, "bottomPt": 20, "leftPt": 10 },
+          "area": {
+            "topPt": 10,
+            "rightPt": 10,
+            "bottomPt": 20,
+            "leftPt": 10
+          },
           "edge": "top",
           "offsetPt": 12,
           "color": "#C7CDD4",
@@ -188,7 +620,12 @@
         },
         {
           "kind": "rule",
-          "area": { "topPt": 10, "rightPt": 10, "bottomPt": 20, "leftPt": 10 },
+          "area": {
+            "topPt": 10,
+            "rightPt": 10,
+            "bottomPt": 20,
+            "leftPt": 10
+          },
           "edge": "bottom",
           "offsetPt": 16,
           "color": "#C7CDD4",
@@ -197,15 +634,50 @@
       ]
     },
     "expected": [
-      { "kind": "line", "x1": 24, "y1": 10, "x2": 24, "y2": 60, "color": "#E5645E", "weightPt": 1 },
-      { "kind": "line", "x1": 92, "y1": 10, "x2": 92, "y2": 60, "color": "#C7CDD4", "weightPt": 0.5 },
-      { "kind": "line", "x1": 10, "y1": 12, "x2": 90, "y2": 12, "color": "#C7CDD4", "weightPt": 0.5 },
-      { "kind": "line", "x1": 10, "y1": 64, "x2": 90, "y2": 64, "color": "#C7CDD4", "weightPt": 0.5 }
+      {
+        "kind": "line",
+        "x1": 24,
+        "y1": 10,
+        "x2": 24,
+        "y2": 60,
+        "color": "#E5645E",
+        "weightPt": 1
+      },
+      {
+        "kind": "line",
+        "x1": 92,
+        "y1": 10,
+        "x2": 92,
+        "y2": 60,
+        "color": "#C7CDD4",
+        "weightPt": 0.5
+      },
+      {
+        "kind": "line",
+        "x1": 10,
+        "y1": 12,
+        "x2": 90,
+        "y2": 12,
+        "color": "#C7CDD4",
+        "weightPt": 0.5
+      },
+      {
+        "kind": "line",
+        "x1": 10,
+        "y1": 64,
+        "x2": 90,
+        "y2": 64,
+        "color": "#C7CDD4",
+        "weightPt": 0.5
+      }
     ]
   },
   {
     "name": "an area wider than the page leaves nothing to draw",
-    "geometry": { "widthPt": 40, "heightPt": 40 },
+    "geometry": {
+      "widthPt": 40,
+      "heightPt": 40
+    },
     "template": {
       "id": "cramped-test",
       "name": "Cramped",
@@ -213,14 +685,24 @@
       "elements": [
         {
           "kind": "horizontal_lines",
-          "area": { "topPt": 25, "rightPt": 25, "bottomPt": 25, "leftPt": 25 },
+          "area": {
+            "topPt": 25,
+            "rightPt": 25,
+            "bottomPt": 25,
+            "leftPt": 25
+          },
           "spacingPt": 5,
           "color": "#DDE1E6",
           "weightPt": 0.5
         },
         {
           "kind": "rule",
-          "area": { "topPt": 25, "rightPt": 25, "bottomPt": 25, "leftPt": 25 },
+          "area": {
+            "topPt": 25,
+            "rightPt": 25,
+            "bottomPt": 25,
+            "leftPt": 25
+          },
           "edge": "left",
           "offsetPt": 4,
           "color": "#E5645E",

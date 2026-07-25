@@ -7,6 +7,7 @@
     NotebookManifest,
     Page,
     PageBackground,
+    PageGeometry,
     PageObject,
     PagePosition,
     PageTemplate,
@@ -32,6 +33,13 @@
   import type { AddPageGroup, AddPageSource, AddPageWhere } from "../workspace/addPage";
   import { templatePreviewSvg } from "../page/template";
   import { PAPER_TONES, templateGroups } from "../page/templates";
+  import {
+    DEFAULT_PAGE_SIZE,
+    PAGE_SIZES,
+    describeGeometry,
+    geometryOf,
+    type Orientation,
+  } from "../page/sizes";
   import SideEditor from "./SideEditor.svelte";
   import {
     AssetUrlCache,
@@ -80,6 +88,8 @@
   type PageEntry = {
     id: string;
     path: string;
+    /** From the manifest's hint until the page loads, then from the page itself. */
+    geometry: PageGeometry;
     snapshot: NotebookSnapshot | null;
   };
   type TypstTransform = {
@@ -144,6 +154,8 @@
   let activeInkLayerPath = $state("ink/page-001-layer-001.json");
   /** The paper under the active page, kept so committing does not overwrite it. */
   let activeBackground = $state<PageBackground>({ kind: "plain", color: "#ffffff" });
+  /** The active page's own size. Same reason: committing used to write one fixed geometry back. */
+  let activeGeometry = $state<PageGeometry>({ widthPt: PAGE_WIDTH_PT, heightPt: PAGE_HEIGHT_PT });
   let pageEntries = $state<PageEntry[]>([]);
   let pageOpen = $state(false);
   let busy = $state(true);
@@ -338,6 +350,14 @@
   let addPageWhere = $state<AddPageWhere>("after");
   /** Paper colour the picker is showing. Remembered for the same reason the position is. */
   let addPageToneId = $state(PAPER_TONES[0].id);
+  let addPageSizeId = $state(DEFAULT_PAGE_SIZE.id);
+  let addPageOrientation = $state<Orientation>("portrait");
+  const addPageGeometry = $derived(
+    geometryOf(
+      PAGE_SIZES.find((size) => size.id === addPageSizeId) ?? DEFAULT_PAGE_SIZE,
+      addPageOrientation,
+    ),
+  );
   let metricsOpen = $state(false);
   const touchPoints = new Map<number, Point>();
   let pinchStart: PinchStart | null = null;
@@ -573,7 +593,7 @@
       schemaVersion: 1,
       id: activePageId,
       revision,
-      geometry: { widthPt: PAGE_WIDTH_PT, heightPt: PAGE_HEIGHT_PT },
+      geometry: activeGeometry,
       background: activeBackground,
       objects,
       readingOrder: grouped
@@ -585,7 +605,7 @@
       schemaVersion: 1,
       id: `notebook-${Date.now().toString(36)}`,
       title: notebookTitle,
-      pages: [{ id: page.id, path: "pages/page-001.json" }],
+      pages: [{ id: page.id, path: "pages/page-001.json", geometry: page.geometry }],
       defaultPage: {
         geometry: page.geometry,
         background: page.background,
@@ -650,9 +670,11 @@
     const activeInk = snapshot.page.inkLayers[0];
     activeInkLayerId = activeInk?.id ?? `${activePageId}-ink-001`;
     activeInkLayerPath = activeInk?.path ?? `ink/${activePageId}-layer-001.json`;
-    // Carried through so `buildSnapshot` can put it back. It used to write a hardcoded white
-    // page, which meant the first stroke on a template erased the paper it was drawn on.
+    // Carried through so `buildSnapshot` can put them back. It used to write a hardcoded white
+    // A4 page, which meant the first stroke on a template erased the paper it was drawn on and
+    // flattened any page that was not A4.
     activeBackground = snapshot.page.background;
+    activeGeometry = snapshot.page.geometry;
     pageEntries = snapshot.manifest.pages.map((page) => ({
       ...page,
       snapshot:
@@ -1205,7 +1227,11 @@
     }
   }
 
-  async function addPage(position: PagePosition, background: PageBackground | null = null) {
+  async function addPage(
+    position: PagePosition,
+    background: PageBackground | null = null,
+    geometry: PageGeometry | null = null,
+  ) {
     moreOpen = false;
     addPageOpen = false;
     if (!(await persist())) return;
@@ -1216,6 +1242,7 @@
         modifiedAt: new Date().toISOString(),
         position,
         background,
+        geometry,
       });
       pageEntries = [];
       applySnapshot(snapshot);
@@ -1246,12 +1273,15 @@
    * stroke follows when it stores its resolved nib parameters instead of a pen name.
    */
   function addPageGroups(): AddPageGroup[] {
-    const geometry = { widthPt: PAGE_WIDTH_PT, heightPt: PAGE_HEIGHT_PT };
+    // Previews are drawn at the size the new page will be, so a swatch of A5 squared paper shows
+    // the same 5mm cells at A5's proportions rather than A4's.
+    const geometry = addPageGeometry;
     const template = (source: PageTemplate): AddPageSource => ({
       id: source.id,
       label: source.name,
       preview: templatePreviewSvg(source, geometry),
-      onSelect: (position) => void addPage(position, { kind: "template", template: source }),
+      onSelect: (position) =>
+        void addPage(position, { kind: "template", template: source }, geometry),
     });
     return [
       {
@@ -1261,13 +1291,14 @@
           {
             id: "same",
             label: "Same paper",
-            detail:
-              activeBackground.kind === "template" ? activeBackground.template.name : "Plain",
+            detail: describeGeometry(activeGeometry),
             preview:
               activeBackground.kind === "template"
-                ? templatePreviewSvg(activeBackground.template, geometry)
+                ? templatePreviewSvg(activeBackground.template, activeGeometry)
                 : undefined,
-            onSelect: (position) => void addPage(position, activeBackground),
+            // Matches this page outright — its paper *and* its size — rather than picking up
+            // whatever size is selected above.
+            onSelect: (position) => void addPage(position, activeBackground, activeGeometry),
           },
         ],
       },
@@ -2334,12 +2365,18 @@
               groups={addPageGroups()}
               tones={PAPER_TONES}
               toneId={addPageToneId}
+              sizes={PAGE_SIZES}
+              sizeId={addPageSizeId}
+              orientation={addPageOrientation}
+              previewAspect={addPageGeometry.widthPt / addPageGeometry.heightPt}
               currentPageId={activePageId}
               {pageNumber}
               {pageCount}
               canPlaceRelative={pageCount > 0 && Boolean(activePageId)}
               onWhereChange={(next) => (addPageWhere = next)}
               onToneChange={(next) => (addPageToneId = next)}
+              onSizeChange={(next) => (addPageSizeId = next)}
+              onOrientationChange={(next) => (addPageOrientation = next)}
               onClose={() => (addPageOpen = false)}
             />
           {/if}
@@ -2409,6 +2446,10 @@
       <div class="page-scroll-content" bind:this={pageViewport}>
         {#each pageEntries as entry, index (entry.id)}
           {@const active = entry.id === activePageId}
+          <!-- The active page's own state wins; a neighbour that has loaded knows its real size,
+               and one that has not falls back to the manifest's hint so the scroller still
+               reserves the right amount of room for it. -->
+          {@const box = active ? activeGeometry : (entry.snapshot?.page.geometry ?? entry.geometry)}
           <article
             class:active-page={active}
             class="page-stack-item"
@@ -2418,8 +2459,8 @@
             use:observePage={entry.id}
           >
             <span class="page-number">Page {index + 1}</span>
-            <div class="page-frame" use:trackActiveFrame={active} style:width={`${PAGE_WIDTH_PT * zoom}px`} style:height={`${PAGE_HEIGHT_PT * zoom}px`}>
-              <div class="page" style:width={`${PAGE_WIDTH_PT}px`} style:height={`${PAGE_HEIGHT_PT}px`} style:transform={`scale(${zoom})`}>
+            <div class="page-frame" use:trackActiveFrame={active} style:width={`${box.widthPt * zoom}px`} style:height={`${box.heightPt * zoom}px`}>
+              <div class="page" style:width={`${box.widthPt}px`} style:height={`${box.heightPt}px`} style:transform={`scale(${zoom})`}>
                 {#if active || entry.snapshot}
                   <PageSurface
                     blocks={active ? activeBlockViews : blockViewsFromSnapshot(entry.snapshot!)}
@@ -2428,8 +2469,8 @@
                     strokes={active ? strokes : neighborStrokesFor(entry)}
                     selectedStrokeIds={active ? selectedStrokeIds : []}
                     background={active ? activeBackground : (entry.snapshot?.page.background ?? { kind: "plain", color: "#ffffff" })}
-                    pageWidthPt={PAGE_WIDTH_PT}
-                    pageHeightPt={PAGE_HEIGHT_PT}
+                    pageWidthPt={box.widthPt}
+                    pageHeightPt={box.heightPt}
                     {zoom}
                     interactive={active}
                     {root}

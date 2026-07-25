@@ -13,8 +13,8 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tempfile::NamedTempFile;
 
 use crate::{
-    InkLayer, InkLayerReference, NotebookManifest, Page, PageBackground, PageObject, PageReference,
-    SCHEMA_VERSION,
+    InkLayer, InkLayerReference, NotebookManifest, Page, PageBackground, PageGeometry, PageObject,
+    PageReference, SCHEMA_VERSION,
 };
 
 pub const MAX_IMAGE_BYTES: usize = 20 * 1024 * 1024;
@@ -261,6 +261,7 @@ pub fn create_page(
     modified_at: &str,
     position: &PagePosition,
     background: Option<&PageBackground>,
+    geometry: Option<&PageGeometry>,
 ) -> Result<NotebookSnapshot, StorageError> {
     if modified_at.is_empty() || modified_at.len() > 64 {
         return invalid("page timestamp must be present and bounded");
@@ -279,11 +280,17 @@ pub fn create_page(
         PagePosition::Before { page_id } => neighbour_index(&manifest, page_id)?,
         PagePosition::After { page_id } => neighbour_index(&manifest, page_id)? + 1,
     };
+    // The notebook default is the fallback, not the rule: picking a size or a template for one
+    // page should not change what the next page comes out as.
+    let geometry = geometry
+        .cloned()
+        .unwrap_or_else(|| manifest.default_page.geometry.clone());
     manifest.pages.insert(
         insert_at,
         PageReference {
             id: id.clone(),
             path: page_path,
+            geometry: geometry.clone(),
         },
     );
     manifest.modified_at = modified_at.to_owned();
@@ -291,7 +298,7 @@ pub fn create_page(
         schema_version: SCHEMA_VERSION,
         id: id.clone(),
         revision: 1,
-        geometry: manifest.default_page.geometry.clone(),
+        geometry,
         // The notebook default is the fallback, not the rule: picking a template for one page
         // should not change what the next blank page looks like.
         background: background
@@ -587,6 +594,7 @@ pub fn duplicate_page(
         PageReference {
             id: new_id.clone(),
             path: new_page_path,
+            geometry: source.page.geometry.clone(),
         },
     );
     manifest.modified_at = modified_at.to_owned();
@@ -2011,6 +2019,10 @@ mod tests {
                 pages: vec![PageReference {
                     id: "page-001".into(),
                     path: "pages/page-001.json".into(),
+                    geometry: PageGeometry {
+                        width_pt: 595.0,
+                        height_pt: 842.0,
+                    },
                 }],
                 default_page: PageDefaults {
                     geometry: PageGeometry {
@@ -2133,6 +2145,7 @@ mod tests {
             &notebook_root,
             "2026-07-23T18:00:00Z",
             &PagePosition::Last,
+            None,
             None,
         )
         .unwrap();
@@ -2595,6 +2608,7 @@ mod tests {
             "2026-07-25T09:00:00Z",
             &PagePosition::Last,
             None,
+            None,
         )
         .unwrap();
         assert_eq!(order(&appended), ["page-001", "page-002"]);
@@ -2605,6 +2619,7 @@ mod tests {
             &PagePosition::Before {
                 page_id: "page-001".into(),
             },
+            None,
             None,
         )
         .unwrap();
@@ -2617,6 +2632,7 @@ mod tests {
             &PagePosition::After {
                 page_id: "page-001".into(),
             },
+            None,
             None,
         )
         .unwrap();
@@ -2634,6 +2650,7 @@ mod tests {
                     page_id: "page-404".into(),
                 },
                 None,
+                None,
             )
             .is_err()
         );
@@ -2649,12 +2666,14 @@ mod tests {
             "2026-07-23T19:00:00Z",
             &PagePosition::Last,
             None,
+            None,
         )
         .unwrap();
         create_page(
             &notebook_root,
             "2026-07-23T19:01:00Z",
             &PagePosition::Last,
+            None,
             None,
         )
         .unwrap();

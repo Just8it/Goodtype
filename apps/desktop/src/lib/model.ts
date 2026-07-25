@@ -12,7 +12,11 @@ export type NotebookManifest = {
   modifiedAt: string;
 };
 
-export type PageReference = { id: string; path: string };
+/**
+ * `geometry` is a layout hint, not the truth — the page file is authoritative. Pages load
+ * lazily, and the scroller has to reserve the right amount of room for one it has not read yet.
+ */
+export type PageReference = { id: string; path: string; geometry: PageGeometry };
 export type PageGeometry = { widthPt: number; heightPt: number };
 export type PageDefaults = { geometry: PageGeometry; background: PageBackground };
 export type PageBackground =
@@ -44,8 +48,24 @@ export type Area = { topPt: number; rightPt: number; bottomPt: number; leftPt: n
 export type TemplateElement =
   | { kind: "horizontal_lines"; area: Area; spacingPt: number; color: string; weightPt: number }
   | { kind: "vertical_lines"; area: Area; spacingPt: number; color: string; weightPt: number }
+  /**
+   * Squared paper: both axes at once, so each rule can run from the first line of the other axis
+   * to the last and close the grid's corners. Two independent line sets cannot — they overshoot
+   * each other and leave a stub cell all the way round the edge.
+   */
+  | {
+      kind: "grid";
+      area: Area;
+      spacingPt: number;
+      color: string;
+      weightPt: number;
+      /** Every n-th line from the centre drawn heavier. Null for plain squares. */
+      major: GridMajor | null;
+    }
   | { kind: "dots"; area: Area; spacingPt: number; color: string; radiusPt: number }
   | { kind: "rule"; area: Area; edge: TemplateEdge; offsetPt: number; color: string; weightPt: number };
+
+export type GridMajor = { every: number; color: string; weightPt: number };
 
 /**
  * What a rule's offset is measured from. The centre variants exist because a column divider has

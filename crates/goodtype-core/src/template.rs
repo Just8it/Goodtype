@@ -23,11 +23,14 @@
 //!
 //! - The first and last lines are equidistant from their edges, whatever the page size, because
 //!   `(available / 2) - n * spacing` is the same gap at each end by construction.
-//! - Spacings that are multiples of one another **land on each other**. Graph paper is a 5mm grid
-//!   with every fifth line heavier; as two elements sharing an area and a centre, the 25mm lines
-//!   fall exactly on 5mm lines instead of drifting through them.
+//! - The layout is symmetric, so anything else placed about the same centre agrees with it —
+//!   which is what lets a grid's major lines be the *same* lines, drawn heavier.
 //!
 //! Spacing itself is never adjusted to fit. A 5mm square is 5mm or the paper is lying.
+//!
+//! Squared paper is one `Grid` rather than two line sets for a related reason: independent sets
+//! each span the whole area, so they overshoot each other's outermost lines and leave a stub
+//! cell with a tail hanging off it all the way round the edge.
 //!
 //! `resolve` is the half that must not drift from its TypeScript mirror in
 //! `apps/desktop/src/lib/page/template.ts`. Both are pinned by `fixtures/templates/resolved.json`.
@@ -94,6 +97,21 @@ pub enum TemplateElement {
         color: String,
         weight_pt: f64,
     },
+    /// Squared paper: both axes at once, and deliberately not two line sets.
+    ///
+    /// Independent sets each span the whole area, but their first and last lines sit inset from
+    /// it, so the rules overshoot the outermost lines of the other axis and every cell around
+    /// the edge is a stub with a tail hanging off it. A grid knows both extents, so it can run
+    /// each rule from the first line of the other axis to the last and close its own corners.
+    Grid {
+        area: Area,
+        spacing_pt: f64,
+        color: String,
+        weight_pt: f64,
+        /// Every n-th line from the centre drawn heavier — what makes a graph grid countable
+        /// rather than just dense. `None` for plain squares.
+        major: Option<GridMajor>,
+    },
     /// A dot grid. One spacing for both axes — dotted paper with different spacings reads as a
     /// mistake rather than a choice.
     Dots {
@@ -113,6 +131,16 @@ pub enum TemplateElement {
         color: String,
         weight_pt: f64,
     },
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct GridMajor {
+    /// Counted outwards from the centre line, so the heavy lines stay symmetric with the grid
+    /// they sit on however the page is sized.
+    pub every: u32,
+    pub color: String,
+    pub weight_pt: f64,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -197,6 +225,61 @@ pub fn resolve<'a>(template: &'a PageTemplate, geometry: &PageGeometry) -> Vec<T
                         color,
                         weight_pt: *weight_pt,
                     });
+                }
+            }
+            TemplateElement::Grid {
+                spacing_pt,
+                color,
+                weight_pt,
+                major,
+                ..
+            } => {
+                let xs = centred(box_.left, box_.right, *spacing_pt);
+                let ys = centred(box_.top, box_.bottom, *spacing_pt);
+                let (Some(&x0), Some(&x1), Some(&y0), Some(&y1)) =
+                    (xs.first(), xs.last(), ys.first(), ys.last())
+                else {
+                    continue;
+                };
+                let heavy = |index: usize, count: usize| {
+                    major.as_ref().filter(|major| {
+                        major.every > 0
+                            && index
+                                .abs_diff(count / 2)
+                                .is_multiple_of(major.every as usize)
+                    })
+                };
+                // Minor lines first, then the major ones over them, so a heavy rule reads as
+                // sitting on the grid rather than being interrupted by it.
+                for want_major in [false, true] {
+                    for (index, &y) in ys.iter().enumerate() {
+                        let found = heavy(index, ys.len());
+                        if found.is_some() != want_major {
+                            continue;
+                        }
+                        shapes.push(TemplateShape::Line {
+                            x1: x0,
+                            y1: y,
+                            x2: x1,
+                            y2: y,
+                            color: found.map_or(color.as_str(), |major| major.color.as_str()),
+                            weight_pt: found.map_or(*weight_pt, |major| major.weight_pt),
+                        });
+                    }
+                    for (index, &x) in xs.iter().enumerate() {
+                        let found = heavy(index, xs.len());
+                        if found.is_some() != want_major {
+                            continue;
+                        }
+                        shapes.push(TemplateShape::Line {
+                            x1: x,
+                            y1: y0,
+                            x2: x,
+                            y2: y1,
+                            color: found.map_or(color.as_str(), |major| major.color.as_str()),
+                            weight_pt: found.map_or(*weight_pt, |major| major.weight_pt),
+                        });
+                    }
                 }
             }
             TemplateElement::Dots {
@@ -284,6 +367,7 @@ fn element_area(element: &TemplateElement) -> &Area {
     match element {
         TemplateElement::HorizontalLines { area, .. }
         | TemplateElement::VerticalLines { area, .. }
+        | TemplateElement::Grid { area, .. }
         | TemplateElement::Dots { area, .. }
         | TemplateElement::Rule { area, .. } => area,
     }
@@ -343,6 +427,27 @@ pub fn validate(template: &PageTemplate) -> Result<(), &'static str> {
                 ..
             } => {
                 valid_spacing(*spacing_pt)?;
+                (color, *weight_pt)
+            }
+            TemplateElement::Grid {
+                spacing_pt,
+                color,
+                weight_pt,
+                major,
+                ..
+            } => {
+                valid_spacing(*spacing_pt)?;
+                if let Some(major) = major {
+                    if major.every > 64 {
+                        return Err("template grid major interval must be at most 64");
+                    }
+                    if !valid_color(&major.color) {
+                        return Err("template element colour must be a hex colour");
+                    }
+                    if !major.weight_pt.is_finite() || !(0.0..=8.0).contains(&major.weight_pt) {
+                        return Err("template line weight and dot radius must be 0 to 8pt");
+                    }
+                }
                 (color, *weight_pt)
             }
             TemplateElement::Dots {
@@ -531,52 +636,93 @@ mod tests {
         assert_eq!(x_of(&resolved[0]) - 10.0, 90.0 - x_of(&resolved[2]));
     }
 
-    /// Graph paper is a fine grid with every fifth line heavier. If the two spacings were each
-    /// centred on their own leftover, the heavy lines would drift through the fine ones.
+    /// A grid's rules have to stop on the outermost line of the other axis. Two independent line
+    /// sets each span the whole area, so they overshoot each other and leave a stub cell with a
+    /// tail hanging off it all the way round the edge — which is what this replaced.
     #[test]
-    fn a_coarse_spacing_lands_on_the_fine_one_it_is_a_multiple_of() {
-        let graph = template(vec![
-            TemplateElement::VerticalLines {
-                area: area(36.0),
-                spacing_pt: 5.0,
-                color: "#DDDDDD".into(),
-                weight_pt: 0.3,
+    fn a_grid_closes_its_own_corners() {
+        let squared = template(vec![TemplateElement::Grid {
+            area: area(10.0),
+            spacing_pt: 25.0,
+            color: "#DDDDDD".into(),
+            weight_pt: 0.4,
+            major: None,
+        }]);
+        let resolved = resolve(
+            &squared,
+            &PageGeometry {
+                width_pt: 90.0,
+                height_pt: 70.0,
             },
-            TemplateElement::VerticalLines {
-                area: area(36.0),
-                spacing_pt: 25.0,
+        );
+        let horizontals: Vec<_> = resolved
+            .iter()
+            .filter(|shape| matches!(shape, TemplateShape::Line { y1, y2, .. } if y1 == y2))
+            .collect();
+        let verticals: Vec<_> = resolved
+            .iter()
+            .filter(|shape| matches!(shape, TemplateShape::Line { x1, x2, .. } if x1 == x2))
+            .collect();
+        assert_eq!((horizontals.len(), verticals.len()), (3, 3));
+
+        let TemplateShape::Line { x1: left, .. } = verticals[0] else {
+            panic!("expected a line");
+        };
+        let TemplateShape::Line { x1: right, .. } = verticals[2] else {
+            panic!("expected a line");
+        };
+        for horizontal in horizontals {
+            let TemplateShape::Line { x1, x2, .. } = horizontal else {
+                panic!("expected a line");
+            };
+            assert_eq!((x1, x2), (left, right), "a rule overshot the grid");
+        }
+    }
+
+    /// Graph paper is a fine grid with every fifth line heavier. As one grid the heavy lines are
+    /// the same lines, so they cannot drift off the fine ones or stop short of them.
+    #[test]
+    fn major_lines_sit_exactly_on_the_grid_they_count() {
+        let graph = template(vec![TemplateElement::Grid {
+            area: area(36.0),
+            spacing_pt: 5.0,
+            color: "#DDDDDD".into(),
+            weight_pt: 0.3,
+            major: Some(GridMajor {
+                every: 5,
                 color: "#BBBBBB".into(),
                 weight_pt: 0.7,
+            }),
+        }]);
+        let resolved = resolve(
+            &graph,
+            &PageGeometry {
+                width_pt: 595.2756,
+                height_pt: 841.8898,
             },
-        ]);
-        let geometry = PageGeometry {
-            width_pt: 595.2756,
-            height_pt: 841.8898,
+        );
+        let xs = |weight: f64| -> Vec<f64> {
+            resolved
+                .iter()
+                .filter_map(|shape| match shape {
+                    TemplateShape::Line {
+                        x1, x2, weight_pt, ..
+                    } if x1 == x2 && *weight_pt == weight => Some(*x1),
+                    _ => None,
+                })
+                .collect()
         };
-        let resolved = resolve(&graph, &geometry);
-        let fine: Vec<f64> = resolved
-            .iter()
-            .filter_map(|shape| match shape {
-                TemplateShape::Line {
-                    x1, weight_pt: 0.3, ..
-                } => Some(*x1),
-                _ => None,
-            })
-            .collect();
-        let coarse: Vec<f64> = resolved
-            .iter()
-            .filter_map(|shape| match shape {
-                TemplateShape::Line {
-                    x1, weight_pt: 0.7, ..
-                } => Some(*x1),
-                _ => None,
-            })
-            .collect();
-        assert!(!coarse.is_empty());
-        for heavy in coarse {
+        let fine = xs(0.3);
+        let heavy = xs(0.7);
+        assert!(!heavy.is_empty());
+        // Every fifth line is promoted, so the fine set is short by exactly what the heavy set
+        // holds rather than the two being drawn on top of each other.
+        assert!(!fine.iter().any(|light| heavy.contains(light)));
+        for line in &heavy {
+            let steps = (line - heavy[0]) / 25.0;
             assert!(
-                fine.iter().any(|light| (light - heavy).abs() < 1e-9),
-                "heavy line at {heavy} misses every fine line"
+                (steps - steps.round()).abs() < 1e-9,
+                "heavy line at {line} is not on the 25pt interval"
             );
         }
     }

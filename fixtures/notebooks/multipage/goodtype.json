@@ -3,13 +3,40 @@
   "id": "notebook-multipage",
   "title": "Multipage Goodtype fixture",
   "pages": [
-    { "id": "page-001", "path": "pages/page-001.json" },
-    { "id": "page-002", "path": "pages/page-002.json" },
-    { "id": "page-003", "path": "pages/page-003.json" }
+    {
+      "id": "page-001",
+      "path": "pages/page-001.json",
+      "geometry": {
+        "widthPt": 595.0,
+        "heightPt": 842.0
+      }
+    },
+    {
+      "id": "page-002",
+      "path": "pages/page-002.json",
+      "geometry": {
+        "widthPt": 595.0,
+        "heightPt": 842.0
+      }
+    },
+    {
+      "id": "page-003",
+      "path": "pages/page-003.json",
+      "geometry": {
+        "widthPt": 595.0,
+        "heightPt": 842.0
+      }
+    }
   ],
   "defaultPage": {
-    "geometry": { "widthPt": 595.0, "heightPt": 842.0 },
-    "background": { "kind": "plain", "color": "#ffffff" }
+    "geometry": {
+      "widthPt": 595.0,
+      "heightPt": 842.0
+    },
+    "background": {
+      "kind": "plain",
+      "color": "#ffffff"
+    }
   },
   "sharedStylePath": null,
   "createdAt": "2026-07-23T00:00:00Z",

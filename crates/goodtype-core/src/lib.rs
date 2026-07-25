@@ -24,6 +24,13 @@ pub struct NotebookManifest {
 pub struct PageReference {
     pub id: String,
     pub path: String,
+    /// A layout hint, not the truth — the page file is authoritative.
+    ///
+    /// Pages load lazily, so the scroller has to reserve the right amount of room for a page it
+    /// has not read yet. Without this it would either size every frame from one assumed geometry
+    /// and jump as pages arrive, or read every page file to open a notebook, which is what lazy
+    /// loading exists to avoid. Denormalising into the index is what an index is for.
+    pub geometry: PageGeometry,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

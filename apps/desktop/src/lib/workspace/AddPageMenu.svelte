@@ -14,12 +14,18 @@
     groups,
     tones,
     toneId,
+    sizes,
+    sizeId,
+    orientation,
+    previewAspect,
     currentPageId,
     pageNumber,
     pageCount,
     canPlaceRelative,
     onWhereChange,
     onToneChange,
+    onSizeChange,
+    onOrientationChange,
     onClose,
   }: {
     where: AddPageWhere;
@@ -27,6 +33,12 @@
     /** Paper colours. Every template below is shown in whichever one is selected. */
     tones: { id: string; name: string; backgroundColor: string }[];
     toneId: string;
+    /** Page sizes, portrait. Landscape is the orientation toggle, not separate entries. */
+    sizes: { id: string; name: string; detail: string }[];
+    sizeId: string;
+    orientation: "portrait" | "landscape";
+    /** Width over height of the size being previewed, so a swatch is never a distorted page. */
+    previewAspect: number;
     /** The page "before" and "after" are relative to. */
     currentPageId: string;
     /** One-based, as the writer sees it. */
@@ -36,6 +48,8 @@
     canPlaceRelative: boolean;
     onWhereChange: (next: AddPageWhere) => void;
     onToneChange: (next: string) => void;
+    onSizeChange: (next: string) => void;
+    onOrientationChange: (next: "portrait" | "landscape") => void;
     onClose: () => void;
   } = $props();
 
@@ -84,6 +98,34 @@
     {/each}
   </div>
 
+  <div class="menu-heading">Size</div>
+  <div class="sizes" role="group" aria-label="Page size">
+    {#each sizes as size (size.id)}
+      <button
+        type="button"
+        class="size"
+        class:selected={size.id === sizeId}
+        aria-pressed={size.id === sizeId}
+        title={size.detail}
+        onclick={() => onSizeChange(size.id)}
+      >
+        {size.name}
+      </button>
+    {/each}
+  </div>
+  <div class="orientation" role="group" aria-label="Orientation">
+    {#each [{ value: "portrait", label: "Portrait" }, { value: "landscape", label: "Landscape" }] as choice (choice.value)}
+      <button
+        type="button"
+        class:selected={orientation === choice.value}
+        aria-pressed={orientation === choice.value}
+        onclick={() => onOrientationChange(choice.value as "portrait" | "landscape")}
+      >
+        {choice.label}
+      </button>
+    {/each}
+  </div>
+
   <div class="menu-heading">Paper</div>
   <div class="tones" role="group" aria-label="Paper colour">
     {#each tones as paper (paper.id)}
@@ -111,7 +153,7 @@
             disabled={source.disabled}
             onclick={() => choose(source)}
           >
-            <span class="preview" aria-hidden="true">
+            <span class="preview" style:aspect-ratio={previewAspect} aria-hidden="true">
               {#if source.preview}
                 <!-- Built from a template definition in this app, never read from a file. -->
                 {@html source.preview}
@@ -134,8 +176,8 @@
     z-index: 50;
     top: calc(100% + 8px);
     right: 0;
-    width: 306px;
-    padding: 7px;
+    width: 348px;
+    padding: 8px;
     border: 1px solid rgb(255 255 255 / 12%);
     border-radius: 11px;
     background: var(--panel);
@@ -202,6 +244,56 @@
   .where button:disabled {
     opacity: 0.4;
     cursor: default;
+  }
+
+  .sizes {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 5px;
+  }
+
+  .sizes button {
+    padding: 6px 2px;
+    border: 1px solid rgb(255 255 255 / 10%);
+    border-radius: 7px;
+    background: transparent;
+    color: var(--muted);
+    font: inherit;
+    font-size: 11px;
+    cursor: pointer;
+  }
+
+  .sizes button:hover {
+    color: var(--text);
+  }
+
+  .sizes button.selected,
+  .orientation button.selected {
+    border-color: rgb(56 182 198 / 55%);
+    background: rgb(56 182 198 / 12%);
+    color: var(--text);
+  }
+
+  .orientation {
+    display: grid;
+    margin-top: 5px;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 5px;
+  }
+
+  .orientation button {
+    padding: 6px 2px;
+    border: 1px solid rgb(255 255 255 / 10%);
+    border-radius: 7px;
+    background: transparent;
+    color: var(--muted);
+    font: inherit;
+    font-size: 11px;
+    cursor: pointer;
+  }
+
+  .orientation button:hover {
+    color: var(--text);
   }
 
   .tones {
@@ -281,11 +373,10 @@
     cursor: default;
   }
 
-  /* Kept at page proportions so a template preview is read at the shape it will actually be. */
+  /* Proportions come from the selected size, so a swatch is read at the shape it will be. */
   .preview {
     display: block;
     overflow: hidden;
-    aspect-ratio: 210 / 297;
     border-radius: 3px;
     margin-bottom: 6px;
     background: #fbfbf9;

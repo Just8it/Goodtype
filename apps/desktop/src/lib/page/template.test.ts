@@ -71,8 +71,18 @@ describe("template resolution", () => {
     for (let index = 1; index < verticals.length; index += 1) {
       expect(verticals[index].x1 - verticals[index - 1].x1).toBeCloseTo(spacing, 9);
     }
-    const left = verticals[0].x1 - 36;
-    const right = geometry.widthPt - 36 - verticals[verticals.length - 1].x1;
-    expect(left).toBeCloseTo(right, 9);
+    // Symmetric about the page centre, which is the same statement as equal margins without
+    // depending on what the library happens to use as its inset today.
+    const first = verticals[0].x1;
+    const last = verticals[verticals.length - 1].x1;
+    expect(first).toBeCloseTo(geometry.widthPt - last, 9);
+
+    // And the grid's corners are closed: every rule stops on the outermost line of the other axis.
+    const horizontals = resolveTemplate(squared, geometry).filter(
+      (shape) => shape.kind === "line" && shape.y1 === shape.y2,
+    ) as Extract<TemplateShape, { kind: "line" }>[];
+    for (const rule of horizontals) {
+      expect([rule.x1, rule.x2]).toEqual([first, last]);
+    }
   });
 });
