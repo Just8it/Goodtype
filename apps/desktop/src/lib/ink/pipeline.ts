@@ -118,6 +118,35 @@ export function smoothPoints(
   );
 }
 
+// Canonical sample precision. Raw pointer samples divided by zoom carry seventeen
+// significant digits, which no digitizer resolves and which cost roughly half of every
+// persisted ink layer. 0.01 pt is 1/7200 inch — finer than any reference device reports.
+const POSITION_DECIMALS = 2;
+const PRESSURE_DECIMALS = 3;
+const TIME_DECIMALS = 1;
+const TILT_DECIMALS = 0;
+
+function round(value: number, decimals: number): number {
+  const factor = 10 ** decimals;
+  return Math.round(value * factor) / factor;
+}
+
+/**
+ * Quantize completed samples to canonical precision. Apply once, after smoothing, on the
+ * path that produces a persisted stroke — averaging reintroduces full precision, so
+ * quantizing earlier is wasted.
+ */
+export function quantizePoints(points: StrokePoint[]): StrokePoint[] {
+  return points.map((point) => ({
+    x: round(point.x, POSITION_DECIMALS),
+    y: round(point.y, POSITION_DECIMALS),
+    pressure: round(point.pressure, PRESSURE_DECIMALS),
+    timeMs: round(point.timeMs, TIME_DECIMALS),
+    tiltX: round(point.tiltX, TILT_DECIMALS),
+    tiltY: round(point.tiltY, TILT_DECIMALS),
+  }));
+}
+
 export function replaySamples(
   samples: PointerLike[],
   viewport: ScreenViewport,
@@ -125,11 +154,13 @@ export function replaySamples(
   page: Size,
   calibration: PressureCalibration,
 ): StrokePoint[] {
-  return smoothPoints(
-    samples.map((sample) =>
-      normalizePointerSample(sample, viewport, view, page, calibration),
+  return quantizePoints(
+    smoothPoints(
+      samples.map((sample) =>
+        normalizePointerSample(sample, viewport, view, page, calibration),
+      ),
+      calibration.smoothing,
     ),
-    calibration.smoothing,
   );
 }
 

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import fixture from "../../../../../fixtures/pen-events/phase0b-replay.json";
 import type { Stroke } from "../model";
 import { maximumSampleGap, summarizeMetric } from "./metrics";
-import { pointerRole, replaySamples } from "./pipeline";
+import { pointerRole, quantizePoints, replaySamples } from "./pipeline";
 import {
   eraseStrokeAt,
   hitStroke,
@@ -71,6 +71,44 @@ describe("deterministic pen replay", () => {
     expect(erasedBoth).toEqual([]);
   });
 
+  it("quantizes completed samples to canonical precision", () => {
+    const [point] = quantizePoints([
+      {
+        x: 123.456789012345,
+        y: 234.5678901234567,
+        pressure: 0.5127384,
+        timeMs: 1234567.891234,
+        tiltX: -4.1234,
+        tiltY: 2.6789,
+      },
+    ]);
+
+    expect(point).toEqual({
+      x: 123.46,
+      y: 234.57,
+      pressure: 0.513,
+      timeMs: 1234567.9,
+      tiltX: -4,
+      tiltY: 3,
+    });
+    // Positional error stays far below what any reference digitizer resolves.
+    expect(Math.abs(point.x - 123.456789012345)).toBeLessThan(0.005);
+
+    // The payload win is in the numeric values, so measure it across a stroke's worth of
+    // samples where fixed key overhead is amortized rather than dominating.
+    const raw = Array.from({ length: 60 }, (_, index) => ({
+      x: 100 + Math.sin(index) * 123.456789012345,
+      y: 200 + Math.cos(index) * 234.5678901234567,
+      pressure: (index % 7) / 7,
+      timeMs: index * 8.3333333,
+      tiltX: -4.1234,
+      tiltY: 2.6789,
+    }));
+    const rawBytes = JSON.stringify(raw).length;
+    const quantizedBytes = JSON.stringify(quantizePoints(raw)).length;
+    expect(quantizedBytes).toBeLessThan(rawBytes * 0.7);
+  });
+
   it("summarizes recent stroke timing without changing samples", () => {
     expect(maximumSampleGap([{ timeMs: 1 }, { timeMs: 5 }, { timeMs: 8 }])).toBe(4);
     expect(
@@ -93,6 +131,9 @@ function makeStroke(id: string, points: Array<{ x: number; y: number }>): Stroke
     tool: "pen",
     color: "#111111",
     widthPt: 2,
+    pressure: true,
+    taper: 0,
+    opacity: 1,
     groupId: null,
     points: points.map((point, index) => ({
       ...point,

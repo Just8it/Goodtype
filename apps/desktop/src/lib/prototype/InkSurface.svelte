@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from "svelte";
   import type { Point } from "../geometry/coordinates";
   import { screenToPage } from "../geometry/coordinates";
   import type { Stroke, StrokePoint } from "../model";
@@ -11,11 +12,15 @@
     DEFAULT_POINTER_MAPPING,
     normalizePointerSample,
     pointerRole,
+    quantizePoints,
     smoothPoints,
     type InkTool,
     type PointerMapping,
     type PressureCalibration,
   } from "../ink/pipeline";
+  import { outlinePoints } from "../ink/outline";
+  import { paintOrder } from "../ink/paint";
+  import { straightenStroke } from "../ink/straighten";
   import {
     eraseStrokeAt,
     hitStroke,
@@ -35,6 +40,15 @@
     tool?: InkTool;
     color?: string;
     widthPt?: number;
+    /** Whether the active nib varies its width with stylus pressure. */
+    pressure?: boolean;
+    /** Fraction of the stroke's length over which each end tapers to a point. */
+    taper?: number;
+    /** Ink opacity for the active tool, 0–1. */
+    opacity?: number;
+    /** Snap an almost-straight stroke to the line it was aiming for, on release. */
+    straighten?: boolean;
+    eraseRadiusPt?: number;
     calibration?: PressureCalibration;
     pointerMapping?: PointerMapping;
     onStrokeFinalized?: (stroke: Stroke) => void;
@@ -52,6 +66,11 @@
     tool = "select",
     color = "#16212b",
     widthPt = 2,
+    pressure = true,
+    taper = 0,
+    opacity = 1,
+    straighten = false,
+    eraseRadiusPt = 8,
     calibration = DEFAULT_PRESSURE_CALIBRATION,
     pointerMapping = DEFAULT_POINTER_MAPPING,
     onStrokeFinalized,
@@ -61,11 +80,12 @@
   }: Props = $props();
 
   let surface = $state<HTMLDivElement>();
-  let completedCanvas = $state<HTMLCanvasElement>();
   let immediateCanvas = $state<HTMLCanvasElement>();
   let status = $state("No ink selected");
   let strokeCount = $state(0);
-  let localStrokes: Stroke[] = [];
+  // `$state.raw` rather than `$state`: the array is always replaced, never mutated in place, so
+  // deep-proxying five thousand strokes and their samples would be pure cost.
+  let localStrokes = $state.raw<Stroke[]>([]);
   let localSelection: string[] = [];
 
   type Gesture =
@@ -101,19 +121,31 @@
   let gesture: Gesture | null = null;
 
   $effect(() => {
+    // Reads `strokes`, never `localStrokes`: now that the local copy is reactive, reading it here
+    // would make this effect depend on its own output, and every freshly drawn stroke would be
+    // wiped by a re-run before the parent had committed it back.
     localStrokes = strokes.slice();
-    strokeCount = localStrokes.length;
+    strokeCount = strokes.length;
     localSelection = selectedStrokeIds.slice();
     pageWidthPt;
     pageHeightPt;
     zoom;
-    if (completedCanvas && immediateCanvas) {
-      sizeCanvas(completedCanvas);
-      sizeCanvas(immediateCanvas);
-      redrawCompleted();
+    // Drawing the selection box reads `localStrokes` too, so the whole canvas pass is untracked
+    // for the same reason. The canvas element itself is read outside, to stay a dependency.
+    const canvas = immediateCanvas;
+    untrack(() => {
+      if (!canvas) return;
+      sizeCanvas(canvas);
       redrawImmediate();
-    }
+    });
   });
+
+  /**
+   * Committed ink as SVG rather than canvas. Zoom becomes a transform the browser
+   * composites, so it stays crisp without JavaScript re-rasterising every stroke — which is what
+   * made zooming lag. Only filled outlines can be merged like this; stroked polylines could not.
+   */
+  const committedPaths = $derived(paintOrder(localStrokes, 0.5 / zoom));
 
   function sizeCanvas(canvas: HTMLCanvasElement): void {
     const width = Math.max(pageWidthPt, 1);
@@ -256,7 +288,6 @@
         x: point.x - gesture.start.x,
         y: point.y - gesture.start.y,
       });
-      redrawCompleted();
     } else {
       const point = pagePoint(event);
       const distance = Math.hypot(point.x - gesture.anchor.x, point.y - gesture.anchor.y);
@@ -266,7 +297,6 @@
         gesture.anchor,
         distance / gesture.startDistance,
       );
-      redrawCompleted();
     }
     redrawImmediate();
   }
@@ -276,12 +306,23 @@
     event.preventDefault();
     if (gesture.kind === "draw") {
       const commitStartedAt = performance.now();
-      const points = smoothPoints(gesture.points.concat(sample(event)), calibration.smoothing);
+      // Straighten before quantising, so the snapped angle is rounded once rather than twice, and
+      // store the result: what is committed is the straightened stroke, not a flag to reinterpret.
+      const smoothed = smoothPoints(
+        gesture.points.concat(sample(event)),
+        calibration.smoothing,
+      );
+      const points = quantizePoints(straighten ? straightenStroke(smoothed) : smoothed);
       const stroke: Stroke = {
         id: crypto.randomUUID(),
         tool: gesture.strokeTool,
         color,
-        widthPt: gesture.strokeTool === "highlighter" ? widthPt * 3 : widthPt,
+        widthPt: liveWidthPt(gesture.strokeTool),
+        // Resolved from the nib now and carried with the stroke, so reopening the notebook or
+        // exporting it never has to guess these back from the tool.
+        pressure,
+        taper,
+        opacity,
         groupId: null,
         points,
         transform: {
@@ -329,7 +370,6 @@
     ) {
       localStrokes = gesture.initial;
       if (gesture.kind === "erase") localSelection = gesture.initialSelection;
-      redrawCompleted();
     }
     finishPointer(event.pointerId);
   }
@@ -337,19 +377,17 @@
   function finishPointer(pointerId: number): void {
     gesture = null;
     if (surface?.hasPointerCapture(pointerId)) surface.releasePointerCapture(pointerId);
-    redrawCompleted();
     redrawImmediate();
   }
 
   function eraseAt(point: Point): void {
-    const next = eraseStrokeAt(localStrokes, point, 8 / zoom);
+    const next = eraseStrokeAt(localStrokes, point, eraseRadiusPt / zoom);
     if (next === localStrokes) return;
     localStrokes = next;
     strokeCount = localStrokes.length;
     localSelection = localSelection.filter((id) =>
       localStrokes.some((stroke) => stroke.id === id),
     );
-    redrawCompleted();
     redrawImmediate();
     status = "Erased one complete stroke";
   }
@@ -378,7 +416,6 @@
       onStrokesChange?.(localStrokes);
       setSelection([]);
       status = "Deleted selected ink";
-      redrawCompleted();
       return;
     }
     const amount = event.shiftKey ? 10 : 1;
@@ -393,7 +430,6 @@
       localStrokes = moveSelected(localStrokes, localSelection, deltas[event.key]);
       onStrokesChange?.(localStrokes);
       status = "Moved selected ink";
-      redrawCompleted();
       redrawImmediate();
       return;
     }
@@ -409,16 +445,8 @@
       );
       onStrokesChange?.(localStrokes);
       status = "Scaled selected ink";
-      redrawCompleted();
       redrawImmediate();
     }
-  }
-
-  function redrawCompleted(): void {
-    const context = canvasContext(completedCanvas);
-    if (!context || !completedCanvas) return;
-    context.clearRect(0, 0, completedCanvas.width, completedCanvas.height);
-    for (const stroke of localStrokes) drawStroke(context, stroke);
   }
 
   function redrawImmediate(): void {
@@ -430,9 +458,11 @@
       drawPoints(
         context,
         gesture.points,
-        gesture.strokeTool,
         color,
-        gesture.strokeTool === "highlighter" ? widthPt * 3 : widthPt,
+        liveWidthPt(gesture.strokeTool),
+        pressure,
+        taper,
+        opacity,
       );
     } else if (gesture?.kind === "lasso") {
       context.save();
@@ -445,59 +475,35 @@
     }
   }
 
-  function drawStroke(context: CanvasRenderingContext2D, stroke: Stroke): void {
-    drawPoints(
-      context,
-      stroke.points.map((point) => ({
-        ...point,
-        ...transformedPoint(stroke, point),
-      })),
-      stroke.tool,
-      stroke.color,
-      stroke.widthPt * Math.max(stroke.transform.scaleX, stroke.transform.scaleY),
-    );
-  }
-
+  /**
+   * The stroke still under the pen. It lives on canvas because immediate feedback matters more
+   * than crispness for the few milliseconds before release; on release it joins the SVG layer.
+   * Same silhouette either way, so nothing shifts at the handover.
+   */
   function drawPoints(
     context: CanvasRenderingContext2D,
     points: StrokePoint[],
-    strokeTool: "pen" | "highlighter",
     strokeColor: string,
     baseWidthPt: number,
+    usePressure: boolean,
+    strokeTaper: number,
+    strokeOpacity: number,
   ): void {
     if (points.length === 0) return;
+    const polygon = outlinePoints(points, {
+      // Below roughly half a device pixel the fill has nothing to cover, so hairline ink stays
+      // visible when zoomed far out instead of dropping out entirely.
+      widthPt: Math.max(baseWidthPt, 0.5 / zoom),
+      pressure: usePressure,
+      taper: strokeTaper,
+    });
+    if (polygon.length === 0) return;
     context.save();
-    context.strokeStyle = strokeColor;
     context.fillStyle = strokeColor;
-    context.lineCap = "round";
-    context.lineJoin = "round";
-    context.globalAlpha = strokeTool === "highlighter" ? 0.35 : 1;
-    if (points.length === 1) {
-      const point = toCanvasPoint(points[0]);
-      context.beginPath();
-      context.arc(
-        point.x,
-        point.y,
-        Math.max(
-          baseWidthPt * (0.25 + points[0].pressure * 0.75),
-          0.5 / zoom,
-        ) / 2,
-        0,
-        Math.PI * 2,
-      );
-      context.fill();
-    } else {
-      for (let index = 1; index < points.length; index += 1) {
-        const start = toCanvasPoint(points[index - 1]);
-        const end = toCanvasPoint(points[index]);
-        context.beginPath();
-        context.moveTo(start.x, start.y);
-        context.lineTo(end.x, end.y);
-        context.lineWidth =
-          Math.max(baseWidthPt * (0.25 + points[index].pressure * 0.75), 0.5 / zoom);
-        context.stroke();
-      }
-    }
+    context.globalAlpha = Math.min(1, Math.max(0, strokeOpacity));
+    path(context, polygon);
+    context.closePath();
+    context.fill();
     context.restore();
   }
 
@@ -530,6 +536,11 @@
     for (const point of points.slice(1)) context.lineTo(point.x, point.y);
   }
 
+  /** The highlighter sweeps wider than the width chip suggests; a pen writes at face value. */
+  function liveWidthPt(strokeTool: "pen" | "highlighter"): number {
+    return strokeTool === "highlighter" ? widthPt * 3 : widthPt;
+  }
+
   function toCanvasPoint(point: Point): Point {
     return point;
   }
@@ -555,7 +566,17 @@
   onpointercancel={pointerCancel}
   onkeydown={keyDown}
 >
-  <canvas bind:this={completedCanvas} aria-hidden="true"></canvas>
+  <svg
+    class="committed"
+    viewBox={`0 0 ${pageWidthPt} ${pageHeightPt}`}
+    width={pageWidthPt}
+    height={pageHeightPt}
+    aria-hidden="true"
+  >
+    {#each committedPaths as painted (painted.key)}
+      <path d={painted.d} fill={painted.color} fill-opacity={painted.opacity} fill-rule="nonzero" />
+    {/each}
+  </svg>
   <canvas bind:this={immediateCanvas} aria-hidden="true"></canvas>
 </div>
 
@@ -576,10 +597,16 @@
     outline-offset: 2px;
   }
 
-  canvas {
+  canvas,
+  .committed {
     position: absolute;
     inset: 0;
     display: block;
+  }
+
+  /* Ink is painted here; input is handled by the surface itself, which sits above it. */
+  .committed {
+    pointer-events: none;
   }
 
   .status {
