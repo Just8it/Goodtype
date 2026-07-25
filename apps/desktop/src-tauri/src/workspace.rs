@@ -1,24 +1,144 @@
-use std::{fs, io::Write, path::Path};
+use std::{
+    collections::HashSet,
+    fs,
+    io::Write,
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex},
+};
 
 use serde_json::Value;
 use tauri::Manager;
+use tauri_plugin_dialog::DialogExt;
+
+use crate::settings::record_recent;
+
+/// Notebook roots the user has explicitly selected in this process, plus the default local
+/// notebook. Commands only operate on member roots, so the frontend can never point Rust at an
+/// arbitrary directory (Pillar 4).
+#[derive(Default)]
+pub struct AllowedRoots(pub Arc<Mutex<HashSet<PathBuf>>>);
+
+pub fn allow_root(roots: &AllowedRoots, root: &Path) -> Result<PathBuf, String> {
+    let canonical = fs::canonicalize(root).map_err(|error| error.to_string())?;
+    roots
+        .0
+        .lock()
+        .map_err(|error| error.to_string())?
+        .insert(canonical.clone());
+    Ok(canonical)
+}
+
+pub fn ensure_allowed(roots: &AllowedRoots, root: &str) -> Result<PathBuf, String> {
+    let canonical = fs::canonicalize(Path::new(root)).map_err(|error| error.to_string())?;
+    let allowed = roots.0.lock().map_err(|error| error.to_string())?;
+    if allowed.contains(&canonical) {
+        Ok(canonical)
+    } else {
+        Err("this directory was not selected as a notebook root".to_owned())
+    }
+}
+
+fn path_string(path: PathBuf) -> Result<String, String> {
+    path.into_os_string()
+        .into_string()
+        .map_err(|_| "the notebook path is not valid Unicode".to_owned())
+}
 
 #[tauri::command]
-pub fn phase0_notebook_root(app: tauri::AppHandle) -> Result<String, String> {
+pub fn phase0_notebook_root(
+    app: tauri::AppHandle,
+    roots: tauri::State<'_, AllowedRoots>,
+) -> Result<String, String> {
     let root = app
         .path()
         .app_local_data_dir()
         .map_err(|error| error.to_string())?
         .join("phase0-notebook");
     fs::create_dir_all(&root).map_err(|error| error.to_string())?;
-    root.into_os_string()
-        .into_string()
-        .map_err(|_| "the notebook path is not valid Unicode".to_owned())
+    path_string(allow_root(&roots, &root)?)
+}
+
+/// Let the user pick an existing notebook directory with the native dialog. The chosen
+/// directory joins the allowlist only when it actually contains a notebook manifest.
+#[tauri::command]
+pub async fn pick_notebook_root(
+    app: tauri::AppHandle,
+    roots: tauri::State<'_, AllowedRoots>,
+) -> Result<Option<String>, String> {
+    let Some(picked) = app.dialog().file().blocking_pick_folder() else {
+        return Ok(None);
+    };
+    let picked = picked.into_path().map_err(|error| error.to_string())?;
+    if !picked.join("goodtype.json").is_file() {
+        return Err("that folder does not contain a Goodtype notebook".to_owned());
+    }
+    path_string(allow_root(&roots, &picked)?).map(Some)
+}
+
+/// Let the user pick a parent directory and name for a new notebook. Rust joins and validates
+/// the final path; the frontend never supplies one.
+#[tauri::command]
+pub async fn pick_new_notebook_root(
+    app: tauri::AppHandle,
+    roots: tauri::State<'_, AllowedRoots>,
+    name: String,
+) -> Result<Option<String>, String> {
+    let safe = !name.is_empty()
+        && name.len() <= 80
+        && !name.starts_with(['.', ' '])
+        && !name.ends_with(['.', ' '])
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '-' | '_'));
+    if !safe {
+        return Err("notebook names use letters, numbers, spaces, - and _".to_owned());
+    }
+    let Some(parent) = app.dialog().file().blocking_pick_folder() else {
+        return Ok(None);
+    };
+    let parent = parent.into_path().map_err(|error| error.to_string())?;
+    let root = parent.join(name.trim());
+    if root.exists() {
+        return Err("a file or folder with that name already exists".to_owned());
+    }
+    fs::create_dir(&root).map_err(|error| error.to_string())?;
+    path_string(allow_root(&roots, &root)?).map(Some)
+}
+
+/// Re-admit a notebook chosen in an earlier session (from the recents list). The path must
+/// still contain a manifest; missing notebooks stay visible in the list but cannot open.
+#[tauri::command]
+pub fn open_recent_root(
+    roots: tauri::State<'_, AllowedRoots>,
+    root: String,
+) -> Result<String, String> {
+    let path = Path::new(&root);
+    if !path.join("goodtype.json").is_file() {
+        return Err("this notebook is missing or was moved".to_owned());
+    }
+    path_string(allow_root(&roots, path)?)
+}
+
+/// Record a successful open in the recents list.
+#[tauri::command]
+pub fn record_notebook_opened(
+    app: tauri::AppHandle,
+    roots: tauri::State<'_, AllowedRoots>,
+    root: String,
+    title: String,
+    opened_at: String,
+) -> Result<(), String> {
+    let canonical = ensure_allowed(&roots, &root)?;
+    record_recent(&app, &path_string(canonical)?, &title, &opened_at)
 }
 
 #[tauri::command]
-pub fn write_phase0_metrics(root: String, metrics: Value) -> Result<(), String> {
-    let root = fs::canonicalize(Path::new(&root)).map_err(|error| error.to_string())?;
+pub fn write_phase0_metrics(
+    roots: tauri::State<'_, AllowedRoots>,
+    root: String,
+    metrics: Value,
+) -> Result<(), String> {
+    let root = ensure_allowed(&roots, &root)?;
     if !root.is_dir() {
         return Err("the notebook root is not a directory".to_owned());
     }
