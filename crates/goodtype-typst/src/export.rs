@@ -3,7 +3,11 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-use goodtype_core::outline::{OutlineOptions, OutlinePoint, outline_points};
+use goodtype_core::{
+    PageBackground, PageGeometry,
+    outline::{OutlineOptions, OutlinePoint, outline_points},
+    template::{TemplateShape, resolve},
+};
 
 const MAX_SOURCE_BYTES: usize = 1024 * 1024;
 const MAX_PAGE_ITEMS: usize = 10_000;
@@ -14,6 +18,9 @@ const MAX_DIMENSION_PT: f64 = 100_000.0;
 pub struct ExportPage {
     pub width_pt: f64,
     pub height_pt: f64,
+    /// The paper. Carried through rather than assumed white, so a page written on ruled paper
+    /// exports as ruled paper — the template is part of the page, not a screen decoration.
+    pub background: PageBackground,
     pub blocks: Vec<ExportTypstBlock>,
     pub strokes: Vec<ExportStroke>,
     pub images: Vec<ExportImage>,
@@ -193,6 +200,9 @@ fn compile_pdf(
                 block.source.clone().into_bytes(),
             ));
         }
+        if let Some(paper) = template_svg(page) {
+            overlay.push((format!("paper-{page_index}.svg"), paper.into_bytes()));
+        }
         overlay.push((format!("ink-{page_index}.svg"), ink_svg(page).into_bytes()));
     }
 
@@ -225,6 +235,19 @@ fn validate_page(root: &Path, page: &ExportPage) -> Result<(), ExportError> {
     valid_positive_dimension(page.height_pt, "page height")?;
     if page.blocks.len() + page.strokes.len() + page.images.len() > MAX_PAGE_ITEMS {
         return Err(ExportError::InvalidPage("too many page items".to_owned()));
+    }
+
+    match &page.background {
+        PageBackground::Plain { color } => {
+            if !valid_color(color) {
+                return Err(ExportError::InvalidPage("invalid page color".to_owned()));
+            }
+        }
+        // Re-checked here even though storage already did: export is reached by its own command
+        // and must not assume the page came through a write it can vouch for.
+        PageBackground::Template { template } => goodtype_core::template::validate(template)
+            .map_err(|reason| ExportError::InvalidPage(reason.to_owned()))?,
+        PageBackground::Pdf { .. } => {}
     }
 
     for block in &page.blocks {
@@ -342,10 +365,32 @@ fn combined_typst_source(pages: &[ExportPage]) -> String {
 }
 
 fn generated_typst_source(page: &ExportPage, page_index: usize) -> String {
-    let mut source = format!(
-        "#set page(width: {}pt, height: {}pt, margin: 0pt)\n",
-        page.width_pt, page.height_pt
-    );
+    // The paper colour is the page fill rather than a placed rectangle, so it reaches the very
+    // edge without depending on a shape being sized exactly right.
+    let fill = match &page.background {
+        PageBackground::Plain { color } => Some(color.clone()),
+        PageBackground::Template { template } => Some(template.background_color.clone()),
+        PageBackground::Pdf { .. } => None,
+    };
+    let mut source = match fill {
+        Some(color) => format!(
+            "#set page(width: {}pt, height: {}pt, margin: 0pt, fill: rgb(\"{}\"))\n",
+            page.width_pt,
+            page.height_pt,
+            typst_string(&color),
+        ),
+        None => format!(
+            "#set page(width: {}pt, height: {}pt, margin: 0pt)\n",
+            page.width_pt, page.height_pt
+        ),
+    };
+    // Placed first so everything else stacks on top of it: the template is paper, not content.
+    if matches!(page.background, PageBackground::Template { .. }) {
+        source.push_str(&format!(
+            "#place(top + left)[#image(\"paper-{page_index}.svg\", width: {}pt, height: {}pt)]\n",
+            page.width_pt, page.height_pt
+        ));
+    }
     for (index, block) in page.blocks.iter().enumerate() {
         source.push_str(&format!(
             "#place(top + left, dx: {}pt, dy: {}pt)[#scale(x: {}%, y: {}%, origin: top + left)[#block(width: {}pt)[#include \"block-{page_index}-{index}.typ\"]]]\n",
@@ -381,6 +426,52 @@ fn typst_string(value: &str) -> String {
         .replace('\n', "\\n")
         .replace('\r', "\\r")
         .replace('\t', "\\t")
+}
+
+/// The page's template as SVG, or `None` when the paper carries no ruling.
+///
+/// The mirror of `templateSvg` in `apps/desktop/src/lib/page/template.ts`. Both go through
+/// `goodtype_core::template::resolve`, whose two implementations are pinned by
+/// `fixtures/templates/resolved.json` — which is what stops the PDF putting a line where the
+/// screen did not.
+///
+/// The paper colour is not repeated here: it is the Typst page fill, so it reaches the edge.
+fn template_svg(page: &ExportPage) -> Option<String> {
+    let PageBackground::Template { template } = &page.background else {
+        return None;
+    };
+    let geometry = PageGeometry {
+        width_pt: page.width_pt,
+        height_pt: page.height_pt,
+    };
+    let mut svg = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{}pt" height="{}pt" viewBox="0 0 {} {}">"#,
+        page.width_pt, page.height_pt, page.width_pt, page.height_pt
+    );
+    for shape in resolve(template, &geometry) {
+        match shape {
+            TemplateShape::Line {
+                x1,
+                y1,
+                x2,
+                y2,
+                color,
+                weight_pt,
+            } => svg.push_str(&format!(
+                r#"<line x1="{x1}" y1="{y1}" x2="{x2}" y2="{y2}" stroke="{color}" stroke-width="{weight_pt}"/>"#
+            )),
+            TemplateShape::Dot {
+                cx,
+                cy,
+                radius_pt,
+                color,
+            } => svg.push_str(&format!(
+                r#"<circle cx="{cx}" cy="{cy}" r="{radius_pt}" fill="{color}"/>"#
+            )),
+        }
+    }
+    svg.push_str("</svg>");
+    Some(svg)
 }
 
 fn ink_svg(page: &ExportPage) -> String {
@@ -461,6 +552,9 @@ mod tests {
         ExportPage {
             width_pt: 595.0,
             height_pt: 842.0,
+            background: PageBackground::Plain {
+                color: "#ffffff".to_owned(),
+            },
             blocks: vec![ExportTypstBlock {
                 x: 72.0,
                 y: 96.0,
@@ -517,6 +611,51 @@ mod tests {
         assert!(ink.contains(r##"fill="#111111""##), "{ink}");
         // A constant stroke width is exactly what cannot express pressure; it must be gone.
         assert!(!ink.contains("stroke-width"), "{ink}");
+    }
+
+    /// A template is paper, so it has to be under the ink and reach the page edge — and it has
+    /// to be the *same* paper the screen drew, which is what the shared fixture guarantees.
+    #[test]
+    fn a_template_exports_as_paper_under_the_ink() {
+        use goodtype_core::template::{PageTemplate, TemplateElement};
+
+        let mut page = page();
+        page.background = PageBackground::Template {
+            template: PageTemplate {
+                id: "ruled".to_owned(),
+                name: "Ruled".to_owned(),
+                background_color: "#FCFCFA".to_owned(),
+                margin_pt: 36.0,
+                elements: vec![TemplateElement::HorizontalLines {
+                    spacing_pt: 24.0,
+                    offset_pt: 0.0,
+                    color: "#D4DAE0".to_owned(),
+                    weight_pt: 0.5,
+                }],
+            },
+        };
+
+        let source = generated_typst_source(&page, 0);
+        // The paper colour is the page fill, so it reaches the edge without a shape to size.
+        assert!(source.contains(r##"fill: rgb("#FCFCFA")"##), "{source}");
+        let paper = source.find("paper-0.svg").expect("paper placed");
+        let ink = source.find("ink-0.svg").expect("ink placed");
+        assert!(paper < ink, "paper must be placed before the ink: {source}");
+
+        let svg = template_svg(&page).expect("a template renders");
+        assert!(
+            svg.contains(r##"<line x1="36" y1="36" x2="559" y2="36" stroke="#D4DAE0""##),
+            "{svg}"
+        );
+        // Ruling stops at the margin rather than running off the page.
+        assert!(!svg.contains(r#"y1="820""#), "{svg}");
+
+        // Plain paper does not pay for an SVG it would not draw.
+        let mut plain = super::tests::page();
+        plain.background = PageBackground::Plain {
+            color: "#ffffff".to_owned(),
+        };
+        assert!(template_svg(&plain).is_none());
     }
 
     /// Pressure has to survive into the exported geometry — it used to be visible on screen and
@@ -625,6 +764,9 @@ mod tests {
         let third = ExportPage {
             width_pt: 595.0,
             height_pt: 842.0,
+            background: PageBackground::Plain {
+                color: "#ffffff".to_owned(),
+            },
             blocks: vec![],
             strokes: vec![],
             images: vec![],

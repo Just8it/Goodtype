@@ -124,6 +124,7 @@ fn export_page_from_bundle(bundle: &storage::NotebookSnapshot) -> Result<ExportP
     Ok(ExportPage {
         width_pt: bundle.page.geometry.width_pt,
         height_pt: bundle.page.geometry.height_pt,
+        background: bundle.page.background.clone(),
         blocks,
         strokes,
         images,
