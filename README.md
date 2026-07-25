@@ -3,7 +3,12 @@
 [![platform](https://img.shields.io/badge/platform-Windows-blue)](#build)
 [![built with](https://img.shields.io/badge/built%20with-Rust%20%2B%20Svelte%205-orange)](#how-it-is-put-together)
 
-<p align="center"><img src="brand/mark-dark.svg#gh-dark-mode-only" width="150" alt="Goodtype"><img src="brand/mark-light.svg#gh-light-mode-only" width="150" alt="Goodtype"></p>
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="brand/mark-dark.svg">
+    <img src="brand/mark-light.svg" width="170" alt="Goodtype">
+  </picture>
+</p>
 
 <h1 align="center">Goodtype</h1>
 
