@@ -9,6 +9,7 @@
     PageBackground,
     PageObject,
     PagePosition,
+    PageTemplate,
     Stroke,
   } from "../model";
   import {
@@ -28,9 +29,9 @@
   import OverflowMenu from "../workspace/OverflowMenu.svelte";
   import { populated, type MenuSection } from "../workspace/menu";
   import AddPageMenu from "../workspace/AddPageMenu.svelte";
-  import type { AddPageSource, AddPageWhere } from "../workspace/addPage";
-  import { templateSvg } from "../page/template";
-  import { BUILT_IN_TEMPLATES } from "../page/templates";
+  import type { AddPageGroup, AddPageSource, AddPageWhere } from "../workspace/addPage";
+  import { templatePreviewSvg } from "../page/template";
+  import { TEMPLATE_GROUPS } from "../page/templates";
   import SideEditor from "./SideEditor.svelte";
   import {
     AssetUrlCache,
@@ -1231,32 +1232,44 @@
   }
 
   /**
-   * What a new page can be made from. One entry per source, which is the extension point: an
-   * image and PDF import arrive here rather than in the menu's markup.
+   * What a new page can be made from, on the shelves the picker shows. One entry per source,
+   * which is the extension point: an image and PDF import arrive here rather than in the menu's
+   * markup.
    *
    * A template's definition is copied onto the page rather than referenced, so the notebook
    * still looks like itself on a machine that never had this build's library — the same rule a
    * stroke follows when it stores its resolved nib parameters instead of a pen name.
    */
-  function addPageSources(): AddPageSource[] {
+  function addPageGroups(): AddPageGroup[] {
     const geometry = { widthPt: PAGE_WIDTH_PT, heightPt: PAGE_HEIGHT_PT };
+    const template = (source: PageTemplate): AddPageSource => ({
+      id: source.id,
+      label: source.name,
+      preview: templatePreviewSvg(source, geometry),
+      onSelect: (position) => void addPage(position, { kind: "template", template: source }),
+    });
     return [
       {
-        id: "same",
-        label: "Same as this page",
-        detail: activeBackground.kind === "template" ? activeBackground.template.name : "Plain",
-        preview:
-          activeBackground.kind === "template"
-            ? templateSvg(activeBackground.template, geometry)
-            : undefined,
-        onSelect: (position) => void addPage(position, activeBackground),
+        id: "current",
+        title: "This page",
+        sources: [
+          {
+            id: "same",
+            label: "Same paper",
+            detail:
+              activeBackground.kind === "template" ? activeBackground.template.name : "Plain",
+            preview:
+              activeBackground.kind === "template"
+                ? templatePreviewSvg(activeBackground.template, geometry)
+                : undefined,
+            onSelect: (position) => void addPage(position, activeBackground),
+          },
+        ],
       },
-      ...BUILT_IN_TEMPLATES.map((template) => ({
-        id: template.id,
-        label: template.name,
-        preview: templateSvg(template, geometry),
-        onSelect: (position: PagePosition) =>
-          void addPage(position, { kind: "template", template }),
+      ...TEMPLATE_GROUPS.map((group) => ({
+        id: group.id,
+        title: group.title,
+        sources: group.templates.map(template),
       })),
     ];
   }
@@ -2313,7 +2326,7 @@
           {#if addPageOpen}
             <AddPageMenu
               where={addPageWhere}
-              sources={addPageSources()}
+              groups={addPageGroups()}
               currentPageId={activePageId}
               {pageNumber}
               {pageCount}

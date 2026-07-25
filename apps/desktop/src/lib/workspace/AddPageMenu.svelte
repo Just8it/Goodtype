@@ -1,6 +1,6 @@
 <script lang="ts">
   import { dismissable } from "./dismiss";
-  import { resolvePosition, type AddPageSource, type AddPageWhere } from "./addPage";
+  import { resolvePosition, type AddPageGroup, type AddPageSource, type AddPageWhere } from "./addPage";
 
   /**
    * The add-page popout: where the page goes, then what it is made of.
@@ -11,7 +11,7 @@
    */
   let {
     where,
-    sources,
+    groups,
     currentPageId,
     pageNumber,
     pageCount,
@@ -20,7 +20,7 @@
     onClose,
   }: {
     where: AddPageWhere;
-    sources: AddPageSource[];
+    groups: AddPageGroup[];
     /** The page "before" and "after" are relative to. */
     currentPageId: string;
     /** One-based, as the writer sees it. */
@@ -77,24 +77,30 @@
     {/each}
   </div>
 
-  <div class="menu-heading">Make it from</div>
-  <div class="sources">
-    {#each sources as source (source.id)}
-      <button
-        type="button"
-        class="source"
-        disabled={source.disabled}
-        onclick={() => choose(source)}
-      >
-        <span class="preview" aria-hidden="true">
-          {#if source.preview}
-            <!-- Built from a template definition in this app, never read from a file. -->
-            {@html source.preview}
-          {/if}
-        </span>
-        <span class="label">{source.label}</span>
-        {#if source.detail}<span class="detail">{source.detail}</span>{/if}
-      </button>
+  <div class="shelves">
+    {#each groups as group (group.id)}
+      <div class="menu-heading">{group.title}</div>
+      <div class="sources">
+        {#each group.sources as source (source.id)}
+          <button
+            type="button"
+            class="source"
+            disabled={source.disabled}
+            onclick={() => choose(source)}
+          >
+            <span class="preview" aria-hidden="true">
+              {#if source.preview}
+                <!-- Built from a template definition in this app, never read from a file. -->
+                {@html source.preview}
+              {/if}
+            </span>
+            <span class="label">{source.label}</span>
+            <!-- Always present, even when empty, so tiles in a row line up whether or not they
+                 have something to say for themselves. -->
+            <span class="detail">{source.detail ?? ""}</span>
+          </button>
+        {/each}
+      </div>
     {/each}
   </div>
 </aside>
@@ -177,11 +183,14 @@
 
   /* Scrolls rather than growing: the library gets longer every time a template is added, and a
      menu taller than the window is worse than one that scrolls. */
+  .shelves {
+    overflow-y: auto;
+    max-height: 52vh;
+    padding: 0 1px 1px;
+  }
+
   .sources {
     display: grid;
-    overflow-y: auto;
-    max-height: 46vh;
-    padding: 1px;
     grid-template-columns: repeat(3, 1fr);
     gap: 6px;
   }
@@ -235,6 +244,7 @@
 
   .detail {
     overflow: hidden;
+    min-height: 12px;
     margin-top: 1px;
     color: var(--quiet);
     font-size: 9.5px;

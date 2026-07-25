@@ -99,6 +99,37 @@ function steps(start: number, end: number, spacing: number): number {
  * previews, so a preview is never a stored bitmap that can disagree with what gets drawn.
  */
 export function templateSvg(template: PageTemplate, geometry: PageGeometry): string {
+  return svgFor(template, geometry, geometry.widthPt, geometry.heightPt);
+}
+
+/**
+ * The fraction of the page a preview shows, measured from the top-left corner.
+ *
+ * A preview is a swatch, not a thumbnail. Shrunk to tile width, a 5mm grid lands about two
+ * pixels apart with hairlines well under one pixel, and the browser resolves that to an even
+ * grey — squared and dotted paper come out looking identical and both look blank. Showing a
+ * corner at closer to true scale is what makes them tell each other apart. The fraction keeps
+ * the page's aspect ratio, so the swatch is not distorted, and it starts at the corner so the
+ * margin and any edge rule are inside it.
+ */
+const PREVIEW_FRACTION = 0.45;
+
+/** The template as a swatch for the picker. See `PREVIEW_FRACTION` for why it is not the page. */
+export function templatePreviewSvg(template: PageTemplate, geometry: PageGeometry): string {
+  return svgFor(
+    template,
+    geometry,
+    geometry.widthPt * PREVIEW_FRACTION,
+    geometry.heightPt * PREVIEW_FRACTION,
+  );
+}
+
+function svgFor(
+  template: PageTemplate,
+  geometry: PageGeometry,
+  viewWidthPt: number,
+  viewHeightPt: number,
+): string {
   const body = resolveTemplate(template, geometry)
     .map((shape) =>
       shape.kind === "line"
@@ -106,7 +137,7 @@ export function templateSvg(template: PageTemplate, geometry: PageGeometry): str
         : `<circle cx="${round(shape.cx)}" cy="${round(shape.cy)}" r="${round(shape.radiusPt)}" fill="${shape.color}"/>`,
     )
     .join("");
-  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${round(geometry.widthPt)} ${round(geometry.heightPt)}" preserveAspectRatio="none"><rect width="100%" height="100%" fill="${template.backgroundColor}"/>${body}</svg>`;
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${round(viewWidthPt)} ${round(viewHeightPt)}" preserveAspectRatio="none"><rect width="100%" height="100%" fill="${template.backgroundColor}"/>${body}</svg>`;
 }
 
 // Three decimals is finer than a printer resolves and keeps the markup from doubling in size on

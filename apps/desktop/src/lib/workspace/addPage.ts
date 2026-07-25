@@ -30,6 +30,16 @@ export type AddPageSource = {
 };
 
 /**
+ * One shelf of the picker. Grouping is the menu's business, not the page's: nothing on disk
+ * changes when the shelves get rearranged.
+ */
+export type AddPageGroup = {
+  id: string;
+  title: string;
+  sources: AddPageSource[];
+};
+
+/**
  * Turn the writer's choice into the argument the command takes. Falls back to appending when
  * there is no page to be relative to, which is the only sensible reading of "before" in an
  * empty notebook.
