@@ -1,4 +1,93 @@
 Goodtype
 Copyright 2026 Goodtype contributors
 
+Licensed under the Apache License, Version 2.0. See LICENSE.
+
 This product includes software developed by the Goodtype contributors.
+
+================================================================================
+Third-party components
+================================================================================
+
+Goodtype links the Typst compiler into its own binary and embeds the fonts that
+compiler ships with, so a built Goodtype executable redistributes the work
+listed below. The licences that apply to it travel with that binary.
+
+--------------------------------------------------------------------------------
+Typst — Apache License 2.0
+--------------------------------------------------------------------------------
+
+  typst, typst-assets, typst-ide, typst-kit, typst-layout, typst-pdf, typst-svg
+  Copyright the Typst contributors
+  https://github.com/typst/typst
+
+Goodtype compiles Typst in-process rather than invoking a separate binary, so
+the compiler is statically linked rather than merely called.
+
+--------------------------------------------------------------------------------
+Fonts embedded via typst-assets
+--------------------------------------------------------------------------------
+
+These are compiled into the Goodtype executable and rendered into exported PDFs.
+Each keeps its own licence, which is not the licence of Goodtype.
+
+  New Computer Modern, New Computer Modern Math
+    SIL Open Font License 1.1
+    Copyright the New Computer Modern authors (GUST e-foundry)
+    https://ctan.org/pkg/newcomputermodern
+
+  Libertinus Serif
+    SIL Open Font License 1.1
+    Copyright the Libertinus authors
+    https://github.com/alerque/libertinus
+
+  DejaVu Sans Mono
+    Bitstream Vera Fonts Licence and Arev Fonts Licence
+    Copyright 2003 Bitstream, Inc. Copyright 2006 Tavmjong Bah.
+    https://dejavu-fonts.github.io
+
+  Foxit base-14 PDF fonts (used by typst-pdf for standard PDF font substitution)
+    Distributed with typst-assets under the Apache License 2.0
+    Copyright Foxit Software Inc.
+
+--------------------------------------------------------------------------------
+Tauri — MIT License or Apache License 2.0
+--------------------------------------------------------------------------------
+
+  tauri, tauri-build, tauri-plugin-dialog, @tauri-apps/api, @tauri-apps/cli
+  Copyright the Tauri Programme within The Commons Conservancy
+  https://github.com/tauri-apps/tauri
+
+--------------------------------------------------------------------------------
+Frontend — MIT License
+--------------------------------------------------------------------------------
+
+  Svelte, svelte-check, @sveltejs/vite-plugin-svelte
+    Copyright the Svelte contributors — https://github.com/sveltejs/svelte
+
+  CodeMirror 6 (codemirror, @codemirror/state, @codemirror/view,
+  @codemirror/autocomplete)
+    Copyright the CodeMirror contributors — https://github.com/codemirror
+
+  Vite, Vitest
+    Copyright VoidZero Inc. and contributors — https://github.com/vitejs/vite
+
+--------------------------------------------------------------------------------
+TypeScript — Apache License 2.0
+--------------------------------------------------------------------------------
+
+  Copyright Microsoft Corporation
+  https://github.com/microsoft/TypeScript
+
+--------------------------------------------------------------------------------
+Rust libraries — MIT License or Apache License 2.0
+--------------------------------------------------------------------------------
+
+  serde, serde_json — Copyright the Serde contributors
+  tempfile — Copyright the tempfile contributors
+
+================================================================================
+
+Typst Universe packages are not redistributed. They are resolved at compile
+time from a local cache, and downloaded only on a cache miss and only when the
+writer has left that setting enabled. Each package carries its own licence.
