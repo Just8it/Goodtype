@@ -1,8 +1,9 @@
 use std::{
     fs,
     path::{Component, Path, PathBuf},
-    process::Command,
 };
+
+use goodtype_core::outline::{OutlineOptions, OutlinePoint, outline_points};
 
 const MAX_SOURCE_BYTES: usize = 1024 * 1024;
 const MAX_PAGE_ITEMS: usize = 10_000;
@@ -31,6 +32,13 @@ pub struct ExportTypstBlock {
 pub struct ExportStroke {
     pub color: String,
     pub width_pt: f64,
+    /// Whether the nib varied its width with pressure.
+    pub pressure: bool,
+    /// Fraction of the stroke's length over which each end tapers to a point; 0 disables it.
+    pub taper: f64,
+    /// Ink opacity, 0–1. A highlighter sweep is translucent; leaving it out is what made a
+    /// highlighter come out solid in the PDF while it was see-through on screen.
+    pub opacity: f64,
     pub points: Vec<ExportPoint>,
     pub transform: ExportTransform,
 }
@@ -39,6 +47,9 @@ pub struct ExportStroke {
 pub struct ExportPoint {
     pub x: f64,
     pub y: f64,
+    /// Normalised stylus force at this sample. Carried through so the exported PDF shows the
+    /// same variable-width ink as the screen.
+    pub pressure: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -102,10 +113,32 @@ impl From<std::io::Error> for ExportError {
     }
 }
 
+const MAX_EXPORT_PAGES: usize = 500;
+
 pub fn export_page(
     notebook_root: &Path,
     output_name: &str,
     page: &ExportPage,
+    allow_remote_packages: bool,
+) -> Result<ExportResult, ExportError> {
+    export_pages(
+        notebook_root,
+        output_name,
+        std::slice::from_ref(page),
+        allow_remote_packages,
+    )
+}
+
+/// Export ordered pages as one PDF. Each page keeps its own physical geometry, ink stays
+/// vector, and Typst text stays selectable. Page order is the caller's (manifest) order.
+///
+/// `allow_remote_packages` governs whether an uncached Typst package may be downloaded so the
+/// export matches the on-screen preview.
+pub fn export_pages(
+    notebook_root: &Path,
+    output_name: &str,
+    pages: &[ExportPage],
+    allow_remote_packages: bool,
 ) -> Result<ExportResult, ExportError> {
     let root = notebook_root
         .canonicalize()
@@ -114,38 +147,16 @@ pub fn export_page(
         return Err(ExportError::InvalidRoot(root));
     }
     validate_output_name(output_name)?;
-    validate_page(&root, page)?;
-
-    let workspace = tempfile::Builder::new()
-        .prefix(".goodtype-export-")
-        .tempdir_in(&root)?;
-    for (index, block) in page.blocks.iter().enumerate() {
-        fs::write(
-            workspace.path().join(format!("block-{index}.typ")),
-            &block.source,
-        )?;
+    if pages.is_empty() || pages.len() > MAX_EXPORT_PAGES {
+        return Err(ExportError::InvalidPage(format!(
+            "export needs between 1 and {MAX_EXPORT_PAGES} pages"
+        )));
     }
-    fs::write(workspace.path().join("ink.svg"), ink_svg(page))?;
-    fs::write(
-        workspace.path().join("page.typ"),
-        generated_typst_source(page),
-    )?;
-
-    let compiled_pdf = workspace.path().join("page.pdf");
-    let output = Command::new(crate::typst_compiler())
-        .arg("compile")
-        .arg("--root")
-        .arg(&root)
-        .arg("--diagnostic-format")
-        .arg("short")
-        .arg(workspace.path().join("page.typ"))
-        .arg(&compiled_pdf)
-        .output()?;
-    if !output.status.success() {
-        return Err(ExportError::CompilerFailed(
-            String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-        ));
+    for page in pages {
+        validate_page(&root, page)?;
     }
+
+    let pdf_bytes = compile_pdf(&root, pages, allow_remote_packages)?;
 
     let exports = root.join("exports");
     fs::create_dir_all(&exports)?;
@@ -156,7 +167,7 @@ pub fn export_page(
 
     let destination = canonical_exports.join(output_name);
     let mut temporary = tempfile::NamedTempFile::new_in(&canonical_exports)?;
-    std::io::copy(&mut fs::File::open(compiled_pdf)?, &mut temporary)?;
+    std::io::Write::write_all(&mut temporary, &pdf_bytes)?;
     temporary.as_file().sync_all()?;
     temporary
         .persist(&destination)
@@ -165,6 +176,34 @@ pub fn export_page(
     Ok(ExportResult {
         output_path: destination,
     })
+}
+
+/// Compile the ordered pages into PDF bytes in-process. Generated helper files
+/// (blocks, ink SVGs) live only in memory — nothing is written inside the notebook tree.
+fn compile_pdf(
+    root: &Path,
+    pages: &[ExportPage],
+    allow_remote_packages: bool,
+) -> Result<Vec<u8>, ExportError> {
+    let mut overlay: Vec<(String, Vec<u8>)> = Vec::new();
+    for (page_index, page) in pages.iter().enumerate() {
+        for (index, block) in page.blocks.iter().enumerate() {
+            overlay.push((
+                format!("block-{page_index}-{index}.typ"),
+                block.source.clone().into_bytes(),
+            ));
+        }
+        overlay.push((format!("ink-{page_index}.svg"), ink_svg(page).into_bytes()));
+    }
+
+    crate::embedded::export_pdf(
+        root,
+        "page.typ",
+        combined_typst_source(pages),
+        overlay,
+        allow_remote_packages,
+    )
+    .map_err(ExportError::CompilerFailed)
 }
 
 fn validate_output_name(name: &str) -> Result<(), ExportError> {
@@ -289,14 +328,27 @@ fn validate_relative_image(root: &Path, relative: &str) -> Result<(), ExportErro
     Ok(())
 }
 
-fn generated_typst_source(page: &ExportPage) -> String {
+fn combined_typst_source(pages: &[ExportPage]) -> String {
+    let mut source = String::new();
+    for (page_index, page) in pages.iter().enumerate() {
+        if page_index > 0 {
+            // An explicit break keeps consecutive same-geometry pages distinct; the following
+            // `#set page` then applies to the fresh empty page.
+            source.push_str("#pagebreak()\n");
+        }
+        source.push_str(&generated_typst_source(page, page_index));
+    }
+    source
+}
+
+fn generated_typst_source(page: &ExportPage, page_index: usize) -> String {
     let mut source = format!(
         "#set page(width: {}pt, height: {}pt, margin: 0pt)\n",
         page.width_pt, page.height_pt
     );
     for (index, block) in page.blocks.iter().enumerate() {
         source.push_str(&format!(
-            "#place(top + left, dx: {}pt, dy: {}pt)[#scale(x: {}%, y: {}%, origin: top + left)[#block(width: {}pt)[#include \"block-{index}.typ\"]]]\n",
+            "#place(top + left, dx: {}pt, dy: {}pt)[#scale(x: {}%, y: {}%, origin: top + left)[#block(width: {}pt)[#include \"block-{page_index}-{index}.typ\"]]]\n",
             block.x,
             block.y,
             block.scale * 100.0,
@@ -317,7 +369,7 @@ fn generated_typst_source(page: &ExportPage) -> String {
         ));
     }
     source.push_str(&format!(
-        "#place(top + left)[#image(\"ink.svg\", width: {}pt, height: {}pt)]\n",
+        "#place(top + left)[#image(\"ink-{page_index}.svg\", width: {}pt, height: {}pt)]\n",
         page.width_pt, page.height_pt
     ));
     source
@@ -336,25 +388,53 @@ fn ink_svg(page: &ExportPage) -> String {
         r#"<svg xmlns="http://www.w3.org/2000/svg" width="{}pt" height="{}pt" viewBox="0 0 {} {}">"#,
         page.width_pt, page.height_pt, page.width_pt, page.height_pt
     );
+    // Ink is exported as its silhouette, filled — not as a stroked centreline.
+    // A constant `stroke-width` cannot vary along a path, which is how pressure used to be
+    // visible on screen and flat in the PDF. Filling the same polygon the canvas draws makes the
+    // export match what was written.
     for stroke in &page.strokes {
         if stroke.points.is_empty() {
             continue;
         }
-        let width = stroke.width_pt
-            * stroke
-                .transform
-                .scale_x
-                .abs()
-                .max(stroke.transform.scale_y.abs());
-        svg.push_str(r#"<path d=""#);
-        for (index, point) in stroke.points.iter().enumerate() {
-            let point = transformed_point(*point, stroke.transform);
-            svg.push_str(if index == 0 { "M " } else { " L " });
-            svg.push_str(&format!("{} {}", point.x, point.y));
+        let scale = stroke
+            .transform
+            .scale_x
+            .abs()
+            .max(stroke.transform.scale_y.abs());
+        let points: Vec<OutlinePoint> = stroke
+            .points
+            .iter()
+            .map(|point| {
+                let placed = transformed_point(*point, stroke.transform);
+                OutlinePoint {
+                    x: placed.x,
+                    y: placed.y,
+                    pressure: point.pressure,
+                }
+            })
+            .collect();
+        let polygon = outline_points(
+            &points,
+            &OutlineOptions {
+                width_pt: stroke.width_pt * scale,
+                pressure: stroke.pressure,
+                taper: stroke.taper,
+            },
+        );
+        if polygon.is_empty() {
+            continue;
         }
+        svg.push_str(r#"<path d=""#);
+        for (index, vertex) in polygon.iter().enumerate() {
+            svg.push_str(if index == 0 { "M " } else { " L " });
+            svg.push_str(&format!("{} {}", vertex.x, vertex.y));
+        }
+        // One filled shape per stroke, so translucency is honest: overlapping segments used to
+        // double-darken at every joint, which is why an even alpha was not previously safe.
+        let opacity = stroke.opacity.clamp(0.0, 1.0);
         svg.push_str(&format!(
-            r#"" fill="none" stroke="{}" stroke-width="{}" stroke-linecap="round" stroke-linejoin="round"/>"#,
-            stroke.color, width
+            r#" Z" fill="{}" fill-opacity="{opacity}" fill-rule="nonzero"/>"#,
+            stroke.color
         ));
     }
     svg.push_str("</svg>");
@@ -368,6 +448,8 @@ fn transformed_point(point: ExportPoint, transform: ExportTransform) -> ExportPo
     ExportPoint {
         x: x * radians.cos() - y * radians.sin() + transform.translate_x,
         y: x * radians.sin() + y * radians.cos() + transform.translate_y,
+        // Placement moves a sample; how hard it was pressed does not change.
+        pressure: point.pressure,
     }
 }
 
@@ -389,9 +471,20 @@ mod tests {
             strokes: vec![ExportStroke {
                 color: "#111111".to_owned(),
                 width_pt: 2.0,
+                pressure: false,
+                taper: 0.0,
+                opacity: 1.0,
                 points: vec![
-                    ExportPoint { x: 10.0, y: 20.0 },
-                    ExportPoint { x: 20.0, y: 30.0 },
+                    ExportPoint {
+                        x: 10.0,
+                        y: 20.0,
+                        pressure: 1.0,
+                    },
+                    ExportPoint {
+                        x: 20.0,
+                        y: 30.0,
+                        pressure: 1.0,
+                    },
                 ],
                 transform: ExportTransform {
                     translate_x: 2.0,
@@ -408,14 +501,66 @@ mod tests {
     #[test]
     fn generates_native_blocks_and_vector_ink() {
         let page = page();
-        let source = generated_typst_source(&page);
+        let source = generated_typst_source(&page, 0);
         let ink = ink_svg(&page);
 
-        assert!(source.contains("#include \"block-0.typ\""));
+        assert!(source.contains("#include \"block-0-0.typ\""));
         assert!(source.contains("#scale(x: 125%"));
-        assert!(source.contains("#image(\"ink.svg\""));
-        assert!(ink.contains(r#"<path d="M 22 43 L 42 63""#));
-        assert!(ink.contains(r#"stroke-width="4""#));
+        assert!(source.contains("#image(\"ink-0.svg\""));
+        // Ink exports as a filled silhouette, not a stroked centreline. The centre
+        // line runs (22,43)→(42,63) after the transform, at width 4, so the outline sits half a
+        // width either side of it along the normal.
+        assert!(
+            ink.contains(r#"M 20.586 44.414 L 40.586 64.414 L 43.414 61.586 L 23.414 41.586 Z"#),
+            "{ink}"
+        );
+        assert!(ink.contains(r##"fill="#111111""##), "{ink}");
+        // A constant stroke width is exactly what cannot express pressure; it must be gone.
+        assert!(!ink.contains("stroke-width"), "{ink}");
+    }
+
+    /// Pressure has to survive into the exported geometry — it used to be visible on screen and
+    /// flat in the PDF, because a stroked centreline cannot vary its width.
+    #[test]
+    fn export_geometry_varies_with_pressure() {
+        let mut page = page();
+        page.strokes[0].pressure = true;
+        page.strokes[0].transform = ExportTransform {
+            translate_x: 0.0,
+            translate_y: 0.0,
+            scale_x: 1.0,
+            scale_y: 1.0,
+            rotation_degrees: 0.0,
+        };
+        page.strokes[0].points = vec![
+            ExportPoint {
+                x: 0.0,
+                y: 0.0,
+                pressure: 0.0,
+            },
+            ExportPoint {
+                x: 10.0,
+                y: 0.0,
+                pressure: 1.0,
+            },
+        ];
+        page.strokes[0].width_pt = 4.0;
+
+        let ink = ink_svg(&page);
+        // Light end is a quarter width (±0.5), full end is the whole width (±2).
+        assert!(ink.contains("M 0 0.5 L 10 2 L 10 -2 L 0 -0.5 Z"), "{ink}");
+    }
+
+    /// A highlighter is translucent on screen; without this it came out solid in the PDF, hiding
+    /// whatever it was drawn over. One filled shape per stroke is what makes an even alpha safe.
+    #[test]
+    fn export_keeps_translucent_ink_translucent() {
+        let mut page = page();
+        page.strokes[0].opacity = 0.6;
+        assert!(ink_svg(&page).contains(r#"fill-opacity="0.6""#), "{page:?}");
+
+        page.strokes[0].opacity = 1.0;
+        assert!(ink_svg(&page).contains(r#"fill-opacity="1""#));
     }
 
     #[test]
@@ -445,12 +590,6 @@ mod tests {
 
     #[test]
     fn compiler_smoke_creates_pdf() {
-        let compiler = crate::typst_compiler();
-        if !compiler.is_file() {
-            eprintln!("Typst compiler is unavailable; skipping PDF compiler smoke test");
-            return;
-        }
-
         let root = tempfile::tempdir().unwrap();
         fs::create_dir(root.path().join("assets")).unwrap();
         fs::write(
@@ -468,10 +607,48 @@ mod tests {
             scale: 1.0,
         });
 
-        let result = export_page(root.path(), "phase0b.pdf", &page).unwrap();
+        let result = export_page(root.path(), "phase0b.pdf", &page, false).unwrap();
         let bytes = fs::read(&result.output_path).unwrap();
         assert!(result.output_path.ends_with("exports/phase0b.pdf"));
         assert!(bytes.starts_with(b"%PDF-"));
-        export_page(root.path(), "phase0b.pdf", &page).unwrap();
+        export_page(root.path(), "phase0b.pdf", &page, false).unwrap();
+    }
+
+    #[test]
+    fn multi_page_export_keeps_order_and_geometry() {
+        let root = tempfile::tempdir().unwrap();
+        let mut second = page();
+        second.blocks[0].source = "= Second page marker".to_owned();
+        // A distinct geometry on page 2 must survive into the PDF.
+        second.width_pt = 400.0;
+        second.height_pt = 300.0;
+        let third = ExportPage {
+            width_pt: 595.0,
+            height_pt: 842.0,
+            blocks: vec![],
+            strokes: vec![],
+            images: vec![],
+        };
+
+        // The combined document keeps manifest order, per-page geometry, explicit breaks, and
+        // page-scoped block/ink file names. (PDF-level page-count evidence stays with the
+        // count asserted at the source level rather than in the PDF, whose streams are compressed.)
+        let pages = [page(), second, third];
+        let source = combined_typst_source(&pages);
+        assert_eq!(source.matches("#pagebreak()").count(), 2);
+        assert_eq!(source.matches("#set page(").count(), 3);
+        assert!(source.contains("width: 400pt, height: 300pt"));
+        assert!(source.contains("#include \"block-1-0.typ\""));
+        assert!(source.contains("ink-2.svg"));
+        let break_at = source.find("#pagebreak()").unwrap();
+        assert!(source.find("width: 400pt").unwrap() > break_at);
+
+        let result = export_pages(root.path(), "notebook.pdf", &pages, false).unwrap();
+        let bytes = fs::read(&result.output_path).unwrap();
+        assert!(bytes.starts_with(b"%PDF-"));
+        assert!(matches!(
+            export_pages(root.path(), "empty.pdf", &[], false),
+            Err(ExportError::InvalidPage(_))
+        ));
     }
 }
