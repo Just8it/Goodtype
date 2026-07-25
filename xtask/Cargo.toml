@@ -5,3 +5,9 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+
+# Icon rasterisation only. Both are already in the lockfile as Typst dependencies, so this adds
+# no download — it just lets `cargo xtask icons` render brand/icon.svg without a design tool.
+[dependencies]
+resvg = "0.47"
+image = { version = "0.25", default-features = false, features = ["ico", "png"] }

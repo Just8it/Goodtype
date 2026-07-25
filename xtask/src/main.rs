@@ -4,7 +4,8 @@ fn main() {
     let result = match env::args().nth(1).as_deref() {
         Some("doctor") => doctor(),
         Some("verify") => verify(),
-        _ => Err("usage: cargo xtask <doctor|verify>".to_owned()),
+        Some("icons") => icons(),
+        _ => Err("usage: cargo xtask <doctor|verify|icons>".to_owned()),
     };
 
     if let Err(error) = result {
@@ -120,6 +121,96 @@ fn verify() -> Result<(), String> {
 
     println!("\nVerification passed.");
     Ok(())
+}
+
+/// Rasterise `brand/icon.svg` into the bitmaps Tauri embeds and bundles.
+///
+/// The icons are generated rather than committed by hand so the SVG stays the single source of
+/// truth: changing the mark means editing one file and re-running this, not reconciling six
+/// bitmaps that may or may not have come from the same artwork. It runs offline and needs no
+/// design tool — `resvg` is already in the lockfile as a Typst dependency.
+fn icons() -> Result<(), String> {
+    let root = workspace_root();
+    let destination = root.join("apps/desktop/src-tauri/icons");
+    fs::create_dir_all(&destination).map_err(|error| error.to_string())?;
+
+    // Detail is dropped as the icon shrinks rather than downsampling one artwork everywhere: at
+    // 32px the two set lines collapse into a grey smear, and a smudged page reads worse than no
+    // page. Each level is its own SVG so the choice is visible and editable, not buried here.
+    let artwork = |size: u32| -> &'static str {
+        match size {
+            0..=32 => "brand/icon-small.svg",
+            33..=64 => "brand/icon-medium.svg",
+            _ => "brand/icon.svg",
+        }
+    };
+
+    let load = |size: u32| -> Result<resvg::usvg::Tree, String> {
+        let path = root.join(artwork(size));
+        let svg =
+            fs::read(&path).map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+        resvg::usvg::Tree::from_data(&svg, &resvg::usvg::Options::default())
+            .map_err(|error| format!("{} is not valid SVG: {error}", path.display()))
+    };
+
+    // The names Tauri looks for. `icon.png` is the one `generate_context!` embeds on every
+    // platform that is not Windows; without it the build fails rather than falling back.
+    let targets: &[(&str, u32)] = &[
+        ("32x32.png", 32),
+        ("128x128.png", 128),
+        ("128x128@2x.png", 256),
+        ("icon.png", 1024),
+    ];
+
+    for (name, size) in targets {
+        let pixmap = render(&load(*size)?, *size)?;
+        let path = destination.join(name);
+        pixmap
+            .save_png(&path)
+            .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
+        println!("  {name} ({size}px, {})", artwork(*size));
+    }
+
+    // Windows wants one .ico holding every size the shell might ask for, so it never has to
+    // scale a mismatched bitmap itself.
+    let mut ico = Vec::new();
+    let encoder = image::codecs::ico::IcoEncoder::new(std::io::Cursor::new(&mut ico));
+    let frames = [16u32, 24, 32, 48, 64, 128, 256]
+        .into_iter()
+        .map(|size| {
+            let pixmap = render(&load(size)?, size)?;
+            // Each frame is stored as PNG inside the container, which is what modern Windows
+            // reads and what keeps the file small at 256px.
+            image::codecs::ico::IcoFrame::as_png(
+                pixmap.data(),
+                size,
+                size,
+                image::ExtendedColorType::Rgba8,
+            )
+            .map_err(|error| format!("could not build a {size}px frame: {error}"))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    encoder
+        .encode_images(&frames)
+        .map_err(|error| format!("cannot encode icon.ico: {error}"))?;
+    let ico_path = destination.join("icon.ico");
+    fs::write(&ico_path, &ico).map_err(|error| format!("cannot write {ico_path:?}: {error}"))?;
+    println!("  icon.ico (16-256px)");
+
+    println!("\nIcons written to {}.", destination.display());
+    Ok(())
+}
+
+fn render(tree: &resvg::usvg::Tree, size: u32) -> Result<resvg::tiny_skia::Pixmap, String> {
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(size, size)
+        .ok_or_else(|| format!("cannot allocate a {size}px canvas"))?;
+    let scale = size as f32 / tree.size().width();
+    resvg::render(
+        tree,
+        resvg::tiny_skia::Transform::from_scale(scale, scale),
+        &mut pixmap.as_mut(),
+    );
+    Ok(pixmap)
 }
 
 fn workspace_root() -> std::path::PathBuf {
