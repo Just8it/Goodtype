@@ -34,11 +34,36 @@ pub struct Vertex {
 /// Narrowest a pressure-varying stroke gets, as a fraction of its nominal width.
 const MIN_PRESSURE_SCALE: f64 = 0.25;
 
+/// Samples closer together than this carry no usable direction — the vector between them is
+/// dominated by pointer jitter, so the normal computed from it flips and bites a notch out of the
+/// silhouette. Drawing slowly is what produces them, which is why a slow highlighter sweep came
+/// out ragged while a quick one did not.
+const MIN_SAMPLE_SPACING_PT: f64 = 0.05;
+
+/// How far apart the two samples behind a central difference must be before the direction they
+/// give is trusted. Larger than the dedup spacing, so a dense but legitimate curve is still
+/// differentiated over a span long enough to mean something. Well-spaced samples reach this on
+/// the immediate neighbours and behave exactly as a plain central difference.
+const MIN_DIRECTION_SPAN_PT: f64 = 0.5;
+
+/// A taper runs over at most this many nib widths.
+///
+/// It used to be a pure fraction of arc length, which made a full-page sweep taper over
+/// centimetres while a flick tapered over millimetres. A real nib tapers over a distance set by
+/// the nib, not by how far the hand happened to travel.
+const TAPER_MAX_NIB_WIDTHS: f64 = 6.0;
+
 /// Deliberately mimics JavaScript's `Math.round` (half toward positive infinity) rather than
 /// using `f64::round` (half away from zero), because the two disagree on negative halves and the
 /// mirrored implementations must produce identical numbers.
 fn quantize(value: f64) -> f64 {
     (value * 1000.0 + 0.5).floor() / 1000.0
+}
+
+/// Distance between two samples, used to decide whether they are far enough apart to mean
+/// anything.
+fn span(a: OutlinePoint, b: OutlinePoint) -> f64 {
+    (a.x - b.x).hypot(a.y - b.y)
 }
 
 fn width_at(point: &OutlinePoint, options: &OutlineOptions) -> f64 {
@@ -56,11 +81,13 @@ pub fn outline_points(points: &[OutlinePoint], options: &OutlineOptions) -> Vec<
         return Vec::new();
     }
 
-    // Consecutive duplicates carry no direction and would produce a zero normal.
+    // Samples too close together carry no direction and would produce a noisy normal. Exact
+    // duplicates were already dropped here; near-duplicates were not, and they are what a slowly
+    // drawn stroke is made of.
     let mut path: Vec<OutlinePoint> = vec![points[0]];
     for point in &points[1..] {
         let previous = path[path.len() - 1];
-        if point.x != previous.x || point.y != previous.y {
+        if (point.x - previous.x).hypot(point.y - previous.y) > MIN_SAMPLE_SPACING_PT {
             path.push(*point);
         }
     }
@@ -98,7 +125,7 @@ pub fn outline_points(points: &[OutlinePoint], options: &OutlineOptions) -> Vec<
     }
     let total = cumulative[cumulative.len() - 1];
     let taper_length = if options.taper > 0.0 {
-        total * options.taper
+        (total * options.taper).min(options.width_pt * TAPER_MAX_NIB_WIDTHS)
     } else {
         0.0
     };
@@ -106,19 +133,32 @@ pub fn outline_points(points: &[OutlinePoint], options: &OutlineOptions) -> Vec<
     let mut left = Vec::with_capacity(path.len());
     let mut right = Vec::with_capacity(path.len());
 
+    // Carried so a stretch too short to differentiate reuses the last direction that meant
+    // something, rather than snapping to a fixed axis and folding the outline over itself.
+    let mut heading = (1.0_f64, 0.0_f64);
+
     for index in 0..path.len() {
-        // Central difference gives a stable direction; the ends use one-sided differences.
-        let previous = path[index.saturating_sub(1)];
-        let next = path[(index + 1).min(path.len() - 1)];
-        let mut dx = next.x - previous.x;
-        let mut dy = next.y - previous.y;
+        // Central difference, but taken over a span rather than over the immediate neighbours:
+        // two samples a hundredth of a point apart describe jitter, not direction. Well-spaced
+        // samples reach the span on their neighbours, so this is the plain central difference
+        // wherever the stroke is not crawling.
+        let mut back = index;
+        while back > 0 && span(path[back], path[index]) < MIN_DIRECTION_SPAN_PT {
+            back -= 1;
+        }
+        let mut forward = index;
+        while forward + 1 < path.len() && span(path[forward], path[index]) < MIN_DIRECTION_SPAN_PT {
+            forward += 1;
+        }
+        let mut dx = path[forward].x - path[back].x;
+        let mut dy = path[forward].y - path[back].y;
         let length = dx.hypot(dy);
-        if length == 0.0 {
-            dx = 1.0;
-            dy = 0.0;
-        } else {
+        if length > 0.0 {
             dx /= length;
             dy /= length;
+            heading = (dx, dy);
+        } else {
+            (dx, dy) = heading;
         }
 
         let mut half = width_at(&path[index], options) / 2.0;

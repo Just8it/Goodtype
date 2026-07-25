@@ -59,6 +59,23 @@ export function clampToPage(point: Point, page: Size): Point {
   };
 }
 
+/**
+ * Keep a sample within reach of the page without pinning it to the edge.
+ *
+ * Pen samples must *not* go through `clampToPage`. A hand that runs off the sheet mid-stroke
+ * produces a run of samples all clamped to the same edge coordinate, which collapses into a
+ * straight line drawn along the boundary — and it is stored that way and exported that way.
+ * Letting the coordinates stay real means the stroke simply leaves the page, and the page's own
+ * clipping hides what is outside. The bound here is only so a broken viewport cannot produce
+ * absurd geometry; it is a sanity limit, not a layout rule.
+ */
+export function containToPage(point: Point, page: Size): Point {
+  return {
+    x: Math.min(Math.max(point.x, -page.width), page.width * 2),
+    y: Math.min(Math.max(point.y, -page.height), page.height * 2),
+  };
+}
+
 export function clampZoom(zoom: number, minimum = 0.5, maximum = 2): number {
   return Math.min(Math.max(validZoom(zoom), minimum), maximum);
 }

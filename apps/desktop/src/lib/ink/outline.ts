@@ -27,6 +27,36 @@ export type OutlineOptions = {
 const MIN_PRESSURE_SCALE = 0.25;
 
 /**
+ * Samples closer together than this carry no usable direction — the vector between them is
+ * dominated by pointer jitter, so the normal computed from it flips and bites a notch out of the
+ * silhouette. Drawing slowly is what produces them, which is why a slow highlighter sweep came
+ * out ragged while a quick one did not.
+ */
+const MIN_SAMPLE_SPACING_PT = 0.05;
+
+/**
+ * How far apart the two samples behind a central difference must be before the direction they
+ * give is trusted. Larger than the dedup spacing, so a dense but legitimate curve is still
+ * differentiated over a span long enough to mean something. Well-spaced samples reach this on
+ * the immediate neighbours and behave exactly as a plain central difference.
+ */
+const MIN_DIRECTION_SPAN_PT = 0.5;
+
+/**
+ * A taper runs over at most this many nib widths.
+ *
+ * It used to be a pure fraction of arc length, which made a full-page sweep taper over
+ * centimetres while a flick tapered over millimetres. A real nib tapers over a distance set by
+ * the nib, not by how far the hand happened to travel.
+ */
+const TAPER_MAX_NIB_WIDTHS = 6;
+
+/** Distance between two samples, used to decide whether they are far enough apart to mean anything. */
+function span(a: OutlinePoint, b: OutlinePoint): number {
+  return Math.hypot(a.x - b.x, a.y - b.y);
+}
+
+/**
  * Rounding is part of the contract: both implementations must produce identical numbers, so
  * this uses round-half-toward-positive-infinity (JavaScript's `Math.round`) and the Rust side
  * mimics it deliberately rather than using `f64::round`.
@@ -51,11 +81,13 @@ export function outlinePoints(
 ): { x: number; y: number }[] {
   if (points.length === 0) return [];
 
-  // Consecutive duplicates carry no direction and would produce a zero normal.
+  // Samples too close together carry no direction and would produce a noisy normal. Exact
+  // duplicates were already dropped here; near-duplicates were not, and they are what a slowly
+  // drawn stroke is made of.
   const path: OutlinePoint[] = [points[0]];
   for (const point of points.slice(1)) {
     const previous = path[path.length - 1];
-    if (point.x !== previous.x || point.y !== previous.y) path.push(point);
+    if (span(point, previous) > MIN_SAMPLE_SPACING_PT) path.push(point);
   }
 
   if (path.length === 1) {
@@ -77,24 +109,39 @@ export function outlinePoints(
     cumulative.push(cumulative[index - 1] + Math.hypot(dx, dy));
   }
   const total = cumulative[cumulative.length - 1];
-  const taperLength = options.taper > 0 ? total * options.taper : 0;
+  const taperLength =
+    options.taper > 0
+      ? Math.min(total * options.taper, options.widthPt * TAPER_MAX_NIB_WIDTHS)
+      : 0;
 
   const left: { x: number; y: number }[] = [];
   const right: { x: number; y: number }[] = [];
 
+  // Carried so a stretch too short to differentiate reuses the last direction that meant
+  // something, rather than snapping to a fixed axis and folding the outline over itself.
+  let heading = { x: 1, y: 0 };
+
   for (let index = 0; index < path.length; index += 1) {
-    // Central difference gives a stable direction; the ends fall back to one-sided differences.
-    const previous = path[Math.max(0, index - 1)];
-    const next = path[Math.min(path.length - 1, index + 1)];
-    let dx = next.x - previous.x;
-    let dy = next.y - previous.y;
+    // Central difference, but taken over a span rather than over the immediate neighbours: two
+    // samples a hundredth of a point apart describe jitter, not direction. Well-spaced samples
+    // reach the span on their neighbours, so this is the plain central difference wherever the
+    // stroke is not crawling.
+    let back = index;
+    while (back > 0 && span(path[back], path[index]) < MIN_DIRECTION_SPAN_PT) back -= 1;
+    let forward = index;
+    while (forward + 1 < path.length && span(path[forward], path[index]) < MIN_DIRECTION_SPAN_PT)
+      forward += 1;
+
+    let dx = path[forward].x - path[back].x;
+    let dy = path[forward].y - path[back].y;
     const length = Math.hypot(dx, dy);
-    if (length === 0) {
-      dx = 1;
-      dy = 0;
-    } else {
+    if (length > 0) {
       dx /= length;
       dy /= length;
+      heading = { x: dx, y: dy };
+    } else {
+      dx = heading.x;
+      dy = heading.y;
     }
 
     let half = widthAt(path[index], options) / 2;

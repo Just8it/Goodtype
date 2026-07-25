@@ -1,5 +1,5 @@
 import type { Point, PageViewport, ScreenViewport, Size } from "../geometry/coordinates";
-import { clampToPage, screenToPage } from "../geometry/coordinates";
+import { containToPage, screenToPage } from "../geometry/coordinates";
 import type { StrokePoint } from "../model";
 
 export type PressureCalibration = {
@@ -79,7 +79,7 @@ export function normalizePointerSample(
   page: Size,
   calibration: PressureCalibration,
 ): StrokePoint {
-  const pagePoint = clampToPage(
+  const pagePoint = containToPage(
     screenToPage(
       { x: finite(sample.clientX), y: finite(sample.clientY) },
       viewport,

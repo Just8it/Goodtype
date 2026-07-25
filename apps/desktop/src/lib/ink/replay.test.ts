@@ -13,7 +13,7 @@ import {
 } from "./selection";
 
 describe("deterministic pen replay", () => {
-  it("normalizes pressure and clamps zoomed screen samples to page bounds", () => {
+  it("normalizes pressure and lets zoomed samples run past the page edge", () => {
     const points = replaySamples(
       fixture.samples,
       fixture.viewport,
@@ -22,10 +22,14 @@ describe("deterministic pen replay", () => {
       fixture.calibration,
     );
 
+    // The first and last samples land outside the 100x80 page and keep their real coordinates.
+    // Pinning them to the edge is what drew a line along the boundary when a hand ran off the
+    // sheet mid-stroke. Only the far outlier meets the sanity bound: y stops at twice the page
+    // height rather than at the page height.
     expect(points.map(({ x, y, pressure }) => ({ x, y, pressure }))).toEqual([
-      { x: 0, y: 0, pressure: 0 },
+      { x: -10, y: -15, pressure: 0 },
       { x: 50, y: 40, pressure: 0.5 },
-      { x: 100, y: 80, pressure: 1 },
+      { x: 145, y: 160, pressure: 1 },
     ]);
     expect(pointerRole({ pointerType: "touch", button: 0, buttons: 1 }, "pen")).toBe(
       "ignore",

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   clampToPage,
   clampZoom,
+  containToPage,
   pageToScreen,
   screenToPage,
   type PageViewport,
@@ -23,6 +24,16 @@ describe("coordinate authority", () => {
       y: 792,
     });
     expect(clampZoom(1.5 * (200 / 100))).toBe(2);
+  });
+
+  // Pen samples must not be pinned to the edge: a hand running off the sheet mid-stroke would
+  // produce a run of identical edge coordinates, which draws as a line along the boundary and is
+  // stored and exported that way.
+  it("lets a pen sample leave the page instead of pinning it to the edge", () => {
+    const page = { width: 612, height: 792 };
+    expect(containToPage({ x: -40, y: 830 }, page)).toEqual({ x: -40, y: 830 });
+    // Still bounded, so a broken viewport cannot produce absurd geometry.
+    expect(containToPage({ x: -1e6, y: 1e6 }, page)).toEqual({ x: -612, y: 1584 });
   });
 
   it("rejects an invalid zoom instead of corrupting canonical geometry", () => {
