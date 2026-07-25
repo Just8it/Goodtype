@@ -1,0 +1,19 @@
+<!--
+  Goodtype app icon at medium sizes (48-64px).
+
+  One set line instead of two, and heavier strokes. At these sizes the second, lighter line
+  stops reading as type and starts reading as noise.
+
+  Rasterised by `cargo xtask icons`, which picks the artwork by size. Edit the SVG, never the
+  bitmaps.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" fill="none" role="img" aria-label="Goodtype">
+  <rect width="1024" height="1024" rx="225.0" fill="#1B1E24"/>
+  <rect x="8" y="8" width="1008" height="1008" rx="217.0" stroke="#2B2F37" stroke-width="16"/>
+  <g transform="translate(54.3 203.93) scale(8.8019)">
+    <rect x="6" y="6" width="92" height="58" rx="7" stroke="#E9EBEE" stroke-width="7"/>
+    <path d="M18 36 C 24 24, 30 24, 34 34 C 37 41, 41 41, 45 32 C 48 25, 53 25, 57 30 C 60 34, 64 34, 67 29"
+          stroke="#38B6C6" stroke-width="5.95" stroke-linecap="round" stroke-linejoin="round"/>
+    <rect x="18" y="47" width="52" height="6.5" rx="3.25" fill="#E9EBEE"/>
+  </g>
+</svg>

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import type { RecentNotebook } from "../settings";
+  import BrandMark from "../brand/BrandMark.svelte";
 
   let {
     tauriAvailable,
@@ -95,9 +96,9 @@
      scanning, or sync — the list only remembers what the user opened. -->
 <section class="start" aria-label="Open a notebook">
   <header>
-    <span class="mark" aria-hidden="true"></span>
+    <BrandMark size={52} title="" />
     <h1>goodtype</h1>
-    <p>Local-first technical notebook</p>
+    <p>Write · Typeset · Arrange</p>
   </header>
 
   <div class="actions">
@@ -171,30 +172,25 @@
     text-align: center;
   }
 
-  .mark {
-    width: 34px;
-    height: 42px;
-    border: 2px solid #e9ebee;
-    border-radius: 6px;
-    background:
-      linear-gradient(transparent 55%, rgb(94 234 212 / 85%) 55%, rgb(94 234 212 / 85%) 62%, transparent 62%),
-      repeating-linear-gradient(transparent, transparent 6px, rgb(233 235 238 / 35%) 6px, rgb(233 235 238 / 35%) 7.5px);
-    background-position: 4px 6px;
-    background-size: calc(100% - 8px) calc(100% - 12px);
-    background-repeat: no-repeat;
-  }
-
+  /* Wordmark. The design sets this in Poppins 500; Goodtype ships no webfont and must not
+     fetch one, so this matches the weight, case, and tracking in the UI stack instead. */
   h1 {
-    margin: 6px 0 0;
-    font-size: 22px;
-    font-weight: 600;
-    letter-spacing: 0.01em;
+    margin: 10px 0 0;
+    font-size: 30px;
+    font-weight: 500;
+    letter-spacing: -0.02em;
+    text-transform: lowercase;
   }
 
+  /* Tagline, set like the lockup: mono, uppercase, widely tracked against the wordmark. */
   header p {
-    margin: 0;
-    color: #6a727c;
-    font-size: 12.5px;
+    margin: 4px 0 0;
+    color: #8a929c;
+    font-family: ui-monospace, "Cascadia Mono", "Segoe UI Mono", monospace;
+    font-size: 10.5px;
+    letter-spacing: 0.26em;
+    text-indent: 0.26em;
+    text-transform: uppercase;
   }
 
   .actions {
