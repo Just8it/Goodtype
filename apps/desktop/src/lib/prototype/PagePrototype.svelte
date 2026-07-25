@@ -23,7 +23,7 @@
     type StrokePerformance,
   } from "../ink/metrics";
   import type { InkTool } from "../ink/pipeline";
-  import { moveSelected, scaleSelected } from "../ink/selection";
+  import { moveSelected, scaleSelected, toolAfterSelection } from "../ink/selection";
   import ColorPanel from "./ColorPanel.svelte";
   import ToolPanel from "./ToolPanel.svelte";
   import PageSurface from "./PageSurface.svelte";
@@ -180,6 +180,8 @@
   let selectedImage = $state(false);
   let selectedTypstId = $state<string | null>(null);
   let directObjectInput = $state(false);
+  /** True while the selection tool is only active because the lasso handed over to it. */
+  let lassoHandedOver = $state(false);
   let strokeMetrics = $state<StrokePerformance[]>([]);
   let compileMs = $state<number | null>(null);
   let zoomFrameMs = $state<number | null>(null);
@@ -1471,9 +1473,17 @@
     queueCommit("Grouped ink with Typst");
   }
 
+  /**
+   * Every change to the ink selection goes through here, because the lasso's hand-over to the
+   * selection tool has to be undone when the selection empties — and a delete that assigned
+   * `selectedStrokeIds` directly would skip that and strand the writer on a tool they never
+   * picked.
+   */
   function updateInkSelection(ids: string[]) {
     selectedStrokeIds = ids;
-    if (ids.length > 0 && tool === "lasso") tool = "select";
+    const next = toolAfterSelection(tool, ids.length, lassoHandedOver);
+    tool = next.tool;
+    lassoHandedOver = next.handedOver;
   }
 
   const TOOL_NAMES: Record<InkTool, string> = {
@@ -1487,6 +1497,7 @@
   function activateTool(next: InkTool, preset?: 1 | 2) {
     if (preset) penPreset = preset;
     tool = next;
+    lassoHandedOver = false;
     status = `${next === "pen" ? `Pen ${penPreset}` : TOOL_NAMES[next]} active`;
   }
 
@@ -1742,7 +1753,7 @@
     }
     if (selectedStrokeIds.length > 0) {
       const removed = new Set(selectedStrokeIds);
-      selectedStrokeIds = [];
+      updateInkSelection([]);
       changeStrokes(
         strokes.filter((stroke) => !removed.has(stroke.id)),
         "Deleted ink selection",

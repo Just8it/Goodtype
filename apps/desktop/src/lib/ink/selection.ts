@@ -1,5 +1,6 @@
 import type { Point } from "../geometry/coordinates";
 import type { Stroke, StrokePoint } from "../model";
+import type { InkTool } from "./pipeline";
 
 export type Bounds = {
   left: number;
@@ -160,4 +161,29 @@ function distanceToSegment(point: Point, start: Point, end: Point): number {
     1,
   );
   return Math.hypot(point.x - (start.x + amount * dx), point.y - (start.y + amount * dy));
+}
+
+/**
+ * The lasso hands over to the selection tool the moment it catches something, so the writer can
+ * move or scale what they just caught without a second trip to the palette.
+ *
+ * The hand-over has to be undone when the selection empties. Deleting what you lassoed left the
+ * tool sitting on "select" — dragging did nothing, and the only way out was to pick the lasso
+ * again. Coming back is not a nicety: nothing on screen says the tool changed under you.
+ *
+ * Only an automatic hand-over is reversed. Picking a tool by hand is a decision, and clearing a
+ * selection must not undo it.
+ */
+export type LassoHandover = { tool: InkTool; handedOver: boolean };
+
+export function toolAfterSelection(
+  tool: InkTool,
+  selectedCount: number,
+  handedOver: boolean,
+): LassoHandover {
+  if (selectedCount > 0 && tool === "lasso") return { tool: "select", handedOver: true };
+  if (selectedCount === 0 && handedOver && tool === "select") {
+    return { tool: "lasso", handedOver: false };
+  }
+  return { tool, handedOver };
 }
