@@ -23,6 +23,8 @@
   import ColorPanel from "./ColorPanel.svelte";
   import ToolPanel from "./ToolPanel.svelte";
   import PageSurface from "./PageSurface.svelte";
+  import OverflowMenu from "../workspace/OverflowMenu.svelte";
+  import { populated, type MenuSection } from "../workspace/menu";
   import SideEditor from "./SideEditor.svelte";
   import {
     AssetUrlCache,
@@ -1001,6 +1003,100 @@
     } finally {
       busy = false;
     }
+  }
+
+  /**
+   * Empty the page without removing it.
+   *
+   * A page always carries at least one Typst block — `buildSnapshot` groups against
+   * `MAIN_TYPST_ID` and the reading order references it — so clearing resets that block to empty
+   * rather than deleting every object. Removing it outright would produce a snapshot the storage
+   * layer rejects.
+   *
+   * This goes through the ordinary commit path, so it lands in history and undo covers it. That
+   * is the whole reason there is no trash: the recovery mechanism already exists.
+   */
+  function clearActivePage() {
+    moreOpen = false;
+    if (!pageOpen) return;
+    typstBlocks = [
+      {
+        id: MAIN_TYPST_ID,
+        path: BLOCK_PATH,
+        source: "",
+        transform: { x: 96, y: 120, layoutWidthPt: 230, scale: 1 },
+        result: null,
+      },
+    ];
+    strokes = [];
+    selectedStrokeIds = [];
+    groupedStrokeIds = [];
+    image = null;
+    selectedTypstId = null;
+    selectedImage = false;
+    queueCommit("Cleared page");
+  }
+
+  /** Jump straight to a page number, one-based as the writer sees it. */
+  async function goToPageNumber(number: number) {
+    const pages = notebookManifest?.pages ?? [];
+    const target = pages[number - 1];
+    if (target && target.id !== activePageId) await activatePage(target.id);
+  }
+
+  const pageCount = $derived(notebookManifest?.pages.length ?? 1);
+  const pageNumber = $derived(
+    (notebookManifest?.pages.findIndex((page) => page.id === activePageId) ?? 0) + 1,
+  );
+
+  /**
+   * The overflow menu, described as data. A new page-level feature — a template picker, a
+   * bookmark, rotation — is an entry in this list rather than another branch of markup, which
+   * is the point: this menu is where all of them have to surface.
+   */
+  function menuSections(): MenuSection[] {
+    const many = pageCount > 1;
+    if (!pageOpen) {
+      return [
+        {
+          title: "Notebook",
+          entries: [
+            { kind: "action", id: "reopen", label: "Reopen notebook", onSelect: reopen },
+            { kind: "action", id: "settings", label: "Settings", hint: "Ctrl ,", onSelect: () => (settingsOpen = true) },
+          ],
+        },
+      ];
+    }
+    return populated([
+      {
+        entries: [
+          { kind: "action", id: "duplicate", label: "Duplicate Page", onSelect: duplicateActivePage },
+          { kind: "action", id: "insert", label: "Insert Page Below", onSelect: addPage },
+          { kind: "action", id: "up", label: "Move Page Up", disabled: !many || pageNumber === 1, onSelect: () => void moveActivePage(-1) },
+          { kind: "action", id: "down", label: "Move Page Down", disabled: !many || pageNumber === pageCount, onSelect: () => void moveActivePage(1) },
+          { kind: "number", id: "goto", label: "Go to Page", value: pageNumber, min: 1, max: pageCount, hint: `of ${pageCount}`, disabled: !many, onCommit: (number) => void goToPageNumber(number) },
+        ],
+      },
+      {
+        title: "Clear or remove page",
+        entries: [
+          { kind: "action", id: "clear", label: "Clear Page", destructive: true, onSelect: clearActivePage },
+          // Undo covers this: deleting drops the manifest reference and the page's own files stay
+          // on disk. That is why there is no trash bin.
+          { kind: "action", id: "delete", label: "Delete Page", destructive: true, disabled: !many, onSelect: deleteActivePage },
+        ],
+      },
+      {
+        title: "Notebook",
+        entries: [
+          { kind: "action", id: "search", label: "Search notebook", hint: "Ctrl F", onSelect: () => (searchOpen = true) },
+          { kind: "action", id: "settings", label: "Settings", hint: "Ctrl ,", onSelect: () => (settingsOpen = true) },
+          { kind: "action", id: "save", label: "Confirm saved", onSelect: () => void persist() },
+          { kind: "action", id: "metrics", label: "Timing evidence", onSelect: () => (metricsOpen = true) },
+          { kind: "action", id: "close", label: "Close notebook", onSelect: closePage },
+        ],
+      },
+    ]);
   }
 
   async function moveActivePage(direction: -1 | 1) {
@@ -2168,29 +2264,12 @@
   </header>
 
   {#if moreOpen}
-    <aside class="overflow-menu" aria-label="Notebook actions">
-      <div class="menu-path" title={root}><span>Local notebook</span><strong>{root || "Opening..."}</strong></div>
-      <button type="button" onclick={() => { settingsOpen = true; moreOpen = false; }}>Settings<span class="menu-hint">Ctrl ,</span></button>
-      <button type="button" onclick={() => { searchOpen = true; moreOpen = false; }}>Search notebook<span class="menu-hint">Ctrl F</span></button>
-      <div class="menu-divider"></div>
-      <button type="button" onclick={() => void persist()}>Confirm saved</button>
-      {#if pageOpen}
-        <button type="button" onclick={addPage}>Add page below</button>
-        <button type="button" onclick={duplicateActivePage}>Duplicate this page</button>
-        {#if (notebookManifest?.pages.length ?? 1) > 1}
-          <button type="button" onclick={() => void moveActivePage(-1)}>Move page up</button>
-          <button type="button" onclick={() => void moveActivePage(1)}>Move page down</button>
-          <button class="muted-action" type="button" onclick={deleteActivePage}>Delete this page…</button>
-        {/if}
-      {/if}
-      <button type="button" onclick={() => { metricsOpen = true; moreOpen = false; }}>Timing evidence</button>
-      <div class="menu-divider"></div>
-      {#if pageOpen}
-        <button class="muted-action" type="button" onclick={closePage}>Close notebook</button>
-      {:else}
-        <button type="button" onclick={reopen}>Reopen notebook</button>
-      {/if}
-    </aside>
+    <OverflowMenu
+      title={pageOpen ? `Page ${pageNumber} of ${pageCount}` : "Notebook"}
+      subtitle={root || "Opening..."}
+      sections={menuSections()}
+      onClose={() => (moreOpen = false)}
+    />
   {/if}
 
   {#if pageOpen}
@@ -2698,27 +2777,6 @@
   .icon-button svg.stroke-icon { fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
   .export-button:hover, .icon-button:hover, .icon-button.active { background: rgb(255 255 255 / 8%); }
 
-  .overflow-menu {
-    position: absolute;
-    z-index: 50;
-    top: 52px;
-    right: 14px;
-    width: min(300px, calc(100vw - 28px));
-    padding: 7px;
-    border: 1px solid rgb(255 255 255 / 12%);
-    border-radius: 11px;
-    background: var(--panel);
-    box-shadow: 0 18px 44px rgb(0 0 0 / 55%);
-  }
-
-  .overflow-menu button { display: flex; align-items: center; width: 100%; padding: 10px 11px; border-radius: 7px; background: transparent; color: var(--text); text-align: left; cursor: pointer; }
-  .overflow-menu button:hover { background: rgb(255 255 255 / 6%); }
-  .menu-hint { margin-left: auto; padding-left: 12px; color: var(--quiet); font-size: 10px; font-variant-numeric: tabular-nums; }
-  .menu-path { padding: 8px 10px 10px; border-bottom: 1px solid rgb(255 255 255 / 8%); margin-bottom: 5px; }
-  .menu-path span { display: block; color: var(--quiet); font-size: 10px; letter-spacing: .08em; text-transform: uppercase; }
-  .menu-path strong { display: block; overflow: hidden; margin-top: 4px; color: var(--muted); font-size: 10.5px; font-weight: 400; text-overflow: ellipsis; white-space: nowrap; }
-  .menu-divider { height: 1px; margin: 5px 8px; background: rgb(255 255 255 / 9%); }
-  .overflow-menu .muted-action { color: var(--muted); }
 
   /* The source view is a sibling of the canvas, not an overlay on it, so opening the panel
      genuinely narrows the canvas. Everything positioned inside the canvas — the palette above
