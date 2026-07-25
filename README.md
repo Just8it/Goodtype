@@ -3,9 +3,11 @@
 [![platform](https://img.shields.io/badge/platform-Windows-blue)](#build)
 [![built with](https://img.shields.io/badge/built%20with-Rust%20%2B%20Svelte%205-orange)](#how-it-is-put-together)
 
-# Goodtype
+<p align="center"><img src="brand/mark-dark.svg#gh-dark-mode-only" width="150" alt="Goodtype"><img src="brand/mark-light.svg#gh-light-mode-only" width="150" alt="Goodtype"></p>
 
-A local-first technical notebook where handwriting and typesetting share the same page.
+<h1 align="center">Goodtype</h1>
+
+<p align="center">A local-first technical notebook where handwriting and typesetting share the same page.</p>
 
 Write with a pen, drop in a Typst block for the equation you do not want to draw by hand, and
 place images or PDF material alongside both — on fixed pages that export as one PDF, with the ink
