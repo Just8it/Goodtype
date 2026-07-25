@@ -239,9 +239,27 @@ fn observe_snapshot(
     Ok(snapshot)
 }
 
+/// Where a new page lands in the manifest.
+///
+/// Not part of the on-disk format — it is an argument to the operation. Appending was never
+/// enough: inserting before the current page is how a cover or a correction gets added, and
+/// inserting after it is how you keep writing without walking back to the end.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+pub enum PagePosition {
+    Before { page_id: String },
+    After { page_id: String },
+    Last,
+}
+
 pub fn create_page(
     selected_root: &Path,
     modified_at: &str,
+    position: &PagePosition,
 ) -> Result<NotebookSnapshot, StorageError> {
     if modified_at.is_empty() || modified_at.len() > 64 {
         return invalid("page timestamp must be present and bounded");
@@ -255,10 +273,18 @@ pub fn create_page(
 
     let (id, page_path, ink_id, ink_path) = fresh_page_identifiers(&root, &manifest);
 
-    manifest.pages.push(PageReference {
-        id: id.clone(),
-        path: page_path,
-    });
+    let insert_at = match position {
+        PagePosition::Last => manifest.pages.len(),
+        PagePosition::Before { page_id } => neighbour_index(&manifest, page_id)?,
+        PagePosition::After { page_id } => neighbour_index(&manifest, page_id)? + 1,
+    };
+    manifest.pages.insert(
+        insert_at,
+        PageReference {
+            id: id.clone(),
+            path: page_path,
+        },
+    );
     manifest.modified_at = modified_at.to_owned();
     let page = Page {
         schema_version: SCHEMA_VERSION,
@@ -291,6 +317,16 @@ pub fn create_page(
     }
     save_to_root(&root, &snapshot)?;
     open_page(&root, &snapshot.page.id)
+}
+
+/// Position of the page a new one is being placed next to. A stale id means the caller's view of
+/// the notebook no longer matches the file, which is a refusal rather than a silent append.
+fn neighbour_index(manifest: &NotebookManifest, page_id: &str) -> Result<usize, StorageError> {
+    manifest
+        .pages
+        .iter()
+        .position(|page| page.id == page_id)
+        .ok_or_else(|| invalid_error("cannot place a page next to one this notebook does not have"))
 }
 
 fn fresh_page_identifiers(
@@ -2080,7 +2116,8 @@ mod tests {
         let notebook_root = temporary.path().join("notebook");
         create_notebook(&notebook_root, &snapshot()).unwrap();
 
-        let second = create_page(&notebook_root, "2026-07-23T18:00:00Z").unwrap();
+        let second =
+            create_page(&notebook_root, "2026-07-23T18:00:00Z", &PagePosition::Last).unwrap();
         assert_eq!(second.manifest.pages.len(), 2);
         assert_eq!(second.page.id, "page-002");
         assert!(second.page.objects.is_empty());
@@ -2521,12 +2558,68 @@ mod tests {
     }
 
     #[test]
+    fn new_pages_land_where_the_writer_put_them() {
+        let temporary = tempfile::tempdir().unwrap();
+        let notebook_root = temporary.path().join("notebook");
+        create_notebook(&notebook_root, &snapshot()).unwrap();
+
+        let order = |snapshot: &NotebookSnapshot| -> Vec<String> {
+            snapshot
+                .manifest
+                .pages
+                .iter()
+                .map(|page| page.id.clone())
+                .collect()
+        };
+
+        let appended =
+            create_page(&notebook_root, "2026-07-25T09:00:00Z", &PagePosition::Last).unwrap();
+        assert_eq!(order(&appended), ["page-001", "page-002"]);
+
+        let before = create_page(
+            &notebook_root,
+            "2026-07-25T09:01:00Z",
+            &PagePosition::Before {
+                page_id: "page-001".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(order(&before), ["page-003", "page-001", "page-002"]);
+        assert_eq!(before.page.id, "page-003");
+
+        let after = create_page(
+            &notebook_root,
+            "2026-07-25T09:02:00Z",
+            &PagePosition::After {
+                page_id: "page-001".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            order(&after),
+            ["page-003", "page-001", "page-004", "page-002"]
+        );
+
+        // A neighbour the notebook does not have is a stale view, not a reason to append.
+        assert!(
+            create_page(
+                &notebook_root,
+                "2026-07-25T09:03:00Z",
+                &PagePosition::After {
+                    page_id: "page-404".into(),
+                },
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn deletes_and_reorders_pages_with_guards() {
         let temporary = tempfile::tempdir().unwrap();
         let notebook_root = temporary.path().join("notebook");
         create_notebook(&notebook_root, &snapshot()).unwrap();
-        create_page(&notebook_root, "2026-07-23T19:00:00Z").unwrap();
-        create_page(&notebook_root, "2026-07-23T19:01:00Z").unwrap();
+        create_page(&notebook_root, "2026-07-23T19:00:00Z", &PagePosition::Last).unwrap();
+        create_page(&notebook_root, "2026-07-23T19:01:00Z", &PagePosition::Last).unwrap();
 
         let reordered = reorder_pages(
             &notebook_root,

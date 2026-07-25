@@ -19,6 +19,15 @@ export type PageBackground =
   | { kind: "plain"; color: string }
   | { kind: "pdf"; sourcePath: string; page: number };
 
+/**
+ * Where `create_page` puts the new page. Not part of the stored format — it is an argument to
+ * the command, mirroring `storage::PagePosition`.
+ */
+export type PagePosition =
+  | { kind: "before"; pageId: string }
+  | { kind: "after"; pageId: string }
+  | { kind: "last" };
+
 export type Page = {
   schemaVersion: number;
   id: string;
