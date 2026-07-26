@@ -29,8 +29,15 @@ const MAX_MANIFEST_BYTES: u64 = 4 * 1024 * 1024;
 
 /// One row in a folder listing. Either a folder to descend into or a notebook to open — the
 /// frontend never has to guess which from the shape of the fields.
+/// `rename_all` governs the variant names; the fields of a struct variant need
+/// `rename_all_fields` of their own, or `modified_ms` reaches the frontend still in snake_case.
+/// Same shape as `PagePosition` in `goodtype_core::storage`.
 #[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase", tag = "kind")]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
 pub enum LibraryEntry {
     Folder {
         name: String,
@@ -356,6 +363,21 @@ mod tests {
             resolve(root.path(), "").unwrap(),
             fs::canonicalize(root.path()).unwrap()
         );
+    }
+
+    /// The frontend reads these fields by name, and a serde attribute in the wrong place is
+    /// invisible until a tile renders `undefined`. Pin the wire shape here instead.
+    #[test]
+    fn an_entry_reaches_the_frontend_in_camel_case() {
+        let root = library();
+        let entries = read_folder(root.path(), "Semester 3").unwrap();
+        let json = serde_json::to_value(&entries).unwrap();
+
+        assert_eq!(json[0]["kind"], "folder");
+        assert_eq!(json[0]["childCount"], 0);
+        assert!(json[0].get("modifiedMs").is_some(), "{json}");
+        assert_eq!(json[1]["kind"], "notebook");
+        assert_eq!(json[1]["pageCount"], 3);
     }
 
     /// A manifest that cannot be parsed must not remove the notebook from the shelf — it is
