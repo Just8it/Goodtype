@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { toolAfterSelection } from "./selection";
+import { keepsSelection, toolAfterSelection } from "./selection";
 
 describe("lasso hand-over", () => {
   it("hands over to selection once the lasso catches something", () => {
@@ -20,5 +20,20 @@ describe("lasso hand-over", () => {
 
   it("stays put while a hand-over selection is still live", () => {
     expect(toolAfterSelection("select", 2, true)).toEqual({ tool: "select", handedOver: true });
+  });
+});
+
+// A selection is live only while a selection tool is. One answer has to serve both the clearing
+// and the routing, or the page shows handles that nothing will act on.
+describe("which tools a selection survives", () => {
+  it("keeps a selection under the selection tools", () => {
+    expect(keepsSelection("lasso")).toBe(true);
+    expect(keepsSelection("select")).toBe(true);
+  });
+
+  it("drops it under anything that draws", () => {
+    expect(keepsSelection("pen")).toBe(false);
+    expect(keepsSelection("highlighter")).toBe(false);
+    expect(keepsSelection("eraser")).toBe(false);
   });
 });

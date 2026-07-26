@@ -23,7 +23,7 @@
     type StrokePerformance,
   } from "../ink/metrics";
   import type { InkTool } from "../ink/pipeline";
-  import { moveSelected, scaleSelected, toolAfterSelection } from "../ink/selection";
+  import { keepsSelection, moveSelected, scaleSelected, toolAfterSelection } from "../ink/selection";
   import ColorPanel from "./ColorPanel.svelte";
   import ToolPanel from "./ToolPanel.svelte";
   import PageSurface from "./PageSurface.svelte";
@@ -1502,6 +1502,14 @@
     if (preset) penPreset = preset;
     tool = next;
     lassoHandedOver = false;
+    // A brush owns the page, so anything still selected would sit there showing handles and
+    // refusing to move. Dropping it is the honest half of that: the selection is gone because
+    // the tool that acted on it is.
+    if (!keepsSelection(next)) {
+      updateInkSelection([]);
+      selectedTypstId = null;
+      selectedImage = false;
+    }
     status = `${next === "pen" ? `Pen ${penPreset}` : TOOL_NAMES[next]} active`;
   }
 
@@ -1603,7 +1611,12 @@
   }
 
   function routeObjectPointer(event: PointerEvent) {
-    if (event.pointerType === "pen") {
+    // While a brush is active the page is a drawing surface and nothing else: a block under the
+    // pointer is something to write on. While a selection tool is active it is the other way
+    // round, and that holds for the pen too. The rule used to be "a pen event is always ink",
+    // which is why a block could never be picked up with the stylus that wrote it — and why one
+    // tapped with a mouse selected, showed handles, and then refused to move.
+    if (!keepsSelection(tool)) {
       directObjectInput = false;
       return;
     }
@@ -1630,8 +1643,10 @@
       colorPanel = null;
       toolPanel = null;
     }
+    // Nothing to drop while a brush is active — `activateTool` already cleared it — and a press
+    // mid-stroke must not be read as "deselect".
     if (
-      event.pointerType === "pen" ||
+      !keepsSelection(tool) ||
       (event.target instanceof Element &&
         event.target.closest(".typst-block, .image-object, .typst-size-control"))
     ) {

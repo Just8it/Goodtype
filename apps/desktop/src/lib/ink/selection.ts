@@ -187,3 +187,18 @@ export function toolAfterSelection(
   }
   return { tool, handedOver };
 }
+
+/**
+ * Whether a selection means anything while this tool is active.
+ *
+ * A selection is only live while a selection tool is. A brush owns the whole page — an object
+ * under the pointer is something to draw on, not something to grab — so a selection carried into
+ * one would sit there looking live and doing nothing, which is the state people reported as
+ * broken. Picking a brush drops it; picking the lasso or the selection tool keeps it.
+ *
+ * The same answer decides who receives a press. Both halves have to use this one function, or the
+ * page shows handles it will not act on.
+ */
+export function keepsSelection(tool: InkTool): boolean {
+  return tool === "lasso" || tool === "select";
+}

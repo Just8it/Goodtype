@@ -333,25 +333,39 @@
 </section>
 
 <style>
+  /* The block's box is its Typst layout box, which runs cap height to baseline — that is what the
+     export places, so it has to stay exact. It is not what the text looks like: descenders hang
+     below it and accents rise above it. So the chrome is drawn on a pseudo-element pushed out by
+     a gutter, and the box itself carries no border or background. Draw them on the box and the
+     frame slices through the writer's own descenders. */
   .typst-block {
+    --block-gutter: 6px;
+
     position: absolute;
     box-sizing: border-box;
     transform-origin: top left;
     /* Sits above sibling objects while being edited; the page lifts the whole object layer over
        the ink so the editing surface is never buried under strokes. */
     z-index: 0;
-    border: 1px solid rgb(30 35 43 / 14%);
-    border-radius: 4px;
-    background: #fff;
     color: #111;
     touch-action: none;
   }
 
-  .typst-block.selected,
-  .typst-block:focus-within,
-  .typst-block.editing {
-    outline: 1.5px solid #2f6fdb;
-    outline-offset: 0;
+  .typst-block::before {
+    position: absolute;
+    z-index: -1;
+    border: 1px solid rgb(30 35 43 / 14%);
+    border-radius: 7px;
+    background: #fff;
+    content: "";
+    inset: calc(-1 * var(--block-gutter));
+  }
+
+  .typst-block.selected::before,
+  .typst-block:focus-within::before,
+  .typst-block.editing::before {
+    border-color: #2f6fdb;
+    box-shadow: 0 0 0 0.5px #2f6fdb;
   }
 
   .typst-block.editing {
@@ -361,7 +375,8 @@
   /* Out of flow, so the rendered block never moves when the source opens. */
   .editor-dock {
     position: absolute;
-    top: calc(100% + 6px);
+    /* Clears the gutter as well as the box, so the source never sits on the block's frame. */
+    top: calc(100% + var(--block-gutter) + 6px);
     left: 0;
     z-index: 4;
     min-width: 100%;
@@ -369,7 +384,7 @@
 
   .editor-dock.above {
     top: auto;
-    bottom: calc(100% + 6px);
+    bottom: calc(100% + var(--block-gutter) + 6px);
   }
 
   .preview:focus-visible,
@@ -430,7 +445,8 @@
   }
 
   .resize {
-    right: -14px;
+    /* Straddles the frame, which the gutter has moved outward. */
+    right: calc(-14px - var(--block-gutter));
     top: 50%;
     width: 28px;
     min-width: 28px;
