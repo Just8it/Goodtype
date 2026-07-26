@@ -3,7 +3,7 @@ import type { TypstCompileResult } from "./typst";
 import { getCachedTypst, setCachedTypst } from "./typstCache";
 
 function result(svg: string | null, generation = 1): TypstCompileResult {
-  return { generation, svg, widthPt: 120, heightPt: 48, diagnostics: [] };
+  return { generation, svg, widthPt: 120, heightPt: 48, padPt: 16, diagnostics: [] };
 }
 
 describe("typstCache", () => {

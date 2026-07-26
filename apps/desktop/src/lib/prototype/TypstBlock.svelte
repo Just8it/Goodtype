@@ -100,6 +100,12 @@
   // still in flight, so a brand-new block is clamped by something rather than by zero.
   const renderedHeightPt = $derived(preview.heightPt || 48);
 
+  // The SVG carries `padPt` of slack on every side so Typst does not clip its own descenders and
+  // inline math. Drawing it at its full size and pulling it back by the pad puts the content
+  // itself at the block's origin, at exactly the size the PDF prints — the overflow simply
+  // bleeds outside the box, which is what it does on the printed page too.
+  const svgWidthPx = $derived((preview.widthPt ?? layoutWidthPt) + 2 * preview.padPt);
+
   onMount(() => {
     x = initialX;
     y = initialY;
@@ -115,6 +121,7 @@
         svg: cached.svg,
         widthPt: cached.widthPt,
         heightPt: cached.heightPt,
+        padPt: cached.padPt,
         diagnostics: cached.diagnostics,
       };
       svgUrl = URL.createObjectURL(new Blob([cached.svg], { type: "image/svg+xml" }));
@@ -296,9 +303,15 @@
     onclick={onSelect}
   >
     {#if svgUrl}
-      <img src={svgUrl} alt="Rendered Typst content" draggable="false" />
+      <img
+        src={svgUrl}
+        alt="Rendered Typst content"
+        draggable="false"
+        style:width={`${svgWidthPx}px`}
+        style:margin={`${-preview.padPt}px`}
+      />
     {:else}
-      <span>No valid preview</span>
+      <span class="empty">No valid preview</span>
     {/if}
   </button>
 
@@ -365,11 +378,13 @@
     outline-offset: 2px;
   }
 
+  /* No padding: the content box is the block's true footprint, so what is on screen is the size
+     the PDF prints. Padding here scaled every preview down by however wide it was. */
   .preview {
     display: block;
+    box-sizing: border-box;
     width: 100%;
-    min-height: 3rem;
-    padding: 8px;
+    padding: 0;
     border: 0;
     border-radius: 4px;
     background: transparent;
@@ -377,11 +392,19 @@
     cursor: move;
   }
 
+  /* Width and a negative margin of the same size come from the pad, set inline. `height: auto`
+     keeps the SVG's aspect ratio, so the content lands at 1pt to the pixel. */
   .preview img {
     display: block;
-    width: 100%;
     height: auto;
     pointer-events: none;
+  }
+
+  /* Only the placeholder needs a floor; a real preview is exactly as tall as its content. */
+  .empty {
+    display: block;
+    min-height: 3rem;
+    padding: 8px;
   }
 
   .diagnostics {

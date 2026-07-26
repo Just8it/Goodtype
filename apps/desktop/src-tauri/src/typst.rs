@@ -17,8 +17,10 @@ pub struct CompileBlockRequest {
 pub struct CompileBlockResult {
     generation: u64,
     svg: Option<String>,
+    /// The content's own size; the SVG bleeds `pad_pt` past it on every side.
     width_pt: Option<f64>,
     height_pt: Option<f64>,
+    pad_pt: f64,
     diagnostics: Vec<CompileDiagnostic>,
 }
 
@@ -53,6 +55,7 @@ pub async fn compile_typst(
             svg: result.svg,
             width_pt: result.width_pt,
             height_pt: result.height_pt,
+            pad_pt: result.pad_pt,
             diagnostics: result
                 .diagnostics
                 .into_iter()

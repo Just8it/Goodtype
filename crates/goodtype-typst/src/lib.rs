@@ -13,6 +13,21 @@ use std::path::{Path, PathBuf};
 const MAX_SOURCE_BYTES: usize = 1024 * 1024;
 const MAX_WIDTH_PT: f64 = 10_000.0;
 
+/// Slack compiled around a preview so it is not clipped by its own page frame.
+///
+/// A Typst page with `height: auto` fits the content's *layout* box, and a line box runs from cap
+/// height to baseline — so descenders drop below the frame, and accents, tall delimiters and
+/// inline math rise above it. An SVG's viewBox is that frame, so everything outside it is cut
+/// off. The PDF export never had the problem: there a block is placed on a page far larger than
+/// itself, and Typst does not clip a block's overflow.
+///
+/// Compiling into a page this much wider with a margin to match keeps the text measure identical
+/// to the export's `block(width:)` — the same line breaks — and gives the overflow somewhere to
+/// land. [`CompileResult::width_pt`] and [`CompileResult::height_pt`] stay the size of the
+/// content alone, so a caller draws the SVG at its full size offset by `-pad_pt` and the content
+/// lands exactly where the export puts it.
+pub const PREVIEW_PAD_PT: f64 = 16.0;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompileRequest {
     pub source: String,
@@ -27,8 +42,13 @@ pub struct CompileRequest {
 pub struct CompileResult {
     pub generation: u64,
     pub svg: Option<String>,
+    /// Width of the content, excluding the [`PREVIEW_PAD_PT`] slack the SVG carries on each side.
     pub width_pt: Option<f64>,
+    /// Height of the content, excluding the [`PREVIEW_PAD_PT`] slack the SVG carries on each side.
     pub height_pt: Option<f64>,
+    /// How far the SVG extends past the content on every side. Draw it offset by `-pad_pt` to put
+    /// the content back where the export places it.
+    pub pad_pt: f64,
     pub diagnostics: Vec<Diagnostic>,
 }
 
@@ -143,15 +163,19 @@ pub fn compile_block(
         return Err(CompileError::SourceTooLarge(request.source.len()));
     }
 
+    // `fill: none` rather than the default white: the padding is meant to be see-through, or
+    // every block would wear a 16pt white halo over whatever it sits on.
     let wrapper = format!(
-        "#set page(width: {}pt, height: auto, margin: 0pt)\n{}",
-        request.width_pt, request.source
+        "#set page(width: {}pt, height: auto, margin: {PREVIEW_PAD_PT}pt, fill: none)\n{}",
+        request.width_pt + 2.0 * PREVIEW_PAD_PT,
+        request.source
     );
 
     Ok(embedded::compile_block(
         &root,
         request.generation,
         wrapper,
+        PREVIEW_PAD_PT,
         request.allow_remote_packages,
     ))
 }
@@ -203,6 +227,64 @@ mod tests {
                 .iter()
                 .any(|diagnostic| diagnostic.severity == DiagnosticSeverity::Error)
         );
+    }
+
+    /// The preview SVG must extend past the content on every side, and the reported size must
+    /// still be the content alone.
+    ///
+    /// Both halves matter. Without the slack, a line box running cap-height to baseline clips
+    /// every descender and every accent; without the content size staying exact, the block's
+    /// footprint on the page would no longer be what the PDF prints.
+    #[test]
+    fn a_preview_is_padded_without_changing_the_size_it_reports() {
+        let root = tempfile::tempdir().unwrap();
+        // Descenders below the baseline, an accent and inline math above the cap height: all of
+        // it used to fall outside the frame.
+        let result = compile_block(
+            root.path(),
+            &CompileRequest {
+                source: "Jaqjpy Ä $1/2$".to_owned(),
+                width_pt: 240.0,
+                generation: 1,
+                allow_remote_packages: false,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(result.pad_pt, PREVIEW_PAD_PT);
+        // The measure is untouched, so the block breaks its lines exactly as the export does.
+        assert_eq!(result.width_pt, Some(240.0));
+        let height = result.height_pt.unwrap();
+        assert!(height > 0.0, "content should have a height");
+
+        let svg = result.svg.unwrap();
+        let (frame_width, frame_height) = svg_view_box(&svg);
+        assert!(
+            (frame_width - (240.0 + 2.0 * PREVIEW_PAD_PT)).abs() < 1e-6,
+            "frame {frame_width} should clear the content by the pad on each side"
+        );
+        assert!(
+            (frame_height - (height + 2.0 * PREVIEW_PAD_PT)).abs() < 1e-6,
+            "frame {frame_height} should clear the {height}pt content by the pad on each side"
+        );
+        // The slack has to be see-through, or every block wears a white halo over the page.
+        assert!(
+            !svg.contains("fill=\"#ffffff\""),
+            "the page fill should not be painted"
+        );
+    }
+
+    fn svg_view_box(svg: &str) -> (f64, f64) {
+        let box_start = svg
+            .find("viewBox=\"")
+            .expect("svg should declare a viewBox")
+            + 9;
+        let box_end = box_start + svg[box_start..].find('"').unwrap();
+        let values: Vec<f64> = svg[box_start..box_end]
+            .split_whitespace()
+            .map(|value| value.parse().unwrap())
+            .collect();
+        (values[2], values[3])
     }
 
     /// An uncached package with downloads off must fail as a diagnostic without reaching the

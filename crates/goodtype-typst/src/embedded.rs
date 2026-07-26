@@ -33,6 +33,7 @@ pub(crate) fn compile_block(
     root: &Path,
     generation: u64,
     wrapper: String,
+    pad_pt: f64,
     allow_remote_packages: bool,
 ) -> CompileResult {
     let world = BlockWorld::for_main(
@@ -53,11 +54,17 @@ pub(crate) fn compile_block(
         Ok(document) => match document.pages().first() {
             Some(page) => {
                 let svg = typst_svg::svg(page, &SvgOptions::default());
+                // The frame includes the slack the wrapper asked for on all four sides. Reporting
+                // the content size keeps the block's footprint equal to what the export prints;
+                // `pad_pt` tells the caller how far the SVG bleeds past it. A source that sets
+                // its own page margin can leave less than the slack, hence the floor.
+                let content = |extent: f64| (extent - 2.0 * pad_pt).max(0.0);
                 CompileResult {
                     generation,
                     svg: Some(svg),
-                    width_pt: Some(page.frame.width().to_pt()),
-                    height_pt: Some(page.frame.height().to_pt()),
+                    width_pt: Some(content(page.frame.width().to_pt())),
+                    height_pt: Some(content(page.frame.height().to_pt())),
+                    pad_pt,
                     diagnostics,
                 }
             }
@@ -66,6 +73,7 @@ pub(crate) fn compile_block(
                 svg: None,
                 width_pt: None,
                 height_pt: None,
+                pad_pt,
                 diagnostics,
             },
         },
@@ -76,6 +84,7 @@ pub(crate) fn compile_block(
                 svg: None,
                 width_pt: None,
                 height_pt: None,
+                pad_pt,
                 diagnostics,
             }
         }

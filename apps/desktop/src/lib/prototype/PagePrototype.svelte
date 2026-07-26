@@ -1330,6 +1330,9 @@
         svg: previewSvg(request.source, request.widthPt),
         widthPt: request.widthPt,
         heightPt: 64,
+        // The browser stand-in draws its own SVG at exactly the block's size, with nothing
+        // outside it to make room for.
+        padPt: 0,
         diagnostics: [],
       };
       compileMs = performance.now() - startedAt;
@@ -1352,6 +1355,7 @@
             svg: null,
             widthPt: null,
             heightPt: null,
+            padPt: 0,
             diagnostics: [{ severity: "error", message: message(error) }],
           };
         }
