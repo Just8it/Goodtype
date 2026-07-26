@@ -1,5 +1,5 @@
 <!--
-  Goodtype app icon at medium sizes (48-64px).
+  Goodtype app icon at medium sizes (33-64px).
 
   A page with one handwritten stroke above two lines of set type. Teal is only ever the
   handwritten part; ink-grey is only ever set type. Never tint the page outline or the set lines
@@ -15,12 +15,11 @@
   never the bitmaps.
 -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" fill="none" role="img" aria-label="Goodtype">
-  <rect width="1024" height="1024" rx="225.0" fill="#1B1E24"/>
-  <rect x="8" y="8" width="1008" height="1008" rx="217.0" stroke="#2B2F37" stroke-width="16"/>
+  <rect width="1024" height="1024" rx="225.0" fill="#1497A6"/>
   <g transform="translate(20.48 181.17) scale(9.4523)">
-    <rect x="6" y="6" width="92" height="58" rx="7" stroke="#E9EBEE" stroke-width="7"/>
+    <rect x="6" y="6" width="92" height="58" rx="7" stroke="#FCFCFA" stroke-width="7"/>
     <path d="M18 30 C 24 18, 30 18, 34 28 C 37 35, 41 35, 45 26 C 48 19, 53 19, 57 24 C 60 28, 64 28, 67 23"
-          stroke="#38B6C6" stroke-width="5.95" stroke-linecap="round" stroke-linejoin="round"/>
-    <rect x="18" y="41" width="52" height="6.5" rx="3.25" fill="#E9EBEE"/>
+          stroke="#0C4A52" stroke-width="6.4" stroke-linecap="round" stroke-linejoin="round"/>
+    <rect x="18" y="41" width="52" height="6.5" rx="3.25" fill="#FCFCFA"/>
   </g>
 </svg>
