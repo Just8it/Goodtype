@@ -17,6 +17,7 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
+use goodtype_core::{PageDefaults, layout};
 use serde::{Deserialize, Serialize};
 use tauri_plugin_dialog::DialogExt;
 
@@ -54,6 +55,10 @@ pub enum LibraryEntry {
         /// `None` when the manifest could not be read. The notebook still lists — a tile that
         /// cannot state its length is better than a notebook that vanishes from the shelf.
         page_count: Option<usize>,
+        /// The paper this notebook is written on, so a tile can draw its real ruling before any
+        /// cover of its contents exists. It costs nothing: the manifest is already open for the
+        /// page count, and ruling is geometry rather than ink.
+        paper: Option<PageDefaults>,
     },
 }
 
@@ -100,27 +105,39 @@ pub fn resolve(root: &Path, relative: &str) -> Result<PathBuf, String> {
 
 /// Whether a directory is a notebook rather than an ordinary folder.
 pub fn is_notebook(path: &Path) -> bool {
-    path.join("goodtype.json").is_file()
+    path.join(layout::MANIFEST).is_file()
 }
 
-/// Pages in a notebook, read from its manifest.
+/// What a shelf needs out of a notebook's manifest: how long it is, and what paper it uses.
 ///
 /// Deliberately not `goodtype_core::storage::open`: that loads every page and its strokes, which
 /// is the right thing when opening one notebook and the wrong thing forty times over to draw a
-/// shelf. Only the length of `pages` is needed here.
-fn page_count(notebook: &Path) -> Option<usize> {
+/// shelf. `IgnoredAny` counts the pages without building any of them.
+///
+/// `default_page` is optional so a manifest that has drifted still yields a page count. A tile
+/// with no paper falls back to plain; a notebook that vanishes from the shelf has no fallback.
+fn peek_manifest(notebook: &Path) -> (Option<usize>, Option<PageDefaults>) {
     #[derive(Deserialize)]
-    struct PageCountOnly {
+    #[serde(rename_all = "camelCase")]
+    struct ManifestPeek {
         pages: Vec<serde::de::IgnoredAny>,
+        #[serde(default)]
+        default_page: Option<PageDefaults>,
     }
-    let manifest = notebook.join("goodtype.json");
-    if fs::metadata(&manifest).ok()?.len() > MAX_MANIFEST_BYTES {
-        return None;
+    let manifest = notebook.join(layout::MANIFEST);
+    let within_ceiling = fs::metadata(&manifest)
+        .map(|metadata| metadata.len() <= MAX_MANIFEST_BYTES)
+        .unwrap_or(false);
+    if !within_ceiling {
+        return (None, None);
     }
-    let bytes = fs::read(manifest).ok()?;
-    serde_json::from_slice::<PageCountOnly>(&bytes)
-        .ok()
-        .map(|manifest| manifest.pages.len())
+    let Ok(bytes) = fs::read(manifest) else {
+        return (None, None);
+    };
+    match serde_json::from_slice::<ManifestPeek>(&bytes) {
+        Ok(peek) => (Some(peek.pages.len()), peek.default_page),
+        Err(_) => (None, None),
+    }
 }
 
 fn modified_ms(path: &Path) -> Option<u64> {
@@ -175,11 +192,13 @@ pub fn read_folder(root: &Path, relative: &str) -> Result<Vec<LibraryEntry>, Str
         let name = entry.file_name().to_string_lossy().into_owned();
         let child_path = format!("{prefix}{name}");
         if is_notebook(&path) {
+            let (page_count, paper) = peek_manifest(&path);
             notebooks.push(LibraryEntry::Notebook {
                 name,
                 path: child_path,
-                modified_ms: modified_ms(&path.join("goodtype.json")),
-                page_count: page_count(&path),
+                modified_ms: modified_ms(&path.join(layout::MANIFEST)),
+                page_count,
+                paper,
             });
         } else {
             folders.push(LibraryEntry::Folder {

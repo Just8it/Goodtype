@@ -9,6 +9,8 @@
  * The mirror of `apps/desktop/src-tauri/src/library.rs`.
  */
 
+import type { PageDefaults } from "../model";
+
 export type LibraryFolder = {
   kind: "folder";
   name: string;
@@ -24,6 +26,12 @@ export type LibraryNotebook = {
   modifiedMs: number | null;
   /** Null when the manifest could not be read; the notebook still belongs on the shelf. */
   pageCount: number | null;
+  /**
+   * The paper the notebook is written on, so a tile draws its real ruling before any cover of
+   * its contents exists. Null when the manifest could not be read, where a tile falls back to
+   * blank paper rather than to nothing.
+   */
+  paper: PageDefaults | null;
 };
 
 export type LibraryEntry = LibraryFolder | LibraryNotebook;

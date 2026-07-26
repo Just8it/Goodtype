@@ -56,7 +56,7 @@
   import RecoveryDialog from "../workspace/RecoveryDialog.svelte";
   import SearchOverlay from "../workspace/SearchOverlay.svelte";
   import SettingsPanel from "../workspace/SettingsPanel.svelte";
-  import StartSurface from "../workspace/StartSurface.svelte";
+  import LibrarySurface from "../library/LibrarySurface.svelte";
   import {
     DEFAULT_SETTINGS,
     loadSettings,
@@ -2356,10 +2356,9 @@
 <main class="workspace-app" onpaste={pasteImage} onpointerdowncapture={closeObjectSelection} onwheel={wheelZoom}>
   {#if !notebookChosen}
     <div class="start-slot">
-      <StartSurface
+      <LibrarySurface
         {tauriAvailable}
         onOpen={(nextRoot) => void openNotebookAt(nextRoot)}
-        onCreate={(nextRoot) => void openNotebookAt(nextRoot, { createIfMissing: true })}
         onStatus={(next) => (status = next)}
       />
     </div>

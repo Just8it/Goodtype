@@ -22,6 +22,7 @@ const notebook = (name: string, modifiedMs: number | null = 0): LibraryEntry => 
   path: name,
   modifiedMs,
   pageCount: 1,
+  paper: null,
 });
 
 describe("library paths", () => {
