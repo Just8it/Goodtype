@@ -1611,12 +1611,13 @@
   }
 
   function routeObjectPointer(event: PointerEvent) {
-    // While a brush is active the page is a drawing surface and nothing else: a block under the
-    // pointer is something to write on. While a selection tool is active it is the other way
-    // round, and that holds for the pen too. The rule used to be "a pen event is always ink",
-    // which is why a block could never be picked up with the stylus that wrote it — and why one
-    // tapped with a mouse selected, showed handles, and then refused to move.
-    if (!keepsSelection(tool)) {
+    // A stylus is for writing, so ink takes it and you can write straight over a block. That was
+    // unconditional, which meant a block could never be picked up with the pen that wrote it —
+    // there was no tool that gave the stylus the object layer. A selection tool now does.
+    //
+    // Mouse and touch keep reaching objects under any tool: clicking a block to grab it is how
+    // this has always worked, and a brush is no reason to take it away.
+    if (event.pointerType === "pen" && !keepsSelection(tool)) {
       directObjectInput = false;
       return;
     }
@@ -1643,10 +1644,10 @@
       colorPanel = null;
       toolPanel = null;
     }
-    // Nothing to drop while a brush is active — `activateTool` already cleared it — and a press
-    // mid-stroke must not be read as "deselect".
+    // A stylus press mid-stroke is writing, not "deselect" — unless a selection tool is active,
+    // where a press on empty page means exactly that.
     if (
-      !keepsSelection(tool) ||
+      (event.pointerType === "pen" && !keepsSelection(tool)) ||
       (event.target instanceof Element &&
         event.target.closest(".typst-block, .image-object, .typst-size-control"))
     ) {
