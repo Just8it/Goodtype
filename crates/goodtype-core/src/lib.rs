@@ -1,10 +1,26 @@
 use serde::{Deserialize, Serialize};
 
+pub mod layout;
+pub mod object;
 pub mod outline;
 pub mod storage;
 pub mod template;
 
+pub use object::{IdRemap, ObjectFields, PageObject, SourceRef, SourceRole};
+
 pub const SCHEMA_VERSION: u32 = 1;
+
+/// Finite and greater than zero. Shared by every measurement the store refuses to guess at:
+/// a zero or NaN width is a corrupt page, not a small one.
+pub(crate) fn positive(value: f64) -> bool {
+    value.is_finite() && value > 0.0
+}
+
+/// Finite and not negative. Distinct from [`positive`] because a measured extent of zero is a
+/// legitimate empty result, while a width of zero is not.
+pub(crate) fn nonnegative(value: f64) -> bool {
+    value.is_finite() && value >= 0.0
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -70,6 +86,20 @@ pub enum PageBackground {
     },
 }
 
+impl PageBackground {
+    /// The file this background reads, if it reads one. Same contract as
+    /// [`PageObject::source`], so one helper checks both.
+    pub fn source(&self) -> Option<SourceRef<'_>> {
+        match self {
+            Self::Pdf { source_path, .. } => Some(SourceRef {
+                role: SourceRole::Reference,
+                path: source_path,
+            }),
+            Self::Plain { .. } | Self::Template { .. } => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Page {
@@ -88,77 +118,6 @@ pub struct Page {
 pub struct InkLayerReference {
     pub id: String,
     pub path: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ObjectFields {
-    pub id: String,
-    pub x: f64,
-    pub y: f64,
-    pub rotation: f64,
-    pub scale: f64,
-    pub z_index: i32,
-    pub reading_order: u32,
-    pub group_id: Option<String>,
-    pub created_at: String,
-    pub modified_at: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(
-    tag = "type",
-    rename_all = "snake_case",
-    rename_all_fields = "camelCase"
-)]
-pub enum PageObject {
-    Typst {
-        #[serde(flatten)]
-        fields: ObjectFields,
-        source_path: String,
-        layout_width_pt: f64,
-        measured_width_pt: f64,
-        measured_height_pt: f64,
-    },
-    Image {
-        #[serde(flatten)]
-        fields: ObjectFields,
-        source_path: String,
-        width_pt: f64,
-        height_pt: f64,
-        alt_text: String,
-    },
-    PdfMaterial {
-        #[serde(flatten)]
-        fields: ObjectFields,
-        source_path: String,
-        page: u32,
-        source_width_pt: f64,
-        source_height_pt: f64,
-    },
-    InkGroup {
-        #[serde(flatten)]
-        fields: ObjectFields,
-        ink_layer_id: String,
-        stroke_ids: Vec<String>,
-    },
-    Group {
-        #[serde(flatten)]
-        fields: ObjectFields,
-        child_ids: Vec<String>,
-    },
-}
-
-impl PageObject {
-    pub fn fields(&self) -> &ObjectFields {
-        match self {
-            Self::Typst { fields, .. }
-            | Self::Image { fields, .. }
-            | Self::PdfMaterial { fields, .. }
-            | Self::InkGroup { fields, .. }
-            | Self::Group { fields, .. } => fields,
-        }
-    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
