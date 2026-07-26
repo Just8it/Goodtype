@@ -330,6 +330,26 @@ pub fn save_app_settings(
     Ok(settings)
 }
 
+/// Which directory the writer chose as their library.
+///
+/// Its own file rather than a field on [`AppSettings`]: that struct is the drafting instrument —
+/// nibs, pressure, palette — and is rewritten whenever a swatch changes. Where the work lives is
+/// a different kind of fact with a different lifetime, and it should not ride along with a
+/// setting the writer changes forty times an hour.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct StoredLibrary {
+    pub root: Option<String>,
+}
+
+pub fn read_library(app: &tauri::AppHandle) -> Result<StoredLibrary, String> {
+    read_config::<StoredLibrary>(app, "library.json")
+}
+
+pub fn write_library(app: &tauri::AppHandle, library: &StoredLibrary) -> Result<(), String> {
+    write_config(app, "library.json", library)
+}
+
 #[tauri::command]
 pub fn list_recent_notebooks(app: tauri::AppHandle) -> Result<Vec<RecentNotebook>, String> {
     let mut recents = read_config::<RecentNotebooks>(&app, "recents.json")?;

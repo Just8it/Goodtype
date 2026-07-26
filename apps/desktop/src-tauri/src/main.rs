@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod export;
+mod library;
 mod notebook;
 mod settings;
 mod typst;
@@ -21,6 +22,10 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            library::library_root,
+            library::pick_library_root,
+            library::list_library,
+            library::open_library_notebook,
             workspace::phase0_notebook_root,
             workspace::pick_notebook_root,
             workspace::pick_new_notebook_root,
