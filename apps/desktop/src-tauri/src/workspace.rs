@@ -75,36 +75,6 @@ pub async fn pick_notebook_root(
     path_string(allow_root(&roots, &picked)?).map(Some)
 }
 
-/// Let the user pick a parent directory and name for a new notebook. Rust joins and validates
-/// the final path; the frontend never supplies one.
-#[tauri::command]
-pub async fn pick_new_notebook_root(
-    app: tauri::AppHandle,
-    roots: tauri::State<'_, AllowedRoots>,
-    name: String,
-) -> Result<Option<String>, String> {
-    let safe = !name.is_empty()
-        && name.len() <= 80
-        && !name.starts_with(['.', ' '])
-        && !name.ends_with(['.', ' '])
-        && name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '-' | '_'));
-    if !safe {
-        return Err("notebook names use letters, numbers, spaces, - and _".to_owned());
-    }
-    let Some(parent) = app.dialog().file().blocking_pick_folder() else {
-        return Ok(None);
-    };
-    let parent = parent.into_path().map_err(|error| error.to_string())?;
-    let root = parent.join(name.trim());
-    if root.exists() {
-        return Err("a file or folder with that name already exists".to_owned());
-    }
-    fs::create_dir(&root).map_err(|error| error.to_string())?;
-    path_string(allow_root(&roots, &root)?).map(Some)
-}
-
 /// Re-admit a notebook chosen in an earlier session (from the recents list). The path must
 /// still contain a manifest; missing notebooks stay visible in the list but cannot open.
 #[tauri::command]

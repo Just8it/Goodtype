@@ -224,6 +224,319 @@ fn sort_key(entry: &LibraryEntry) -> &str {
     }
 }
 
+/// Names Goodtype will create a folder or notebook under.
+///
+/// The mirror of `nameProblem` in `apps/desktop/src/lib/library/library.ts`, and the one that
+/// counts: the frontend's copy makes the message immediate, this one makes it true. A frontend
+/// can be wrong or bypassed, and either way the name is about to become a directory.
+///
+/// Deliberately narrower than what this platform accepts. A library is synced and shared, so
+/// these names land on Windows, macOS and Linux alike, and the rule is what all three take.
+/// Trailing dots and spaces are refused because Windows silently strips them, which would turn
+/// two names the writer sees as distinct into one directory.
+pub fn validate_name(name: &str) -> Result<(), String> {
+    const FORBIDDEN: [char; 9] = ['\\', '/', ':', '*', '?', '"', '<', '>', '|'];
+    const RESERVED: [&str; 6] = ["con", "prn", "aux", "nul", "com", "lpt"];
+
+    if name.is_empty() || name.len() > 80 {
+        return Err("names are 1 to 80 characters".to_owned());
+    }
+    if name.trim() != name {
+        return Err("names cannot start or end with a space".to_owned());
+    }
+    if name.starts_with('.') {
+        return Err("a name starting with a dot would be hidden".to_owned());
+    }
+    if name.ends_with('.') {
+        return Err("names cannot end with a dot".to_owned());
+    }
+    if name.contains(FORBIDDEN) || name.chars().any(|c| c.is_control()) {
+        return Err(r#"a name cannot contain \ / : * ? " < > |"#.to_owned());
+    }
+    let lowered = name.to_ascii_lowercase();
+    if RESERVED.iter().any(|reserved| {
+        lowered == *reserved
+            || (lowered.len() == 4
+                && lowered.starts_with(reserved)
+                && lowered.ends_with(|c: char| c.is_ascii_digit()))
+    }) {
+        return Err("that name is reserved by Windows".to_owned());
+    }
+    Ok(())
+}
+
+/// Where a new entry will go, refusing a name already taken.
+///
+/// `create_dir` would refuse a collision on its own, but not before the caller has decided what
+/// to tell the writer. Checking first is what turns "os error 183" into a sentence.
+fn free_child(root: &Path, parent: &str, name: &str) -> Result<PathBuf, String> {
+    validate_name(name)?;
+    let target = resolve(root, parent)?.join(name);
+    if target.exists() {
+        return Err(format!("`{name}` already exists here"));
+    }
+    Ok(target)
+}
+
+fn relative_child(parent: &str, name: &str) -> String {
+    if parent.is_empty() {
+        name.to_owned()
+    } else {
+        format!("{parent}/{name}")
+    }
+}
+
+/// Make a folder, and answer with the path that lists it.
+#[tauri::command]
+pub fn create_library_folder(
+    app: tauri::AppHandle,
+    roots: tauri::State<'_, AllowedRoots>,
+    parent: String,
+    name: String,
+) -> Result<String, String> {
+    let root = current_root(&app, &roots)?;
+    fs::create_dir(free_child(&root, &parent, &name)?).map_err(|error| error.to_string())?;
+    Ok(relative_child(&parent, &name))
+}
+
+/// Make an empty directory for a notebook and admit it, handing back the absolute root.
+///
+/// The manifest is not written here. The frontend already knows how to fill an empty directory —
+/// it is the same path that created a notebook from the old start screen — and duplicating it in
+/// Rust would give the store two authors for the same file.
+#[tauri::command]
+pub fn create_library_notebook(
+    app: tauri::AppHandle,
+    roots: tauri::State<'_, AllowedRoots>,
+    parent: String,
+    name: String,
+) -> Result<String, String> {
+    let root = current_root(&app, &roots)?;
+    let target = free_child(&root, &parent, &name)?;
+    fs::create_dir(&target).map_err(|error| error.to_string())?;
+    allow_root(&roots, &target)?
+        .into_os_string()
+        .into_string()
+        .map_err(|_| "that path is not valid Unicode".to_owned())
+}
+
+/// Rename in place. Answers with the new path, since the old one has stopped existing.
+#[tauri::command]
+pub fn rename_library_entry(
+    app: tauri::AppHandle,
+    roots: tauri::State<'_, AllowedRoots>,
+    path: String,
+    name: String,
+) -> Result<String, String> {
+    let root = current_root(&app, &roots)?;
+    let source = resolve(&root, &path)?;
+    let parent = parent_of(&path);
+    let target = free_child(&root, parent, &name)?;
+    fs::rename(&source, &target).map_err(|error| error.to_string())?;
+    forget_favourite(&root, &path)?;
+    Ok(relative_child(parent, &name))
+}
+
+/// Move an entry into another folder of the library.
+#[tauri::command]
+pub fn move_library_entry(
+    app: tauri::AppHandle,
+    roots: tauri::State<'_, AllowedRoots>,
+    path: String,
+    destination: String,
+) -> Result<String, String> {
+    let root = current_root(&app, &roots)?;
+    let source = resolve(&root, &path)?;
+    let into = resolve(&root, &destination)?;
+    if !into.is_dir() || is_notebook(&into) {
+        return Err("that destination is not a folder".to_owned());
+    }
+    // Moving a folder inside itself would carry the tree out of reach of the shelf, and on most
+    // filesystems it half-succeeds rather than failing cleanly.
+    if into.starts_with(&source) {
+        return Err("a folder cannot be moved into itself".to_owned());
+    }
+    let name = source
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or("that entry has no name")?
+        .to_owned();
+    let target = free_child(&root, &destination, &name)?;
+    fs::rename(&source, &target).map_err(|error| error.to_string())?;
+    forget_favourite(&root, &path)?;
+    Ok(relative_child(&destination, &name))
+}
+
+/// Move an entry to the library's trash.
+///
+/// Not a permanent delete. A misclick here costs a semester of coursework, and the shelf is the
+/// one surface where a whole notebook is a single click away. The trash lives at
+/// `.goodtype/trash/` inside the library: hidden, so it never appears on a shelf; inside the
+/// library, so it travels with it and needs no platform-specific recycle bin; timestamped, so
+/// two deletions of the same name do not collide.
+///
+/// This is a change of mind. The plan said the OS recycle bin, on the grounds that an in-app
+/// trash is a second place where truth lives. That argument holds against a *Trash view* in the
+/// sidebar competing with the filesystem; it does not justify deleting a notebook outright, and
+/// the recycle bin would mean a new dependency for behaviour a hidden folder already gives.
+#[tauri::command]
+pub fn delete_library_entry(
+    app: tauri::AppHandle,
+    roots: tauri::State<'_, AllowedRoots>,
+    path: String,
+) -> Result<(), String> {
+    let root = current_root(&app, &roots)?;
+    let source = resolve(&root, &path)?;
+    if source == root {
+        return Err("the library itself cannot be deleted".to_owned());
+    }
+    let name = source
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or("that entry has no name")?;
+    let trash = root.join(INTERNAL_DIR).join(TRASH_DIR);
+    fs::create_dir_all(&trash).map_err(|error| error.to_string())?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|since| since.as_millis())
+        .unwrap_or(0);
+    fs::rename(&source, trash.join(format!("{stamp}-{name}")))
+        .map_err(|error| error.to_string())?;
+    forget_favourite(&root, &path)?;
+    Ok(())
+}
+
+fn parent_of(path: &str) -> &str {
+    match path.rfind('/') {
+        Some(cut) => &path[..cut],
+        None => "",
+    }
+}
+
+/// Store-owned state for this library, mirroring the `.goodtype/` a notebook already keeps for
+/// its own bookkeeping. Hidden, so it never lists; inside the library, so it travels with it.
+const INTERNAL_DIR: &str = ".goodtype";
+const TRASH_DIR: &str = "trash";
+const SHELF_FILE: &str = "shelf.json";
+const MAX_SHELF_BYTES: u64 = 1024 * 1024;
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", default)]
+struct Shelf {
+    /// Library-relative paths. A favourite is app state, not a property of the directory, which
+    /// is why it lives here rather than in the notebook.
+    favourites: Vec<String>,
+}
+
+fn read_shelf(root: &Path) -> Shelf {
+    let path = root.join(INTERNAL_DIR).join(SHELF_FILE);
+    let within_ceiling = fs::metadata(&path)
+        .map(|metadata| metadata.len() <= MAX_SHELF_BYTES)
+        .unwrap_or(false);
+    if !within_ceiling {
+        return Shelf::default();
+    }
+    // A preferences file that will not parse must not stop the library opening.
+    fs::read(&path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+fn write_shelf(root: &Path, shelf: &Shelf) -> Result<(), String> {
+    let directory = root.join(INTERNAL_DIR);
+    fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+    let bytes = serde_json::to_vec_pretty(shelf).map_err(|error| error.to_string())?;
+    fs::write(directory.join(SHELF_FILE), bytes).map_err(|error| error.to_string())
+}
+
+/// Drop a favourite whose entry has just moved, been renamed, or been thrown away.
+///
+/// A favourite is a path, so any of those three leaves it pointing at nothing. Rather than
+/// rewrite the entry — which would also have to rewrite every favourite *below* a renamed
+/// folder — the star is dropped. Losing a star on a rename is a small surprise; a Favoriten view
+/// full of entries that no longer exist is a broken one.
+fn forget_favourite(root: &Path, path: &str) -> Result<(), String> {
+    let mut shelf = read_shelf(root);
+    let before = shelf.favourites.len();
+    shelf
+        .favourites
+        .retain(|favourite| favourite != path && !favourite.starts_with(&format!("{path}/")));
+    if shelf.favourites.len() == before {
+        return Ok(());
+    }
+    write_shelf(root, &shelf)
+}
+
+#[tauri::command]
+pub fn library_favourites(
+    app: tauri::AppHandle,
+    roots: tauri::State<'_, AllowedRoots>,
+) -> Result<Vec<String>, String> {
+    Ok(read_shelf(&current_root(&app, &roots)?).favourites)
+}
+
+#[tauri::command]
+pub fn set_library_favourite(
+    app: tauri::AppHandle,
+    roots: tauri::State<'_, AllowedRoots>,
+    path: String,
+    favourite: bool,
+) -> Result<Vec<String>, String> {
+    let root = current_root(&app, &roots)?;
+    // Resolve even when un-starring: a path the library cannot vouch for has no business being
+    // written into its preferences.
+    resolve(&root, &path)?;
+    let mut shelf = read_shelf(&root);
+    shelf.favourites.retain(|existing| existing != &path);
+    if favourite {
+        shelf.favourites.push(path);
+    }
+    write_shelf(&root, &shelf)?;
+    Ok(shelf.favourites)
+}
+
+/// Every favourite that still exists, as full entries ready for the shelf.
+///
+/// Reads each one rather than trusting the list, so a folder deleted in Explorer simply stops
+/// appearing instead of becoming a tile that cannot be opened.
+#[tauri::command]
+pub fn list_library_favourites(
+    app: tauri::AppHandle,
+    roots: tauri::State<'_, AllowedRoots>,
+) -> Result<Vec<LibraryEntry>, String> {
+    let root = current_root(&app, &roots)?;
+    let mut entries = Vec::new();
+    for path in read_shelf(&root).favourites {
+        let Ok(resolved) = resolve(&root, &path) else {
+            continue;
+        };
+        if !resolved.is_dir() {
+            continue;
+        }
+        let name = parent_of(&path);
+        let name = path[if name.is_empty() { 0 } else { name.len() + 1 }..].to_owned();
+        if is_notebook(&resolved) {
+            let (page_count, paper) = peek_manifest(&resolved);
+            entries.push(LibraryEntry::Notebook {
+                name,
+                path,
+                modified_ms: modified_ms(&resolved.join(layout::MANIFEST)),
+                page_count,
+                paper,
+            });
+        } else {
+            entries.push(LibraryEntry::Folder {
+                name,
+                path,
+                modified_ms: modified_ms(&resolved),
+                child_count: child_count(&resolved),
+            });
+        }
+    }
+    Ok(entries)
+}
+
 /// The library the writer chose, if they have chosen one.
 ///
 /// Re-admits it to the allowlist on the way out: the path outlives the process, the allowlist
@@ -397,6 +710,99 @@ mod tests {
         assert!(json[0].get("modifiedMs").is_some(), "{json}");
         assert_eq!(json[1]["kind"], "notebook");
         assert_eq!(json[1]["pageCount"], 3);
+    }
+
+    #[test]
+    fn names_are_checked_against_every_platform_not_this_one() {
+        for good in [
+            "Semester 3",
+            "Thermodynamik",
+            "Serie_07",
+            "Übung 2 – Kinematik",
+        ] {
+            assert!(validate_name(good).is_ok(), "`{good}` should be allowed");
+        }
+        // Linux would take most of these. They still have to be refused, because a library is
+        // synced and shared and these become directory names on someone else's disk.
+        for bad in [
+            "",
+            "a/b",
+            "a:b",
+            "a*b",
+            "a?b",
+            ".hidden",
+            "trailing.",
+            " leading",
+            "trailing ",
+            "con",
+            "COM1",
+            "lpt9",
+        ] {
+            assert!(validate_name(bad).is_err(), "`{bad}` should be refused");
+        }
+        assert!(validate_name(&"x".repeat(81)).is_err());
+    }
+
+    #[test]
+    fn a_folder_cannot_be_moved_into_itself() {
+        let root = library();
+        let outer = fs::canonicalize(root.path().join("Semester 3")).unwrap();
+        let inner = fs::canonicalize(root.path().join("Semester 3/Altklausuren")).unwrap();
+        // The shape `move_library_entry` guards with, checked directly so the guard is pinned
+        // even though the command itself needs a running Tauri app.
+        assert!(inner.starts_with(&outer));
+        assert!(!outer.starts_with(&inner));
+    }
+
+    /// A favourite is a path, so renaming, moving or deleting the entry leaves it pointing at
+    /// nothing — including every favourite *below* a renamed folder.
+    #[test]
+    fn favourites_below_a_moved_folder_are_forgotten_with_it() {
+        let root = library();
+        write_shelf(
+            root.path(),
+            &Shelf {
+                favourites: vec![
+                    "Semester 3".to_owned(),
+                    "Semester 3/Thermodynamik".to_owned(),
+                    "Semester 4".to_owned(),
+                ],
+            },
+        )
+        .unwrap();
+
+        forget_favourite(root.path(), "Semester 3").unwrap();
+
+        assert_eq!(read_shelf(root.path()).favourites, vec!["Semester 4"]);
+    }
+
+    /// A `Semester 30` must not be dropped when `Semester 3` is, which a plain prefix test would
+    /// get wrong.
+    #[test]
+    fn forgetting_a_favourite_respects_folder_boundaries() {
+        let root = library();
+        write_shelf(
+            root.path(),
+            &Shelf {
+                favourites: vec!["Semester 3".to_owned(), "Semester 30".to_owned()],
+            },
+        )
+        .unwrap();
+
+        forget_favourite(root.path(), "Semester 3").unwrap();
+
+        assert_eq!(read_shelf(root.path()).favourites, vec!["Semester 30"]);
+    }
+
+    /// Preferences must never be the reason a library will not open.
+    #[test]
+    fn an_unparsable_shelf_reads_as_empty() {
+        let root = library();
+        let internal = root.path().join(INTERNAL_DIR);
+        fs::create_dir_all(&internal).unwrap();
+        fs::write(internal.join(SHELF_FILE), b"{ not json").unwrap();
+
+        assert!(read_shelf(root.path()).favourites.is_empty());
     }
 
     /// A manifest that cannot be parsed must not remove the notebook from the shelf — it is

@@ -2359,6 +2359,7 @@
       <LibrarySurface
         {tauriAvailable}
         onOpen={(nextRoot) => void openNotebookAt(nextRoot)}
+        onCreate={(nextRoot) => void openNotebookAt(nextRoot, { createIfMissing: true })}
         onStatus={(next) => (status = next)}
       />
     </div>
