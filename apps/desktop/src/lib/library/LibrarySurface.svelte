@@ -1,9 +1,23 @@
 <script lang="ts">
-  import { invoke } from "@tauri-apps/api/core";
   import BrandMark from "../brand/BrandMark.svelte";
   import NamePrompt from "./NamePrompt.svelte";
   import NotebookCover from "./NotebookCover.svelte";
   import ShelfMenu, { type ShelfMenuItem } from "./ShelfMenu.svelte";
+  import {
+    createLibraryFolder,
+    createLibraryNotebook,
+    deleteLibraryEntry,
+    libraryFavourites,
+    libraryRoot as readLibraryRoot,
+    listLibrary,
+    listLibraryFavourites,
+    moveLibraryEntry,
+    openLibraryNotebook,
+    pickLibraryRoot,
+    pickNotebookRoot,
+    renameLibraryEntry,
+    setLibraryFavourite,
+  } from "../ipc/library";
   import {
     bands,
     breadcrumb,
@@ -64,7 +78,7 @@
   async function start() {
     if (!tauriAvailable) return;
     try {
-      libraryRoot = await invoke<string | null>("library_root");
+      libraryRoot = await readLibraryRoot();
       if (libraryRoot) await reload();
     } catch (error) {
       failure = message(error);
@@ -74,7 +88,7 @@
   async function chooseLibrary() {
     busy = true;
     try {
-      const chosen = await invoke<string | null>("pick_library_root");
+      const chosen = await pickLibraryRoot();
       if (!chosen) return;
       libraryRoot = chosen;
       view = "library";
@@ -99,12 +113,12 @@
     busy = true;
     failure = null;
     try {
-      favourites = await invoke<string[]>("library_favourites");
+      favourites = await libraryFavourites();
       if (view === "favourites") {
-        entries = await invoke<LibraryEntry[]>("list_library_favourites");
+        entries = await listLibraryFavourites();
       } else {
         const wanted = path;
-        const listing = await invoke<LibraryListing>("list_library", { path: wanted });
+        const listing = await listLibrary(wanted);
         if (listing.path !== path) return;
         entries = listing.entries;
       }
@@ -132,7 +146,7 @@
   async function openNotebook(notebookPath: string) {
     busy = true;
     try {
-      onOpen(await invoke<string>("open_library_notebook", { path: notebookPath }));
+      onOpen(await openLibraryNotebook(notebookPath));
     } catch (error) {
       failure = message(error);
       busy = false;
@@ -158,18 +172,18 @@
     if (!pending) return;
     if (pending.kind === "folder") {
       await mutate(
-        () => invoke("create_library_folder", { parent: path, name }),
+        () => createLibraryFolder(path, name),
         `Ordner „${name}" angelegt`,
       );
     } else if (pending.kind === "rename") {
       await mutate(
-        () => invoke("rename_library_entry", { path: pending.path, name }),
+        () => renameLibraryEntry(pending.path, name),
         `In „${name}" umbenannt`,
       );
     } else {
       busy = true;
       try {
-        const root = await invoke<string>("create_library_notebook", { parent: path, name });
+        const root = await createLibraryNotebook(path, name);
         // The directory exists and is empty; the notebook itself is written by the same path
         // that has always created one, so the store keeps a single author for its own files.
         onCreate(root);
@@ -182,16 +196,13 @@
 
   async function toggleFavourite(entryPath: string) {
     await mutate(() =>
-      invoke("set_library_favourite", {
-        path: entryPath,
-        favourite: !starred.has(entryPath),
-      }),
+      setLibraryFavourite(entryPath, !starred.has(entryPath)),
     );
   }
 
   async function remove(paths: string[]) {
     await mutate(async () => {
-      for (const each of paths) await invoke("delete_library_entry", { path: each });
+      for (const each of paths) await deleteLibraryEntry(each);
     }, paths.length === 1 ? "In den Papierkorb verschoben" : `${paths.length} in den Papierkorb verschoben`);
     picked = null;
   }
@@ -208,7 +219,7 @@
     dropTarget = null;
     if (source === destination) return;
     await mutate(
-      () => invoke("move_library_entry", { path: source, destination }),
+      () => moveLibraryEntry(source, destination),
       "Verschoben",
     );
   }
@@ -276,7 +287,7 @@
   async function openElsewhere() {
     busy = true;
     try {
-      const chosen = await invoke<string | null>("pick_notebook_root");
+      const chosen = await pickNotebookRoot();
       if (chosen) onOpen(chosen);
       else busy = false;
     } catch (error) {

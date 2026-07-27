@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { invoke } from "@tauri-apps/api/core";
+  import { libraryCover } from "../ipc/library";
   import type { PageDefaults } from "../model";
   import { templateSvg } from "../page/template";
 
@@ -31,7 +31,7 @@
     let current = true;
     void (async () => {
       try {
-        const found = await invoke<string | null>("library_cover", { path: wanted });
+        const found = await libraryCover(wanted);
         if (current) cover = found;
       } catch {
         // A missing or unreadable cover is not worth reporting: the tile still draws its paper.
