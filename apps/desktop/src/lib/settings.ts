@@ -161,11 +161,11 @@ export const MAX_SWATCHES = 12;
 /**
  * How many stroke widths a tool's row holds.
  *
- * Fewer than colours: the row is a ladder read at a glance, and past half a dozen the tiles stop
- * being distinguishable by the line drawn on them, which is the only thing that makes it faster
- * than typing a number.
+ * Far fewer than colours: the row is a ladder read at a glance, and the tiles are told apart
+ * only by the thickness of the line drawn on them. Four steps are distinguishable at a glance;
+ * more of them turn a ladder into a list of numbers, which the panel already does better.
  */
-export const MAX_WIDTHS = 6;
+export const MAX_WIDTHS = 4;
 export const MAX_RECENT_COLORS = 8;
 
 /** Colours offered in the colour panel before the writer has curated any. */

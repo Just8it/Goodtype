@@ -2731,7 +2731,7 @@
           <i></i><i></i><i></i><i></i><i></i><i></i>
         </button>
         {#if toolPanel && toolPanelPreset}
-          <div class="color-panel-anchor" style:--anchor={`${toolPanel.anchor}px`}>
+          <div class="palette-panel-anchor" style:--anchor={`${toolPanel.anchor}px`}>
             <ToolPanel
               preset={toolPanelPreset}
               kind={toolPanel.kind}
@@ -2818,12 +2818,15 @@
                     ? null
                     : { index: -1, anchor: swatchAnchor(event.currentTarget) })}
             >
-              <!-- Takes the shape of the row it joins: the other tiles draw a 20px line, so the
-                   empty slot is a 20px dashed one. A bare glyph read as a stray character. -->
-              <span class="size-add" aria-hidden="true">+</span>
+              <!-- Drawn rather than typed: a text `+` brings its own weight and metrics, which
+                   is what made it read as a stray character. This is the same 20px the tiles
+                   above it draw, at the hairline weight of the thinnest of them. -->
+              <svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+                <path d="M0 10h20M10 0v20" stroke="currentColor" stroke-width="1" />
+              </svg>
             </button>
             {#if widthPanel}
-              <div class="color-panel-anchor" style:--anchor={`${widthPanel.anchor}px`}>
+              <div class="palette-panel-anchor" style:--anchor={`${widthPanel.anchor}px`}>
                 <WidthPanel
                   widthPt={widthPanel.index === -1
                     ? activeWidth
@@ -2885,7 +2888,7 @@
                     : { index: -1, anchor: swatchAnchor(event.currentTarget) })}
             >+</button>
             {#if colorPanel}
-              <div class="color-panel-anchor" style:--anchor={`${colorPanel.anchor}px`}>
+              <div class="palette-panel-anchor" style:--anchor={`${colorPanel.anchor}px`}>
                 <ColorPanel
                   value={colorPanel.index === -1 ? activeInkColor : activeColorChips[colorPanel.index]}
                   recent={settings.recentColors}
@@ -3322,22 +3325,8 @@
   .size-tile:hover { background: rgb(255 255 255 / 6%); }
   .size-tile.active { outline: 1.5px solid var(--blueprint); background: rgb(76 141 240 / 16%); }
   .size-line { width: 20px; border-radius: 3px; }
-  /* The same 20px the drawn lines occupy, dashed and empty — the slot a width would go in,
-     rather than a plus sitting on its own. Matches the dashed ring on the colour row. */
-  .size-add {
-    display: grid;
-    box-sizing: border-box;
-    width: 20px;
-    height: 12px;
-    border: 1px dashed rgb(255 255 255 / 30%);
-    border-radius: 3px;
-    color: var(--quiet);
-    font-size: 11px;
-    font-weight: 400;
-    line-height: 1;
-    place-items: center;
-  }
-  .size-tile.custom:hover .size-add { border-color: rgb(255 255 255 / 55%); color: var(--text); }
+  .size-tile.custom { color: var(--quiet); }
+  .size-tile.custom:hover { color: var(--text); }
   .size-tile.active .size-line { background: var(--text) !important; }
   /* Border-box so the drawn circle is exactly the size asked for: otherwise each ring grows by
      its border and the three sizes step unevenly. */
@@ -3368,23 +3357,25 @@
 
   /* The colour editor opens beside the chip that was tapped: `--anchor` is that chip's centre
      within the bar, and the panel is centred on it but kept inside the workspace. */
-  .color-panel-anchor {
+  /* Where a popout from the bar hangs: the colour editor and the width panel both use it, so
+     each knows only its own contents and this knows only the four docks. */
+  .palette-panel-anchor {
     position: absolute;
     bottom: calc(100% + 10px);
     left: clamp(0px, calc(var(--anchor) - 108px), calc(100vw - 240px));
     z-index: 60;
   }
-  .instrument-palette.dock-top .color-panel-anchor { top: calc(100% + 10px); bottom: auto; }
+  .instrument-palette.dock-top .palette-panel-anchor { top: calc(100% + 10px); bottom: auto; }
   /* Centred on the chip; the panel itself measures and nudges back inside the window, so no
      height is guessed here. */
-  .instrument-palette.dock-left .color-panel-anchor,
-  .instrument-palette.dock-right .color-panel-anchor {
+  .instrument-palette.dock-left .palette-panel-anchor,
+  .instrument-palette.dock-right .palette-panel-anchor {
     top: calc(var(--anchor) - 130px);
     bottom: auto;
     left: auto;
   }
-  .instrument-palette.dock-left .color-panel-anchor { left: calc(100% + 10px); }
-  .instrument-palette.dock-right .color-panel-anchor { right: calc(100% + 10px); }
+  .instrument-palette.dock-left .palette-panel-anchor { left: calc(100% + 10px); }
+  .instrument-palette.dock-right .palette-panel-anchor { right: calc(100% + 10px); }
 
   .context-actions { top: 18px; left: 50%; gap: 4px; padding: 5px; border-radius: 9px; transform: translateX(-50%); }
   .context-actions span { padding: 0 9px; color: var(--muted); font-size: 12px; }

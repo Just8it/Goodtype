@@ -109,11 +109,10 @@
 </aside>
 
 <style>
+  /* Positioned by `.palette-panel-anchor` in the palette, which already knows how to place a
+     popout for all four docks. Positioning here as well offset it twice and left it behind when
+     the bar moved to a side. */
   .width-panel {
-    position: absolute;
-    z-index: 50;
-    bottom: calc(100% + 10px);
-    left: calc(var(--anchor, 0px) - 110px);
     display: flex;
     flex-direction: column;
     gap: 10px;
