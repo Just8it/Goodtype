@@ -113,12 +113,10 @@ pub fn write_phase0_metrics(
         return Err("the notebook root is not a directory".to_owned());
     }
 
-    let metrics_dir = root.join(".goodtype");
-    fs::create_dir_all(&metrics_dir).map_err(|error| error.to_string())?;
-    let metrics_dir = fs::canonicalize(metrics_dir).map_err(|error| error.to_string())?;
-    if !metrics_dir.starts_with(&root) {
-        return Err("the metrics directory escapes the notebook root".to_owned());
-    }
+    let metrics_dir = root.join(goodtype_core::layout::INTERNAL_DIR);
+    let metrics_dir =
+        goodtype_core::paths::ensure_dir(&root, &metrics_dir, goodtype_core::layout::INTERNAL_DIR)
+            .map_err(|_| "the metrics directory escapes the notebook root".to_owned())?;
 
     let target = metrics_dir.join("phase0-metrics.json");
     if target

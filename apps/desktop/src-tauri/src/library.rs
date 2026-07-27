@@ -14,10 +14,10 @@
 //! than a convention.
 
 use std::fs;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-use goodtype_core::{PageDefaults, layout};
+use goodtype_core::{PageDefaults, layout, paths};
 use serde::{Deserialize, Serialize};
 use tauri_plugin_dialog::DialogExt;
 
@@ -80,27 +80,18 @@ pub struct LibraryListing {
 ///
 /// An empty string is the library root itself.
 pub fn resolve(root: &Path, relative: &str) -> Result<PathBuf, String> {
-    let canonical_root = fs::canonicalize(root).map_err(|error| error.to_string())?;
+    let canonical_root = paths::canonical_root(root).map_err(|error| error.to_string())?;
     if relative.is_empty() {
         return Ok(canonical_root);
     }
-    if relative.contains('\\') {
-        return Err("library paths use forward slashes".to_owned());
-    }
-    let candidate = Path::new(relative);
-    if candidate.is_absolute()
-        || !candidate
-            .components()
-            .all(|component| matches!(component, Component::Normal(_)))
-    {
-        return Err("that path leaves the library".to_owned());
-    }
-    let resolved =
-        fs::canonicalize(canonical_root.join(candidate)).map_err(|error| error.to_string())?;
-    if !resolved.starts_with(&canonical_root) {
-        return Err("that path leaves the library".to_owned());
-    }
-    Ok(resolved)
+    let candidate = paths::validate_library_relative(relative)
+        .map_err(|_| "that path leaves the library".to_owned())?;
+    paths::contained(&canonical_root, &canonical_root.join(candidate), relative).map_err(|error| {
+        match error {
+            paths::PathError::Io(error) => error.to_string(),
+            _ => "that path leaves the library".to_owned(),
+        }
+    })
 }
 
 /// Whether a directory is a notebook rather than an ordinary folder.

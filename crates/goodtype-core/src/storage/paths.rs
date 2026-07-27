@@ -1,50 +1,52 @@
-//! Turning a caller's relative path into a real one, or refusing to.
+//! Notebook paths, in the store's own error type.
 //!
-//! Nothing here knows what a notebook is. It exists so that the rules keeping a write inside the
-//! notebook directory — no absolute path, no `..`, no symlink leading out, no reserved Windows
-//! name — sit in one place that can be read and tested on its own. Everything else in `storage`
-//! reaches the filesystem through these functions.
+//! The name rules and the containment check live in [`crate::paths`], which the Typst export and
+//! the desktop library share. What is left here is the notebook flavour of them: the store's
+//! error type, the `blocks/`-style directory checks, and the write-target preparation that only
+//! a writer needs.
 
 use std::{
     fs,
     path::{Component, Path, PathBuf},
 };
 
-use crate::SourceRole;
+use crate::{
+    SourceRole,
+    paths::{self, PathError},
+};
 
 use super::StorageError;
 
-pub(crate) fn canonical_root(root: &Path) -> Result<PathBuf, StorageError> {
-    let canonical = fs::canonicalize(root)?;
-    if !canonical.is_dir() {
-        return Err(StorageError::InvalidPath(root.display().to_string()));
+/// The store reports a refused path as an invalid notebook path however it was refused: a caller
+/// cannot act differently on the distinction, and an I/O error while resolving still means the
+/// path is unusable.
+impl From<PathError> for StorageError {
+    fn from(error: PathError) -> Self {
+        match error {
+            PathError::Io(error) => Self::Io(error),
+            PathError::Invalid(value) | PathError::Escapes(value) => Self::InvalidPath(value),
+        }
     }
-    Ok(canonical)
+}
+
+pub(crate) fn canonical_root(root: &Path) -> Result<PathBuf, StorageError> {
+    Ok(paths::canonical_root(root)?)
 }
 
 pub(crate) fn validate_relative(value: &str) -> Result<&Path, StorageError> {
-    let path = Path::new(value);
-    if value.is_empty()
-        || value.contains(['\\', ':'])
-        || path.is_absolute()
-        || path
-            .components()
-            .any(|component| !matches!(component, Component::Normal(_)))
-    {
-        return Err(StorageError::InvalidPath(value.into()));
-    }
-    Ok(path)
+    Ok(paths::validate_relative(value)?)
 }
 
 pub(crate) fn resolve_existing(root: &Path, relative: &str) -> Result<PathBuf, StorageError> {
-    let relative = validate_relative(relative)?;
-    let resolved = fs::canonicalize(root.join(relative))?;
-    if !resolved.starts_with(root) || !resolved.is_file() {
-        return Err(StorageError::InvalidPath(relative.display().to_string()));
-    }
-    Ok(resolved)
+    Ok(paths::resolve_file(root, relative)?)
 }
 
+/// Where a file is about to be written: parent directories created, and an existing target
+/// confirmed to be an ordinary contained file.
+///
+/// The symlink check is the part that does not belong in the shared module. Reading through a
+/// link is refused there by canonicalising; *writing* has to refuse the link itself, before it is
+/// followed, or the write lands wherever the link points.
 pub(crate) fn prepare_target(root: &Path, relative: &str) -> Result<PathBuf, StorageError> {
     let relative = validate_relative(relative)?;
     let parent = ensure_directory(root, relative.parent().unwrap_or_else(|| Path::new("")))?;
@@ -58,28 +60,24 @@ pub(crate) fn prepare_target(root: &Path, relative: &str) -> Result<PathBuf, Sto
         if metadata.file_type().is_symlink() {
             return Err(StorageError::InvalidPath(relative.display().to_string()));
         }
-        let canonical = fs::canonicalize(&target)?;
-        if !canonical.starts_with(root) || !canonical.is_file() {
+        paths::contained(root, &target, &relative.display().to_string())?;
+        if !target.is_file() {
             return Err(StorageError::InvalidPath(relative.display().to_string()));
         }
     }
     Ok(target)
 }
 
-fn ensure_directory(root: &Path, relative: &Path) -> Result<PathBuf, StorageError> {
+/// Create each missing component of `relative` under `root`, confirming containment at every
+/// level rather than only at the end — a link introduced part-way down would otherwise be
+/// followed while a final check still passed.
+pub(crate) fn ensure_directory(root: &Path, relative: &Path) -> Result<PathBuf, StorageError> {
     let mut current = root.to_path_buf();
     for component in relative.components() {
         let Component::Normal(name) = component else {
             return Err(StorageError::InvalidPath(relative.display().to_string()));
         };
-        let candidate = current.join(name);
-        if !candidate.exists() {
-            fs::create_dir(&candidate)?;
-        }
-        current = fs::canonicalize(candidate)?;
-        if !current.starts_with(root) || !current.is_dir() {
-            return Err(StorageError::InvalidPath(relative.display().to_string()));
-        }
+        current = paths::ensure_dir(root, &current.join(name), &relative.display().to_string())?;
     }
     Ok(current)
 }
