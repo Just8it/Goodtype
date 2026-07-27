@@ -76,7 +76,24 @@ export function containToPage(point: Point, page: Size): Point {
   };
 }
 
-export function clampZoom(zoom: number, minimum = 0.5, maximum = 2): number {
+/**
+ * How far out the page may be pushed. A quarter scale puts an A4 sheet at about 150pt tall,
+ * which is a thumbnail — far enough to see a whole page on a small screen and no further.
+ */
+export const MIN_ZOOM = 0.25;
+
+/**
+ * How far in.
+ *
+ * The ceiling used to be 2. A point is 1/72 inch and a CSS pixel 1/96, so an unzoomed page is
+ * already drawn at 0.75 of its physical size; on a 4K panel at 150% system scaling, 200% zoom is
+ * roughly life size. That made the old maximum "you may look at the page, but never closer than
+ * holding it" — which is the wrong limit for correcting a subscript or placing a stroke inside a
+ * fraction. Eight is far enough that a 0.35mm nib is a comfortable stroke on screen.
+ */
+export const MAX_ZOOM = 8;
+
+export function clampZoom(zoom: number, minimum = MIN_ZOOM, maximum = MAX_ZOOM): number {
   return Math.min(Math.max(validZoom(zoom), minimum), maximum);
 }
 

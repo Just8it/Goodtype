@@ -10,6 +10,7 @@
     mode = "edit",
     canRemove = false,
     onPick,
+    onChange,
     onRemove,
     onClose,
   }: {
@@ -18,7 +19,18 @@
     /** `edit` retargets an existing swatch; `add` appends a new one. */
     mode?: "edit" | "add";
     canRemove?: boolean;
+    /** Take this colour and close. What a preset chip or a typed hex does. */
     onPick: (color: string) => void;
+    /**
+     * Take this colour and stay open.
+     *
+     * The field and the hue rail are adjusted by eye, which means looking at the ink and going
+     * again. Requiring a button press before any of it reached the pen made choosing a colour a
+     * guess followed by a confirmation, and that is what people reported as "the colour does not
+     * change". Committing when the drag ends — rather than on every move — keeps one settings
+     * write per gesture instead of one per pixel.
+     */
+    onChange?: (color: string) => void;
     onRemove?: () => void;
     onClose: () => void;
   } = $props();
@@ -34,6 +46,18 @@
   let brightness = $state(0);
   let field = $state<HTMLElement>();
   let dragging: "field" | "hue" | null = null;
+
+  /**
+   * End a drag on the field or the hue rail, taking the colour it settled on.
+   *
+   * Once per gesture rather than once per move: the picker is adjusted by eye, so the ink has to
+   * follow the hand, but a settings write per pixel would be absurd.
+   */
+  function endDrag(which: "field" | "hue") {
+    if (dragging !== which) return;
+    dragging = null;
+    onChange?.(wheelHex);
+  }
 
   function hsvToHex(h: number, s: number, v: number): string {
     const f = (n: number) => {
@@ -169,8 +193,8 @@
       fieldTo(event);
     }}
     onpointermove={(event) => dragging === "field" && fieldTo(event)}
-    onpointerup={() => (dragging = null)}
-    onpointercancel={() => (dragging = null)}
+    onpointerup={() => endDrag("field")}
+    onpointercancel={() => endDrag("field")}
   >
     <span
       class="thumb"
@@ -191,8 +215,8 @@
       hueTo(event);
     }}
     onpointermove={(event) => dragging === "hue" && hueTo(event)}
-    onpointerup={() => (dragging = null)}
-    onpointercancel={() => (dragging = null)}
+    onpointerup={() => endDrag("hue")}
+    onpointercancel={() => endDrag("hue")}
   >
     <span
       class="thumb"

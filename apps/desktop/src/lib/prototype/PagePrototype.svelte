@@ -1693,7 +1693,55 @@
     selectedImage = false;
   }
 
+  /**
+   * Panning with the middle button, from anywhere on the page.
+   *
+   * Two fingers already pan and pinch, and a trackpad scrolls, but a mouse had only the
+   * scrollbars — and the one gesture every drawing tool shares is that the middle button shoves
+   * the canvas around without disturbing the tool in hand. It reads the scroll container directly
+   * rather than going through `zoomAt`, because a pan does not change scale and so needs none of
+   * the anchoring that a zoom does.
+   */
+  let panFrom = $state<{ pointerId: number; x: number; y: number; left: number; top: number } | null>(
+    null,
+  );
+
+  function beginPan(event: PointerEvent): boolean {
+    if (event.button !== 1 || !pageViewport) return false;
+    panFrom = {
+      pointerId: event.pointerId,
+      x: event.clientX,
+      y: event.clientY,
+      left: pageViewport.scrollLeft,
+      top: pageViewport.scrollTop,
+    };
+    (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+    // Middle-press is "autoscroll" on Windows; without this the browser drops its own scroll
+    // puck on the page and takes the gesture over.
+    event.preventDefault();
+    event.stopPropagation();
+    return true;
+  }
+
+  function continuePan(event: PointerEvent): boolean {
+    if (!panFrom || event.pointerId !== panFrom.pointerId || !pageViewport) return false;
+    pageViewport.scrollLeft = panFrom.left - (event.clientX - panFrom.x);
+    pageViewport.scrollTop = panFrom.top - (event.clientY - panFrom.y);
+    event.preventDefault();
+    event.stopPropagation();
+    return true;
+  }
+
+  function endPan(event: PointerEvent): boolean {
+    if (!panFrom || event.pointerId !== panFrom.pointerId) return false;
+    panFrom = null;
+    event.preventDefault();
+    event.stopPropagation();
+    return true;
+  }
+
   function workspacePointerDown(event: PointerEvent) {
+    if (beginPan(event)) return;
     routeObjectPointer(event);
     if (event.pointerType !== "touch") return;
     touchPoints.set(event.pointerId, { x: event.clientX, y: event.clientY });
@@ -1706,6 +1754,7 @@
   }
 
   function workspacePointerMove(event: PointerEvent) {
+    if (continuePan(event)) return;
     routeObjectPointer(event);
     if (!touchPoints.has(event.pointerId) || !pinchStart) return;
     touchPoints.set(event.pointerId, { x: event.clientX, y: event.clientY });
@@ -1725,6 +1774,7 @@
   }
 
   function workspacePointerEnd(event: PointerEvent) {
+    if (endPan(event)) return;
     if (event.pointerType !== "touch") return;
     touchPoints.delete(event.pointerId);
     if (pinchStart) {
@@ -2214,6 +2264,16 @@
   function revokeImageUrl() {
     if (image?.url.startsWith("blob:")) URL.revokeObjectURL(image.url);
   }
+
+  /**
+   * One press of + or −, as a ratio rather than an amount.
+   *
+   * Zoom is perceived multiplicatively: the step from 25% to 35% is the same visual jump as 200%
+   * to 280%, while a fixed ±0.1 is imperceptible at the top of the range and a third of the page
+   * at the bottom. With a ceiling of 8 a linear tenth would also want seventy presses to cross
+   * the range.
+   */
+  const ZOOM_STEP = 1.4;
 
   function changeZoom(next: number) {
     const bounds = pageViewport?.getBoundingClientRect();
@@ -2718,6 +2778,18 @@
                     else if (colorPanel) editSwatch(colorPanel.index, color);
                     colorPanel = null;
                   }}
+                  onChange={(color) => {
+                    // Same commit, panel left open: the picker is adjusted by eye, so the ink
+                    // has to follow before the writer decides whether to go again.
+                    if (colorPanel?.index === -1) {
+                      addSwatch(color);
+                      // The new swatch is now the last one, and further adjustment must retarget
+                      // it rather than appending a second swatch per drag.
+                      colorPanel = { ...colorPanel, index: activeColorChips.length - 1 };
+                    } else if (colorPanel) {
+                      editSwatch(colorPanel.index, color);
+                    }
+                  }}
                   onRemove={() => {
                     if (colorPanel && colorPanel.index !== -1) removeSwatch(colorPanel.index);
                     colorPanel = null;
@@ -2755,9 +2827,9 @@
       {/if}
 
       <div class="zoom-pill">
-        <button type="button" aria-label="Zoom out" onclick={() => changeZoom(zoom - 0.1)}>−</button>
+        <button type="button" aria-label="Zoom out" onclick={() => changeZoom(zoom / ZOOM_STEP)}>−</button>
         <output aria-label="Page zoom">{Math.round(zoom * 100)}%</output>
-        <button type="button" aria-label="Zoom in" onclick={() => changeZoom(zoom + 0.1)}>+</button>
+        <button type="button" aria-label="Zoom in" onclick={() => changeZoom(zoom * ZOOM_STEP)}>+</button>
       </div>
     </section>
     </div>
