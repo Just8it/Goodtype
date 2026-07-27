@@ -54,6 +54,7 @@
   import type { InkTool } from "../ink/pipeline";
   import { keepsSelection, moveSelected, scaleSelected, toolAfterSelection } from "../ink/selection";
   import ColorPanel from "./ColorPanel.svelte";
+  import WidthPanel from "./WidthPanel.svelte";
   import ToolPanel from "./ToolPanel.svelte";
   import PageSurface from "./PageSurface.svelte";
   import OverflowMenu from "../workspace/OverflowMenu.svelte";
@@ -94,6 +95,7 @@
     saveSettings,
     ERASER_RADIUS_PT,
     MAX_SWATCHES,
+    MAX_WIDTHS,
     colorName,
     penType,
     withRecentColor,
@@ -325,6 +327,7 @@
   /// Open colour editor: `index` is the swatch being edited, or -1 when adding a new one.
   /// `anchor` is that chip's centre within the palette, so the panel opens where you tapped.
   let colorPanel = $state<{ index: number; anchor: number } | null>(null);
+  let widthPanel = $state<{ index: number; anchor: number } | null>(null);
 
   /// Quick settings for a tool slot, opened by double-pressing its tile.
   let toolPanel = $state<{ kind: "pen" | "highlighter"; slot: number; anchor: number } | null>(
@@ -1630,6 +1633,53 @@
     setActiveColor(color);
   }
 
+  /**
+   * The width row, edited the same way the colour row is.
+   *
+   * Widths are stored per tool, sorted, and de-duplicated: the row is a ladder, so an entry out
+   * of order or repeated makes it read as a list of numbers instead. Selecting the committed
+   * width is what makes the panel feel like it did something.
+   */
+  function widthKey() {
+    return tool === "highlighter" ? "highlighterWidths" : "penWidths";
+  }
+
+  function putWidths(widths: number[], select: number) {
+    const sorted = [...new Set(widths.map((value) => Math.round(value * 1000) / 1000))].sort(
+      (a, b) => a - b,
+    );
+    changeSettings({ ...settings, [widthKey()]: sorted } as AppSettings);
+    setActiveWidth(select);
+  }
+
+  function addWidth(widthPt: number) {
+    const widths = settings[widthKey()];
+    if (widths.length >= MAX_WIDTHS && !widths.includes(widthPt)) {
+      status = `The palette holds at most ${MAX_WIDTHS} widths`;
+      // Still take the width for this stroke: the row being full is no reason to refuse it.
+      setActiveWidth(widthPt);
+      return;
+    }
+    putWidths([...widths, widthPt], widthPt);
+  }
+
+  function editWidth(index: number, widthPt: number) {
+    putWidths(
+      settings[widthKey()].map((existing, position) => (position === index ? widthPt : existing)),
+      widthPt,
+    );
+  }
+
+  function removeWidth(index: number) {
+    const widths = settings[widthKey()];
+    if (widths.length <= 1) {
+      status = "The palette keeps at least one width";
+      return;
+    }
+    const remaining = widths.filter((_, position) => position !== index);
+    putWidths(remaining, nearestChip(remaining, activeWidth));
+  }
+
   function removeSwatch(index: number) {
     const key = tool === "highlighter" ? "highlighterSwatches" : "penSwatches";
     if (settings[key].length <= 1) {
@@ -2709,14 +2759,28 @@
         {#if tool === "pen" || tool === "highlighter"}
           <span class="palette-divider"></span>
           <div class="inline-group" role="group" aria-label="Stroke size">
-            {#each activeWidthChips as chip (chip)}
+            {#each activeWidthChips as chip, index (chip)}
+              {@const isActive = nearestChip(activeWidthChips, activeWidth) === chip}
               <button
                 type="button"
                 class="size-tile"
-                class:active={nearestChip(activeWidthChips, activeWidth) === chip}
-                aria-pressed={nearestChip(activeWidthChips, activeWidth) === chip}
-                title={`${(chip / 2.835).toFixed(2)} mm`}
-                onclick={() => setActiveWidth(chip)}
+                class:active={isActive}
+                aria-pressed={isActive}
+                title={isActive
+                  ? `${(chip / 2.835).toFixed(2)} mm — tap again to set exactly`
+                  : `${(chip / 2.835).toFixed(2)} mm`}
+                onclick={(event) => {
+                  // The same select-then-edit gesture the colour swatches use.
+                  if (isActive)
+                    widthPanel =
+                      widthPanel?.index === index
+                        ? null
+                        : { index, anchor: swatchAnchor(event.currentTarget) };
+                  else {
+                    widthPanel = null;
+                    setActiveWidth(chip);
+                  }
+                }}
               >
                 <span
                   class="size-line"
@@ -2725,6 +2789,39 @@
                 ></span>
               </button>
             {/each}
+            <button
+              type="button"
+              class="size-tile custom"
+              aria-label="Set a stroke width"
+              aria-expanded={widthPanel?.index === -1}
+              title="Set a stroke width"
+              onclick={(event) =>
+                (widthPanel =
+                  widthPanel?.index === -1
+                    ? null
+                    : { index: -1, anchor: swatchAnchor(event.currentTarget) })}
+            >+</button>
+            {#if widthPanel}
+              <div class="color-panel-anchor" style:--anchor={`${widthPanel.anchor}px`}>
+                <WidthPanel
+                  widthPt={widthPanel.index === -1
+                    ? activeWidth
+                    : activeWidthChips[widthPanel.index]}
+                  kind={tool === "highlighter" ? "highlighter" : "pen"}
+                  canRemove={widthPanel.index !== -1 && activeWidthChips.length > 1}
+                  onCommit={(next) => {
+                    if (widthPanel?.index === -1) addWidth(next);
+                    else if (widthPanel) editWidth(widthPanel.index, next);
+                    widthPanel = null;
+                  }}
+                  onRemove={() => {
+                    if (widthPanel && widthPanel.index !== -1) removeWidth(widthPanel.index);
+                    widthPanel = null;
+                  }}
+                  onClose={() => (widthPanel = null)}
+                />
+              </div>
+            {/if}
           </div>
           <span class="palette-divider"></span>
           <div class="inline-group colors" role="group" aria-label="Ink color">

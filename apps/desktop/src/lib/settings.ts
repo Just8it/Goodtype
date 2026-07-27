@@ -157,6 +157,15 @@ export const ERASER_RADIUS_PT: Record<EraserSize, number> = {
 };
 
 export const MAX_SWATCHES = 12;
+
+/**
+ * How many stroke widths a tool's row holds.
+ *
+ * Fewer than colours: the row is a ladder read at a glance, and past half a dozen the tiles stop
+ * being distinguishable by the line drawn on them, which is the only thing that makes it faster
+ * than typing a number.
+ */
+export const MAX_WIDTHS = 6;
 export const MAX_RECENT_COLORS = 8;
 
 /** Colours offered in the colour panel before the writer has curated any. */
