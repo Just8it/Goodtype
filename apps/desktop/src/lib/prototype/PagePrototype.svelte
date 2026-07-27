@@ -2830,16 +2830,12 @@
                     ? null
                     : { index: -1, anchor: swatchAnchor(event.currentTarget) })}
             >
-              <!-- The dotted slot keeps the row's 20px rhythm, so the empty tile occupies the
-                   same span as a drawn line. The mark inside is drawn rather than typed: a text
-                   `+` brings its own weight and metrics, which is what made it read as a stray
-                   character. It sits well inside the slot so the outline reads as the shape and
-                   the plus only as a hint. -->
-              <span class="size-add" aria-hidden="true">
-                <svg width="9" height="9" viewBox="0 0 9 9" fill="none">
-                  <path d="M0 4.5h9M4.5 0v9" stroke="currentColor" stroke-width="1" />
-                </svg>
-              </span>
+              <!-- Drawn rather than typed: a text `+` brings its own weight and metrics, which
+                   is what made it read as a stray character. Small, because the tile's own dotted
+                   outline is the shape here and the mark is only a hint. -->
+              <svg width="9" height="9" viewBox="0 0 9 9" fill="none" aria-hidden="true">
+                <path d="M0 4.5h9M4.5 0v9" stroke="currentColor" stroke-width="1" />
+              </svg>
             </button>
             {#if widthPanel}
               <div class="palette-panel-anchor" style:--anchor={`${widthPanel.anchor}px`}>
@@ -3341,19 +3337,17 @@
   .size-tile:hover { background: rgb(255 255 255 / 6%); }
   .size-tile.active { outline: 1.5px solid var(--blueprint); background: rgb(76 141 240 / 16%); }
   .size-line { width: 20px; border-radius: 3px; }
-  /* The tile keeps its full 34px for hover and focus; only the slot inside it is smaller. */
-  .size-tile.custom { color: var(--quiet); }
-  .size-tile.custom:hover { color: var(--text); }
-  .size-add {
-    display: grid;
-    box-sizing: border-box;
-    width: 20px;
-    height: 14px;
+  /* The outline is the tile, not a box inside it: it traces exactly what the hover fills, so the
+     empty slot occupies the same 34px as a width that is there. `box-sizing` is already
+     border-box above, so the border costs no size and the row stays aligned. */
+  .size-tile.custom {
     border: 1px dotted rgb(255 255 255 / 32%);
-    border-radius: 3px;
-    place-items: center;
+    color: var(--quiet);
   }
-  .size-tile.custom:hover .size-add { border-color: rgb(255 255 255 / 55%); }
+  .size-tile.custom:hover {
+    border-color: rgb(255 255 255 / 55%);
+    color: var(--text);
+  }
   .size-tile.active .size-line { background: var(--text) !important; }
   /* Border-box so the drawn circle is exactly the size asked for: otherwise each ring grows by
      its border and the three sizes step unevenly. */
