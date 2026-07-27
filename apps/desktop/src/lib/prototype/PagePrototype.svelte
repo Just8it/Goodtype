@@ -1662,11 +1662,15 @@
     setActiveWidth(select);
   }
 
+  /**
+   * A backstop rather than a path anyone walks: the add tile is not rendered once the row is
+   * full, so this is only reachable from a settings file that already carries the maximum. The
+   * width is still taken for the current stroke — a full row is no reason to refuse a nib.
+   */
   function addWidth(widthPt: number) {
     const widths = settings[widthKey()];
     if (widths.length >= MAX_WIDTHS && !widths.includes(widthPt)) {
       status = `The palette holds at most ${MAX_WIDTHS} widths`;
-      // Still take the width for this stroke: the row being full is no reason to refuse it.
       setActiveWidth(widthPt);
       return;
     }
@@ -2818,6 +2822,10 @@
                 ></span>
               </button>
             {/each}
+            <!-- The empty slot only exists while there is a slot: at four widths the row is the
+                 row, and the fourth tile is standing where this was. Leaving a `+` that could
+                 only fail would be a control that lies about what it does. -->
+            {#if activeWidthChips.length < MAX_WIDTHS}
             <button
               type="button"
               class="size-tile custom"
@@ -2837,6 +2845,7 @@
                 <path d="M0 4.5h9M4.5 0v9" stroke="currentColor" stroke-width="1" />
               </svg>
             </button>
+            {/if}
             {#if widthPanel}
               <div class="palette-panel-anchor" style:--anchor={`${widthPanel.anchor}px`}>
                 <WidthPanel
