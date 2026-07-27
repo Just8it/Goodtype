@@ -106,8 +106,11 @@ impl Default for AppSettings {
             },
             pen_swatches: ["#1e232b", "#4c8df0", "#e5645e"].map(String::from).to_vec(),
             highlighter_swatches: ["#e0912b", "#e9d636", "#57c08a"].map(String::from).to_vec(),
-            pen_widths: vec![1.0, 1.6, 2.8],
-            highlighter_widths: vec![2.6, 3.78, 5.2],
+            // Two apiece, and both of them a width the shipped nibs actually use, so the row
+            // opens showing the pen in hand as the selected one. More can be added; starting
+            // with a full row invites picking from a ladder instead of setting a width.
+            pen_widths: vec![1.6, 2.8],
+            highlighter_widths: vec![3.78, 5.2],
             recent_colors: Vec::new(),
             pressure_enabled: true,
             highlighter_opacity: 0.6,
@@ -139,6 +142,10 @@ fn clamp(value: f64, minimum: f64, maximum: f64, fallback: f64) -> f64 {
 }
 
 const MAX_SWATCHES: usize = 12;
+/// Width chips per tool. Far fewer than colours: the tiles are told apart only by the thickness
+/// of the line drawn on them, and past four they stop being distinguishable at a glance. Mirrors
+/// `MAX_WIDTHS` in `apps/desktop/src/lib/settings.ts`.
+const MAX_WIDTHS: usize = 4;
 const MAX_RECENT_COLORS: usize = 8;
 
 /// Accepts `#rrggbb`. Eight-digit hex is deliberately rejected here *and* never produced by the
@@ -168,7 +175,7 @@ fn sanitize_widths(widths: Vec<f64>, fallback: &[f64], minimum: f64, maximum: f6
     let kept: Vec<f64> = widths
         .into_iter()
         .filter(|width| width.is_finite() && *width >= minimum && *width <= maximum)
-        .take(MAX_SWATCHES)
+        .take(MAX_WIDTHS)
         .collect();
     if kept.is_empty() {
         fallback.to_vec()
