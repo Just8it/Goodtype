@@ -166,6 +166,23 @@ export function templatePreviewSvg(template: PageTemplate, geometry: PageGeometr
   );
 }
 
+/**
+ * The template's shapes as markup, without a surrounding `<svg>` or a background.
+ *
+ * Exported so a page can be composed with something else on top of it — a cover draws ruling and
+ * then ink into one document — without a second copy of the shape-to-markup mapping that could
+ * drift from this one.
+ */
+export function templateBodySvg(template: PageTemplate, geometry: PageGeometry): string {
+  return resolveTemplate(template, geometry)
+    .map((shape) =>
+      shape.kind === "line"
+        ? `<line x1="${round(shape.x1)}" y1="${round(shape.y1)}" x2="${round(shape.x2)}" y2="${round(shape.y2)}" stroke="${shape.color}" stroke-width="${round(shape.weightPt)}"/>`
+        : `<circle cx="${round(shape.cx)}" cy="${round(shape.cy)}" r="${round(shape.radiusPt)}" fill="${shape.color}"/>`,
+    )
+    .join("");
+}
+
 function svgFor(
   template: PageTemplate,
   geometry: PageGeometry,

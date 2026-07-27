@@ -57,6 +57,7 @@
   import SearchOverlay from "../workspace/SearchOverlay.svelte";
   import SettingsPanel from "../workspace/SettingsPanel.svelte";
   import LibrarySurface from "../library/LibrarySurface.svelte";
+  import { coverSvg, rasteriseCover } from "../library/cover";
   import {
     DEFAULT_SETTINGS,
     loadSettings,
@@ -917,6 +918,48 @@
     });
     neighborCommitters.set(pageId, committer);
     return committer;
+  }
+
+  /**
+   * Draw this notebook's shelf cover, once, on the way out.
+   *
+   * Closing is the right moment for three reasons. It happens once a session rather than once per
+   * idle pause, so rasterising costs nothing anyone waits for. The work is already saved and in
+   * memory. And it is immediately before the shelf is looked at, so the cover a writer sees is
+   * the state they just left.
+   *
+   * Rendering covers when a *folder* opens instead would mean reading and rasterising a page for
+   * every notebook in it — cheaper than it sounds, since only the first page is needed rather
+   * than the whole notebook, but still forty SVG decodes between the click and the grid. Drawing
+   * on the way out spreads that cost to one notebook at a time, at a moment with nothing to
+   * block. A notebook never opened since covers existed simply shows its paper until it is.
+   *
+   * The cover is the first page. That is the page a notebook is recognised by — except when it
+   * is not: a run of problem sheets that all open with the same letterhead is exactly the case
+   * where the first page distinguishes nothing, which is why this reads the manifest's order
+   * rather than assuming, and why a chosen cover page belongs here next.
+   */
+  async function writeCover() {
+    if (!tauriAvailable || !root) return;
+    const coverPageId = notebookManifest?.pages[0]?.id;
+    if (!coverPageId) return;
+    // Loaded on demand: the cover page is often not the one that was being worked on, and one
+    // page read on close is cheaper than keeping the first page resident all session.
+    const snapshot = await ensurePageLoaded(coverPageId);
+    if (!snapshot) return;
+
+    const { background, geometry } = snapshot.page;
+    const png = await rasteriseCover(
+      coverSvg(background, geometry, strokesFromSnapshot(snapshot)),
+      geometry,
+    );
+    if (!png) return;
+    try {
+      await invoke("write_notebook_cover", { root, png: Array.from(png) });
+    } catch {
+      // A cover is a nicety. A notebook that saved correctly must never report a failure
+      // because its thumbnail could not be drawn.
+    }
   }
 
   function commitNeighborInk(pageId: string, strokes: Stroke[], label: string) {
@@ -2160,6 +2203,8 @@
 
   async function closePage() {
     if (!(await persist())) return;
+    // After the save, so the cover shows what was just written rather than what preceded it.
+    await writeCover();
     pageOpen = false;
     notebookChosen = false;
     status = "Notebook closed; the confirmed local files are safe";

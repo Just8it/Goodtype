@@ -1,15 +1,44 @@
 <script lang="ts">
+  import { invoke } from "@tauri-apps/api/core";
   import type { PageDefaults } from "../model";
   import { templateSvg } from "../page/template";
 
   let {
     paper = null,
+    path = null,
     widthPx,
   }: {
     /** The notebook's own paper. Null when its manifest could not be read. */
     paper?: PageDefaults | null;
+    /**
+     * Library-relative path, used to fetch the stored cover. Null suppresses the fetch, which is
+     * what a notebook outside any library wants.
+     */
+    path?: string | null;
     widthPx: number;
   } = $props();
+
+  let cover = $state<string | null>(null);
+
+  /**
+   * Fetched per tile rather than as part of the listing, so a folder of a hundred notebooks does
+   * not put a hundred rasters into one reply for the sake of the dozen on screen. A notebook that
+   * has never been saved since covers existed simply has none, and the paper below shows through.
+   */
+  $effect(() => {
+    const wanted = path;
+    if (!wanted) return;
+    let current = true;
+    void (async () => {
+      try {
+        const found = await invoke<string | null>("library_cover", { path: wanted });
+        if (current) cover = found;
+      } catch {
+        // A missing or unreadable cover is not worth reporting: the tile still draws its paper.
+      }
+    })();
+    return () => (current = false);
+  });
 
   // A4 in points, used only when a notebook cannot say what shape it is. The tile still has to
   // have proportions, and this is the one every other page in the app defaults to.
@@ -52,6 +81,12 @@
     <!-- The SVG is generated here from the notebook's own template, never read from a file. -->
     <div class="ruling">{@html ruling}</div>
   {/if}
+  {#if cover}
+    <!-- The cover already contains its own paper and ruling, drawn at save time from the same
+         geometry, so it covers rather than sits beside what is underneath. The ruling above is
+         what a notebook saved before it had a cover falls back to. -->
+    <img src={cover} alt="" draggable="false" />
+  {/if}
 </div>
 
 <style>
@@ -73,5 +108,14 @@
     display: block;
     width: 100%;
     height: 100%;
+  }
+
+  img {
+    position: absolute;
+    display: block;
+    width: 100%;
+    height: 100%;
+    inset: 0;
+    pointer-events: none;
   }
 </style>

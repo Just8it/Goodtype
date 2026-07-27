@@ -413,9 +413,9 @@ fn parent_of(path: &str) -> &str {
     }
 }
 
-/// Store-owned state for this library, mirroring the `.goodtype/` a notebook already keeps for
-/// its own bookkeeping. Hidden, so it never lists; inside the library, so it travels with it.
-const INTERNAL_DIR: &str = ".goodtype";
+/// Store-owned state for this library, reusing the name a notebook already keeps its own
+/// bookkeeping under. Hidden, so it never lists; inside the library, so it travels with it.
+const INTERNAL_DIR: &str = layout::INTERNAL_DIR;
 const TRASH_DIR: &str = "trash";
 const SHELF_FILE: &str = "shelf.json";
 const MAX_SHELF_BYTES: u64 = 1024 * 1024;
@@ -466,6 +466,90 @@ fn forget_favourite(root: &Path, path: &str) -> Result<(), String> {
         return Ok(());
     }
     write_shelf(root, &shelf)
+}
+
+/// A notebook's cover lives in its own store-owned directory, beside the pending transaction and
+/// the recovery copies. It is derived, regenerable state rather than part of the document, which
+/// is the split `goodtype_core::layout` already draws with `.goodtype/`.
+const COVER_FILE: &str = "cover.png";
+/// Wide enough for a 304px raster of a busy page, far short of anything that is not a thumbnail.
+const MAX_COVER_BYTES: usize = 2 * 1024 * 1024;
+
+fn cover_path(notebook: &Path) -> PathBuf {
+    notebook.join(layout::INTERNAL_DIR).join(COVER_FILE)
+}
+
+/// Store a rendered cover for an open notebook.
+///
+/// Takes the notebook's absolute root, because this is called from the notebook side, where the
+/// library is not necessarily what the writer is looking at — and the allowlist already vouches
+/// for a root that has been opened. The bytes are checked to be a PNG rather than trusted: this
+/// writes a file inside a notebook, and "the frontend said so" is not a reason to.
+#[tauri::command]
+pub fn write_notebook_cover(
+    roots: tauri::State<'_, AllowedRoots>,
+    root: String,
+    png: Vec<u8>,
+) -> Result<(), String> {
+    const PNG_MAGIC: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+    if png.len() > MAX_COVER_BYTES {
+        return Err("that cover is too large".to_owned());
+    }
+    if !png.starts_with(&PNG_MAGIC) {
+        return Err("a cover must be a PNG".to_owned());
+    }
+    let notebook = crate::workspace::ensure_allowed(&roots, &root)?;
+    let path = cover_path(&notebook);
+    let directory = path
+        .parent()
+        .ok_or("the notebook has no internal directory")?;
+    fs::create_dir_all(directory).map_err(|error| error.to_string())?;
+    fs::write(path, png).map_err(|error| error.to_string())
+}
+
+/// A notebook's cover as a data URL, or `None` when it has never been saved with one.
+///
+/// Fetched per tile rather than folded into the listing, so a folder of a hundred notebooks does
+/// not put a hundred rasters into one IPC reply for the sake of the dozen that are on screen.
+#[tauri::command]
+pub fn library_cover(
+    app: tauri::AppHandle,
+    roots: tauri::State<'_, AllowedRoots>,
+    path: String,
+) -> Result<Option<String>, String> {
+    let root = current_root(&app, &roots)?;
+    let notebook = resolve(&root, &path)?;
+    let cover = cover_path(&notebook);
+    let within_ceiling = fs::metadata(&cover)
+        .map(|metadata| metadata.len() as usize <= MAX_COVER_BYTES)
+        .unwrap_or(false);
+    if !within_ceiling {
+        return Ok(None);
+    }
+    let Ok(bytes) = fs::read(&cover) else {
+        return Ok(None);
+    };
+    Ok(Some(format!("data:image/png;base64,{}", base64(&bytes))))
+}
+
+/// Base64 without a dependency. The alphabet is four lines and the alternative is a crate in the
+/// lockfile for one call site.
+fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let block = chunk.iter().enumerate().fold(0u32, |block, (index, byte)| {
+            block | (*byte as u32) << (16 - 8 * index)
+        });
+        for slot in 0..4 {
+            if slot <= chunk.len() {
+                out.push(ALPHABET[(block >> (18 - 6 * slot) & 0x3f) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
 }
 
 #[tauri::command]
@@ -710,6 +794,21 @@ mod tests {
         assert!(json[0].get("modifiedMs").is_some(), "{json}");
         assert_eq!(json[1]["kind"], "notebook");
         assert_eq!(json[1]["pageCount"], 3);
+    }
+
+    /// Hand-rolled, so the padding cases are pinned against the RFC 4648 vectors rather than
+    /// assumed. The one-and two-byte tails are where a home-made encoder goes wrong.
+    #[test]
+    fn base64_matches_the_reference_vectors() {
+        assert_eq!(base64(b""), "");
+        assert_eq!(base64(b"f"), "Zg==");
+        assert_eq!(base64(b"fo"), "Zm8=");
+        assert_eq!(base64(b"foo"), "Zm9v");
+        assert_eq!(base64(b"foob"), "Zm9vYg==");
+        assert_eq!(base64(b"fooba"), "Zm9vYmE=");
+        assert_eq!(base64(b"foobar"), "Zm9vYmFy");
+        // High bytes and the two characters that only appear at the top of the alphabet.
+        assert_eq!(base64(&[0xff, 0xef, 0xfe]), "/+/+");
     }
 
     #[test]

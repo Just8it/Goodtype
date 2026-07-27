@@ -520,7 +520,11 @@
                 ondragend={() => ((dragging = null), (dropTarget = null))}
               >
                 <button type="button" class="hit" disabled={busy} onclick={() => activate(notebook)}>
-                  <NotebookCover paper={notebook.paper} widthPx={COVER_WIDTH_PX} />
+                  <NotebookCover
+                    paper={notebook.paper}
+                    path={notebook.path}
+                    widthPx={COVER_WIDTH_PX}
+                  />
                   <span class="tile-name">{notebook.name}</span>
                   <span class="tile-meta">
                     {pages(notebook.pageCount)} · {whenModified(notebook.modifiedMs)}

@@ -31,6 +31,8 @@ fn main() {
             library::rename_library_entry,
             library::move_library_entry,
             library::delete_library_entry,
+            library::write_notebook_cover,
+            library::library_cover,
             library::library_favourites,
             library::set_library_favourite,
             library::list_library_favourites,
