@@ -1,8 +1,10 @@
 <script lang="ts">
+  import { untrack } from "svelte";
   import BrandMark from "../brand/BrandMark.svelte";
   import NamePrompt from "./NamePrompt.svelte";
   import NotebookCover from "./NotebookCover.svelte";
   import ShelfMenu, { type ShelfMenuItem } from "./ShelfMenu.svelte";
+  import type { ShelfLocation, ShelfView } from "./location";
   import {
     createLibraryFolder,
     createLibraryNotebook,
@@ -29,15 +31,27 @@
 
   let {
     tauriAvailable,
+    location = { view: "library", path: "" },
     onOpen,
     onCreate,
+    onLocationChange,
     onStatus,
   }: {
     tauriAvailable: boolean;
+    /**
+     * Where the shelf was left.
+     *
+     * Held by the caller rather than here, because this component is unmounted for as long as a
+     * notebook is open — so anything it remembers itself is forgotten the moment you open
+     * something, and closing would drop you back at the root. Coming out of a notebook should
+     * put you where you went in from.
+     */
+    location?: ShelfLocation;
     /** Hands back an absolute notebook root, which is what every notebook command takes. */
     onOpen: (root: string) => void;
     /** Same, for a directory that is not a notebook yet and must be filled. */
     onCreate: (root: string) => void;
+    onLocationChange?: (location: ShelfLocation) => void;
     onStatus: (message: string) => void;
   } = $props();
 
@@ -49,8 +63,10 @@
     | { kind: "rename"; path: string; initial: string };
 
   let libraryRoot = $state<string | null>(null);
-  let view = $state<"library" | "favourites">("library");
-  let path = $state("");
+  // Seeded once from the caller and reported back on every move, so the two never fight: this
+  // owns it while the shelf is on screen, the caller holds it while a notebook is.
+  let view = $state<ShelfView>(untrack(() => location.view));
+  let path = $state(untrack(() => location.path));
   let entries = $state.raw<LibraryEntry[]>([]);
   let favourites = $state.raw<string[]>([]);
   let order = $state<SortOrder>("name");
@@ -134,12 +150,14 @@
     view = "library";
     path = next;
     picked = null;
+    onLocationChange?.({ view, path });
     await reload();
   }
 
   async function showFavourites() {
     view = "favourites";
     picked = null;
+    onLocationChange?.({ view, path });
     await reload();
   }
 

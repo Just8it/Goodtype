@@ -88,6 +88,7 @@
   import SearchOverlay from "../workspace/SearchOverlay.svelte";
   import SettingsPanel from "../workspace/SettingsPanel.svelte";
   import LibrarySurface from "../library/LibrarySurface.svelte";
+  import { SHELF_ROOT, type ShelfLocation } from "../library/location";
   import { coverSvg, rasteriseCover } from "../library/cover";
   import {
     DEFAULT_SETTINGS,
@@ -421,6 +422,15 @@
   let recoveryOpen = $state(false);
   let recoveryBusy = $state(false);
   let notebookChosen = $state(false);
+
+  /**
+   * Where the shelf was when a notebook was opened from it.
+   *
+   * Held here because `LibrarySurface` is unmounted for as long as a notebook is open. Closing
+   * one should return you to the folder you opened it from, not to the library root three levels
+   * up — the notebook you just closed is the thing you are most likely to want next to.
+   */
+  let shelfLocation = $state<ShelfLocation>(SHELF_ROOT);
   // Session-local order of committed changes across pages, so notebook-scoped undo can route
   // Ctrl+Z to the page that changed most recently.
   let notebookUndoOrder: string[] = [];
@@ -2504,8 +2514,10 @@
     <div class="start-slot">
       <LibrarySurface
         {tauriAvailable}
+        location={shelfLocation}
         onOpen={(nextRoot) => void openNotebookAt(nextRoot)}
         onCreate={(nextRoot) => void openNotebookAt(nextRoot, { createIfMissing: true })}
+        onLocationChange={(next) => (shelfLocation = next)}
         onStatus={(next) => (status = next)}
       />
     </div>
@@ -2818,12 +2830,16 @@
                     ? null
                     : { index: -1, anchor: swatchAnchor(event.currentTarget) })}
             >
-              <!-- Drawn rather than typed: a text `+` brings its own weight and metrics, which
-                   is what made it read as a stray character. This is the same 20px the tiles
-                   above it draw, at the hairline weight of the thinnest of them. -->
-              <svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true">
-                <path d="M0 10h20M10 0v20" stroke="currentColor" stroke-width="1" />
-              </svg>
+              <!-- The dotted slot keeps the row's 20px rhythm, so the empty tile occupies the
+                   same span as a drawn line. The mark inside is drawn rather than typed: a text
+                   `+` brings its own weight and metrics, which is what made it read as a stray
+                   character. It sits well inside the slot so the outline reads as the shape and
+                   the plus only as a hint. -->
+              <span class="size-add" aria-hidden="true">
+                <svg width="9" height="9" viewBox="0 0 9 9" fill="none">
+                  <path d="M0 4.5h9M4.5 0v9" stroke="currentColor" stroke-width="1" />
+                </svg>
+              </span>
             </button>
             {#if widthPanel}
               <div class="palette-panel-anchor" style:--anchor={`${widthPanel.anchor}px`}>
@@ -3325,8 +3341,19 @@
   .size-tile:hover { background: rgb(255 255 255 / 6%); }
   .size-tile.active { outline: 1.5px solid var(--blueprint); background: rgb(76 141 240 / 16%); }
   .size-line { width: 20px; border-radius: 3px; }
+  /* The tile keeps its full 34px for hover and focus; only the slot inside it is smaller. */
   .size-tile.custom { color: var(--quiet); }
   .size-tile.custom:hover { color: var(--text); }
+  .size-add {
+    display: grid;
+    box-sizing: border-box;
+    width: 20px;
+    height: 14px;
+    border: 1px dotted rgb(255 255 255 / 32%);
+    border-radius: 3px;
+    place-items: center;
+  }
+  .size-tile.custom:hover .size-add { border-color: rgb(255 255 255 / 55%); }
   .size-tile.active .size-line { background: var(--text) !important; }
   /* Border-box so the drawn circle is exactly the size asked for: otherwise each ring grows by
      its border and the three sizes step unevenly. */
