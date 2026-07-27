@@ -1,11 +1,16 @@
 import type { Stroke } from "../model";
+import { createCommitTimer } from "./commitTimer";
 
-// Batches a burst of strokes into one commit. A stroke lands every few hundred milliseconds
-// while writing, and one commit per stroke would rewrite the ink file constantly; the debounce
-// coalesces them, and the maximum guarantees ink still reaches disk during continuous writing.
-export const INK_SAVE_DEBOUNCE_MS = 500;
-export const INK_SAVE_MAXIMUM_MS = 2000;
+export { INK_SAVE_DEBOUNCE_MS, INK_SAVE_MAXIMUM_MS } from "./commitTimer";
 
+/**
+ * Ink saving for a page that is not the one being edited.
+ *
+ * A neighbouring page has no live component state to build a snapshot from, so unlike the active
+ * page it carries the strokes it captured through to the save. The timing is
+ * [`createCommitTimer`], shared with the active page — see there for why the debounce has a
+ * ceiling.
+ */
 export type InkCommitter = {
   /** Record new strokes and (re)arm the debounce. */
   commit(strokes: Stroke[], label: string): void;
@@ -22,44 +27,36 @@ export function createInkCommitter(options: {
   debounceMs?: number;
   maximumMs?: number;
 }): InkCommitter {
-  const debounceMs = options.debounceMs ?? INK_SAVE_DEBOUNCE_MS;
-  const maximumMs = options.maximumMs ?? INK_SAVE_MAXIMUM_MS;
-
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  let deadline = 0;
   let queue: Promise<void> = Promise.resolve();
   let strokes: Stroke[] = [];
   let label = "Updated ink";
 
-  function run() {
-    if (timer) clearTimeout(timer);
-    timer = undefined;
-    const committed = strokes;
-    const committedLabel = label;
-    queue = queue.then(() => options.save(committed, committedLabel));
-  }
+  // Saves are chained rather than run concurrently: two commits of the same page racing would
+  // let the older one land last.
+  const timer = createCommitTimer(
+    () => {
+      const committed = strokes;
+      const committedLabel = label;
+      queue = queue.then(() => options.save(committed, committedLabel));
+    },
+    { debounceMs: options.debounceMs, maximumMs: options.maximumMs },
+  );
 
   return {
     commit(next, nextLabel) {
       strokes = next;
       label = nextLabel;
-      const now = performance.now();
-      // The first pending stroke starts the ceiling; later strokes extend the debounce but can
-      // never push the save past it.
-      if (!timer) deadline = now + maximumMs;
-      else clearTimeout(timer);
-      timer = setTimeout(run, Math.max(0, Math.min(debounceMs, deadline - now)));
+      timer.arm();
     },
     flush() {
-      if (timer) run();
+      timer.flush();
       return queue;
     },
     pending() {
-      return timer !== undefined;
+      return timer.armed();
     },
     dispose() {
-      if (timer) clearTimeout(timer);
-      timer = undefined;
+      timer.cancel();
     },
   };
 }

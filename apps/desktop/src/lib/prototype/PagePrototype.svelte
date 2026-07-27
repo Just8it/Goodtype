@@ -1,6 +1,35 @@
 <script lang="ts">
-  import { invoke } from "@tauri-apps/api/core";
   import { onDestroy, onMount, tick } from "svelte";
+  import {
+    commitNotebook,
+    createNotebook,
+    createPage,
+    deletePage,
+    duplicatePage,
+    focusPage,
+    openNotebook,
+    openPage,
+    reorderPages,
+    runHistory,
+    storePastedImage,
+  } from "../ipc/notebook";
+  import {
+    discardRecoveryCandidate,
+    listRecoveryCandidates,
+    restoreRecoveryCandidate,
+  } from "../ipc/recovery";
+  // The local `compileTypst` owns the cache check, the browser fallback and the block's preview
+  // state; this is only the round trip it makes when none of those answer.
+  import { compileTypst as requestTypstCompile } from "../ipc/typst";
+  import type { HistoryResult, NotebookSnapshot, StoredFile } from "../ipc/types";
+  import {
+    defaultNotebookRoot,
+    exportNotebookPdf,
+    listRecentNotebooks,
+    recordNotebookOpened,
+    writeMetrics,
+    writeNotebookCover,
+  } from "../ipc/workspace";
   import { clampZoom, type Point } from "../geometry/coordinates";
   import type {
     InkLayer,
@@ -50,6 +79,7 @@
     type BlockView,
     type ImageView,
   } from "./pageView";
+  import { createCommitTimer } from "./commitTimer";
   import { createInkCommitter, type InkCommitter } from "./inkCommitter";
   import { nearestPaletteDock, type PaletteDock } from "./palette";
   import ConflictDialog from "../workspace/ConflictDialog.svelte";
@@ -73,19 +103,6 @@
     type SearchHit,
   } from "../settings";
 
-  type StoredFile = { path: string; bytes: number[] };
-  type NotebookSnapshot = {
-    manifest: NotebookManifest;
-    page: Page;
-    blocks: StoredFile[];
-    assets: StoredFile[];
-    inkLayers: InkLayer[];
-  };
-  type HistoryResult = {
-    snapshot: NotebookSnapshot;
-    canUndo: boolean;
-    canRedo: boolean;
-  };
   type PageEntry = {
     id: string;
     path: string;
@@ -139,11 +156,6 @@
   const INK_GROUP_ID = "ink-group-001";
   const GROUP_ID = "group-001";
   const TYPST_SAVE_DEBOUNCE_MS = 250;
-  // A commit rewrites, revalidates, and refingerprints the whole page, so one commit per
-  // pen-up makes saving cost grow with the ink already on the page. Batch a burst of
-  // writing into one commit, but never hold unsaved ink longer than the maximum.
-  const INK_SAVE_DEBOUNCE_MS = 500;
-  const INK_SAVE_MAXIMUM_MS = 2000;
   const tauriAvailable =
     typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
@@ -195,9 +207,10 @@
   let transactionFailed = $state(false);
   let transactionQueue: Promise<void> = Promise.resolve();
   let typstCommitTimer: ReturnType<typeof setTimeout> | undefined;
-  let inkCommitTimer: ReturnType<typeof setTimeout> | undefined;
-  let inkCommitDeadline = 0;
   let inkCommitLabel = "Updated ink";
+  // The active page shares its timing with neighbouring pages but not its payload: the snapshot
+  // is built when the timer fires, so it picks up whatever else changed in the meantime.
+  const inkCommitTimer = createCommitTimer(() => queueCommit(inkCommitLabel));
   // Debounced ink is real unsaved work; the save indicator must not read "Saved" while it waits.
   let inkPending = $state(false);
   let typstDirty = false;
@@ -416,7 +429,7 @@
     window.addEventListener("keydown", historyShortcut);
   });
   onDestroy(() => {
-    if (inkCommitTimer) clearTimeout(inkCommitTimer);
+    inkCommitTimer.cancel();
     if (typstCommitTimer) clearTimeout(typstCommitTimer);
     if (focusTimer) clearTimeout(focusTimer);
     window.removeEventListener("keydown", historyShortcut);
@@ -429,7 +442,7 @@
     // Metrics are dev telemetry; batching writes keeps them off the per-stroke path.
     if (metricsTimer) clearTimeout(metricsTimer);
     metricsTimer = setTimeout(() => {
-      void invoke("write_phase0_metrics", { root, metrics }).catch(() => {});
+      void writeMetrics(root, metrics).catch(() => {});
     }, 1000);
   });
 
@@ -449,9 +462,9 @@
     // First launch continuity: with no notebook history, open the local default directly so
     // pen-first startup stays instant. Otherwise the start surface offers recents/open/create.
     try {
-      const recents = await invoke<unknown[]>("list_recent_notebooks");
+      const recents = await listRecentNotebooks();
       if (recents.length === 0) {
-        const defaultRoot = await invoke<string>("phase0_notebook_root");
+        const defaultRoot = await defaultNotebookRoot();
         await openNotebookAt(defaultRoot, { createIfMissing: true });
         return;
       }
@@ -503,12 +516,12 @@
       root = nextRoot;
       let snapshot: NotebookSnapshot;
       try {
-        snapshot = await invoke<NotebookSnapshot>("open_notebook", { root });
+        snapshot = await openNotebook(root);
       } catch (error) {
         if (!options.createIfMissing) throw error;
         resetToBlankNotebook(titleFromRoot(nextRoot));
         snapshot = buildSnapshot();
-        await invoke("create_notebook", { root, snapshot });
+        await createNotebook(root, snapshot);
       }
       transactionFailed = false;
       conflictDetail = null;
@@ -519,11 +532,11 @@
       notebookChosen = true;
       pageOpen = true;
       status = "Notebook ready";
-      void invoke("record_notebook_opened", {
+      void recordNotebookOpened(
         root,
-        title: snapshot.manifest.title || "Goodtype notebook",
-        openedAt: new Date().toISOString(),
-      }).catch(() => {});
+        snapshot.manifest.title || "Goodtype notebook",
+        new Date().toISOString(),
+      ).catch(() => {});
       await refreshRecoveryCandidates();
     } catch (error) {
       status = `Could not open the notebook: ${message(error)}`;
@@ -536,9 +549,7 @@
   async function refreshRecoveryCandidates() {
     if (!tauriAvailable || !root) return;
     try {
-      recoveryCandidates = await invoke<RecoveryCandidate[]>("list_recovery_candidates", {
-        root,
-      });
+      recoveryCandidates = await listRecoveryCandidates(root);
       recoveryOpen = recoveryCandidates.length > 0;
     } catch {
       // A recovery listing failure must not block opening; candidates stay on disk.
@@ -658,8 +669,9 @@
   }
 
   function applySnapshot(snapshot: NotebookSnapshot) {
-    if (inkCommitTimer) clearTimeout(inkCommitTimer);
-    inkCommitTimer = undefined;
+    // Whatever was scheduled describes the page being replaced, so it must not fire against the
+    // one arriving.
+    inkCommitTimer.cancel();
     inkPending = false;
     if (typstCommitTimer) clearTimeout(typstCommitTimer);
     typstCommitTimer = undefined;
@@ -751,7 +763,7 @@
     const entry = pageEntries.find((page) => page.id === pageId);
     if (!entry || entry.snapshot) return entry?.snapshot ?? null;
     try {
-      const snapshot = await invoke<NotebookSnapshot>("open_page", { root, pageId });
+      const snapshot = await openPage(root, pageId);
       entry.snapshot = snapshot;
       return snapshot;
     } catch (error) {
@@ -838,10 +850,7 @@
       const outgoingEntry = pageEntries.find((page) => page.id === outgoing);
       if (outgoingEntry) {
         try {
-          outgoingEntry.snapshot = await invoke<NotebookSnapshot>("open_page", {
-            root,
-            pageId: outgoing,
-          });
+          outgoingEntry.snapshot = await openPage(root, outgoing);
           // It renders as a neighbour from here on, so let it derive from the fresh bundle.
           delete neighborStrokes[outgoing];
         } catch {
@@ -849,7 +858,7 @@
         }
       }
 
-      const result = await invoke<HistoryResult>("focus_page", { root, pageId });
+      const result = await focusPage(root, pageId);
       applySnapshot(result.snapshot);
       canUndo = result.canUndo;
       canRedo = result.canRedo;
@@ -899,10 +908,11 @@
         const number =
           (notebookManifest?.pages.findIndex((page) => page.id === pageId) ?? 0) + 1;
         try {
-          const result = await invoke<HistoryResult>("commit_notebook", {
-            root,
-            // Originals already exist on disk; a commit references them by path.
-            snapshot: { ...entry.snapshot, assets: [], inkLayers },
+          // Originals already exist on disk; a commit references them by path.
+          const result = await commitNotebook(root, {
+            ...entry.snapshot,
+            assets: [],
+            inkLayers,
           });
           updateLoadedPage(pageId, result.snapshot);
           neighborStrokes[pageId] = strokesFromSnapshot(result.snapshot);
@@ -955,7 +965,7 @@
     );
     if (!png) return;
     try {
-      await invoke("write_notebook_cover", { root, png: Array.from(png) });
+      await writeNotebookCover(root, png);
     } catch {
       // A cover is a nicety. A notebook that saved correctly must never report a failure
       // because its thumbnail could not be drawn.
@@ -982,10 +992,7 @@
     }
     if (!tauriAvailable) return;
     try {
-      const result = await invoke<TypstCompileResult>("compile_typst", {
-        root,
-        request,
-      });
+      const result = await requestTypstCompile(root, request);
       setCachedTypst(request.source, request.widthPt, result);
       neighborResults[pageId] = {
         ...neighborResults[pageId],
@@ -1040,11 +1047,7 @@
     if (!tauriAvailable || !(await persist())) return;
     busy = true;
     try {
-      const snapshot = await invoke<NotebookSnapshot>("duplicate_page", {
-        root,
-        pageId: activePageId,
-        modifiedAt: new Date().toISOString(),
-      });
+      const snapshot = await duplicatePage(root, activePageId, new Date().toISOString());
       pageEntries = [];
       applySnapshot(snapshot);
       canUndo = false;
@@ -1072,11 +1075,7 @@
     }
     busy = true;
     try {
-      const snapshot = await invoke<NotebookSnapshot>("delete_page", {
-        root,
-        pageId: activePageId,
-        modifiedAt: new Date().toISOString(),
-      });
+      const snapshot = await deletePage(root, activePageId, new Date().toISOString());
       notebookUndoOrder = notebookUndoOrder.filter((id) => id !== activePageId);
       notebookRedoOrder = notebookRedoOrder.filter((id) => id !== activePageId);
       pageEntries = [];
@@ -1199,12 +1198,12 @@
     [order[index], order[target]] = [order[target], order[index]];
     busy = true;
     try {
-      const snapshot = await invoke<NotebookSnapshot>("reorder_pages", {
+      const snapshot = await reorderPages(
         root,
-        orderedIds: order,
-        modifiedAt: new Date().toISOString(),
+        order,
+        new Date().toISOString(),
         activePageId,
-      });
+      );
       pageEntries = [];
       applySnapshot(snapshot);
       await tick();
@@ -1236,10 +1235,7 @@
   async function restoreRecovery(fileName: string) {
     recoveryBusy = true;
     try {
-      const result = await invoke<HistoryResult>("restore_recovery_candidate", {
-        root,
-        fileName,
-      });
+      const result = await restoreRecoveryCandidate(root, fileName);
       pageEntries = [];
       applySnapshot(result.snapshot);
       canUndo = result.canUndo;
@@ -1259,7 +1255,7 @@
   async function discardRecovery(fileName: string) {
     recoveryBusy = true;
     try {
-      await invoke("discard_recovery_candidate", { root, fileName });
+      await discardRecoveryCandidate(root, fileName);
       recoveryCandidates = recoveryCandidates.filter(
         (candidate) => candidate.fileName !== fileName,
       );
@@ -1282,13 +1278,13 @@
     if (!(await persist())) return;
     busy = true;
     try {
-      const snapshot = await invoke<NotebookSnapshot>("create_page", {
+      const snapshot = await createPage(
         root,
-        modifiedAt: new Date().toISOString(),
+        new Date().toISOString(),
         position,
         background,
         geometry,
-      });
+      );
       pageEntries = [];
       applySnapshot(snapshot);
       canUndo = false;
@@ -1387,10 +1383,7 @@
         result = { ...cached, generation: request.generation };
       } else {
         try {
-          result = await invoke<TypstCompileResult>("compile_typst", {
-            root,
-            request,
-          });
+          result = await requestTypstCompile(root, request);
           setCachedTypst(request.source, request.widthPt, result);
         } catch (error) {
           result = {
@@ -1886,11 +1879,7 @@
     let path = `assets/${filename}`;
     if (tauriAvailable && root) {
       try {
-        path = await invoke<string>("store_pasted_image", {
-          root,
-          filename,
-          bytes: Array.from(new Uint8Array(await file.arrayBuffer())),
-        });
+        path = await storePastedImage(root, filename, new Uint8Array(await file.arrayBuffer()));
       } catch (error) {
         URL.revokeObjectURL(url);
         status = `The image could not be stored: ${message(error)}`;
@@ -1919,22 +1908,16 @@
   function scheduleInkCommit(label: string) {
     inkCommitLabel = label;
     inkPending = true;
-    const now = performance.now();
-    if (!inkCommitTimer) inkCommitDeadline = now + INK_SAVE_MAXIMUM_MS;
-    else clearTimeout(inkCommitTimer);
-    const delay = Math.max(0, Math.min(INK_SAVE_DEBOUNCE_MS, inkCommitDeadline - now));
-    inkCommitTimer = setTimeout(() => queueCommit(inkCommitLabel), delay);
+    inkCommitTimer.arm();
   }
 
   function flushInkCommit() {
-    if (!inkCommitTimer) return;
-    queueCommit(inkCommitLabel);
+    inkCommitTimer.flush();
   }
 
   function queueCommit(label: string) {
     // Any commit builds a snapshot from current state, so it already carries pending ink.
-    if (inkCommitTimer) clearTimeout(inkCommitTimer);
-    inkCommitTimer = undefined;
+    inkCommitTimer.cancel();
     inkPending = false;
     if (!tauriAvailable || !root || transactionFailed) return;
     const snapshot = buildSnapshot();
@@ -1943,10 +1926,7 @@
       .then(async () => {
         snapshot.page.revision = revision;
         try {
-          const result = await invoke<HistoryResult>("commit_notebook", {
-            root,
-            snapshot,
-          });
+          const result = await commitNotebook(root, snapshot);
           revision = result.snapshot.page.revision;
           canUndo = result.canUndo;
           canRedo = result.canRedo;
@@ -2037,10 +2017,7 @@
     transactionQueue = transactionQueue
       .then(async () => {
         try {
-          const result = await invoke<HistoryResult>(command, {
-            root,
-            pageId: activePageId,
-          });
+          const result = await runHistory(root, command, activePageId);
           const pageId = result.snapshot.page.id;
           if (command === "undo_notebook") {
             const index = notebookUndoOrder.lastIndexOf(pageId);
@@ -2188,10 +2165,7 @@
     try {
       // Rust builds the ordered multi-page PDF from the canonical files, so the export
       // matches what is saved, not what this view holds.
-      const path = await invoke<string>("export_notebook_pdf", {
-        root,
-        outputName: "notebook.pdf",
-      });
+      const path = await exportNotebookPdf(root, "notebook.pdf");
       exportMs = performance.now() - startedAt;
       status = `Exported PDF to ${path}`;
     } catch (error) {
@@ -2220,7 +2194,7 @@
     const startedAt = performance.now();
     try {
       await transactionQueue;
-      const snapshot = await invoke<NotebookSnapshot>("open_notebook", { root });
+      const snapshot = await openNotebook(root);
       applySnapshot(snapshot);
       if (transactionFailed) {
         canUndo = false;
