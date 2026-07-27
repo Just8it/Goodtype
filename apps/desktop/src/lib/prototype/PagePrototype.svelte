@@ -2817,7 +2817,11 @@
                   widthPanel?.index === -1
                     ? null
                     : { index: -1, anchor: swatchAnchor(event.currentTarget) })}
-            >+</button>
+            >
+              <!-- Takes the shape of the row it joins: the other tiles draw a 20px line, so the
+                   empty slot is a 20px dashed one. A bare glyph read as a stray character. -->
+              <span class="size-add" aria-hidden="true">+</span>
+            </button>
             {#if widthPanel}
               <div class="color-panel-anchor" style:--anchor={`${widthPanel.anchor}px`}>
                 <WidthPanel
@@ -3318,6 +3322,22 @@
   .size-tile:hover { background: rgb(255 255 255 / 6%); }
   .size-tile.active { outline: 1.5px solid var(--blueprint); background: rgb(76 141 240 / 16%); }
   .size-line { width: 20px; border-radius: 3px; }
+  /* The same 20px the drawn lines occupy, dashed and empty — the slot a width would go in,
+     rather than a plus sitting on its own. Matches the dashed ring on the colour row. */
+  .size-add {
+    display: grid;
+    box-sizing: border-box;
+    width: 20px;
+    height: 12px;
+    border: 1px dashed rgb(255 255 255 / 30%);
+    border-radius: 3px;
+    color: var(--quiet);
+    font-size: 11px;
+    font-weight: 400;
+    line-height: 1;
+    place-items: center;
+  }
+  .size-tile.custom:hover .size-add { border-color: rgb(255 255 255 / 55%); color: var(--text); }
   .size-tile.active .size-line { background: var(--text) !important; }
   /* Border-box so the drawn circle is exactly the size asked for: otherwise each ring grows by
      its border and the three sizes step unevenly. */
