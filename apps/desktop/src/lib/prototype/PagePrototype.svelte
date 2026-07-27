@@ -1859,6 +1859,25 @@
     event.preventDefault();
   }
 
+  /**
+   * Which edge the palette would take if the drag ended here.
+   *
+   * Applied while dragging, not only on release. The dock decides whether the bar is a row or a
+   * column, and finding that out after letting go means aiming at one shape and getting another
+   * — you drag to the left edge picturing a column and drop a row, then drag again. Turning
+   * under the hand makes the drag a preview of its own result.
+   */
+  function dockUnderPointer(event: PointerEvent): PaletteDock | null {
+    if (!workspace) return null;
+    const bounds = workspace.getBoundingClientRect();
+    return nearestPaletteDock(
+      event.clientX - bounds.left,
+      event.clientY - bounds.top,
+      bounds.width,
+      bounds.height,
+    );
+  }
+
   function movePalette(event: PointerEvent) {
     if (!paletteDrag || event.pointerId !== paletteDrag.pointerId || !workspace) return;
     const bounds = workspace.getBoundingClientRect();
@@ -1870,17 +1889,15 @@
       Math.max(paletteDrag.startY + event.clientY - paletteDrag.clientY, 8),
       Math.max(bounds.height - paletteDrag.height - 8, 8),
     );
+    const next = dockUnderPointer(event);
+    // Not written to settings yet: a drag that wanders across three edges should leave one
+    // preference behind, on release, not three.
+    if (next && next !== paletteDock) paletteDock = next;
   }
 
   function finishPaletteDrag(event: PointerEvent) {
     if (!paletteDrag || event.pointerId !== paletteDrag.pointerId || !workspace) return;
-    const bounds = workspace.getBoundingClientRect();
-    paletteDock = nearestPaletteDock(
-      event.clientX - bounds.left,
-      event.clientY - bounds.top,
-      bounds.width,
-      bounds.height,
-    );
+    paletteDock = dockUnderPointer(event) ?? paletteDock;
     paletteDrag = null;
     if (paletteDock !== settings.paletteDock) {
       changeSettings({ ...settings, paletteDock });
