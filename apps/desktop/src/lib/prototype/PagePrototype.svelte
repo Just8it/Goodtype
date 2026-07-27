@@ -83,6 +83,12 @@
   import { createCommitTimer } from "./commitTimer";
   import { createInkCommitter, type InkCommitter } from "./inkCommitter";
   import { nearestPaletteDock, type PaletteDock } from "./palette";
+  import {
+    addWidth as addRowWidth,
+    canRemoveWidth,
+    editWidth as editRowWidth,
+    removeWidth as removeRowWidth,
+  } from "./widths";
   import ConflictDialog from "../workspace/ConflictDialog.svelte";
   import RecoveryDialog from "../workspace/RecoveryDialog.svelte";
   import SearchOverlay from "../workspace/SearchOverlay.svelte";
@@ -1655,42 +1661,33 @@
   }
 
   function putWidths(widths: number[], select: number) {
-    const sorted = [...new Set(widths.map((value) => Math.round(value * 1000) / 1000))].sort(
-      (a, b) => a - b,
-    );
-    changeSettings({ ...settings, [widthKey()]: sorted } as AppSettings);
+    changeSettings({ ...settings, [widthKey()]: widths } as AppSettings);
     setActiveWidth(select);
   }
 
   /**
    * A backstop rather than a path anyone walks: the add tile is not rendered once the row is
-   * full, so this is only reachable from a settings file that already carries the maximum. The
-   * width is still taken for the current stroke — a full row is no reason to refuse a nib.
+   * full, so a refusal here is only reachable from a settings file already carrying the maximum.
+   * The width is still taken for the current stroke — a full row is no reason to refuse a nib.
    */
   function addWidth(widthPt: number) {
     const widths = settings[widthKey()];
-    if (widths.length >= MAX_WIDTHS && !widths.includes(widthPt)) {
-      status = `The palette holds at most ${MAX_WIDTHS} widths`;
-      setActiveWidth(widthPt);
-      return;
-    }
-    putWidths([...widths, widthPt], widthPt);
+    const next = addRowWidth(widths, widthPt, MAX_WIDTHS);
+    if (next === widths) status = `The palette holds at most ${MAX_WIDTHS} widths`;
+    putWidths(next, widthPt);
   }
 
   function editWidth(index: number, widthPt: number) {
-    putWidths(
-      settings[widthKey()].map((existing, position) => (position === index ? widthPt : existing)),
-      widthPt,
-    );
+    putWidths(editRowWidth(settings[widthKey()], index, widthPt, MAX_WIDTHS), widthPt);
   }
 
   function removeWidth(index: number) {
     const widths = settings[widthKey()];
-    if (widths.length <= 1) {
+    const remaining = removeRowWidth(widths, index);
+    if (remaining === widths) {
       status = "The palette keeps at least one width";
       return;
     }
-    const remaining = widths.filter((_, position) => position !== index);
     putWidths(remaining, nearestChip(remaining, activeWidth));
   }
 
@@ -2853,7 +2850,7 @@
                     ? activeWidth
                     : activeWidthChips[widthPanel.index]}
                   kind={tool === "highlighter" ? "highlighter" : "pen"}
-                  canRemove={widthPanel.index !== -1 && activeWidthChips.length > 1}
+                  canRemove={widthPanel.index !== -1 && canRemoveWidth(activeWidthChips)}
                   onCommit={(next) => {
                     if (widthPanel?.index === -1) addWidth(next);
                     else if (widthPanel) editWidth(widthPanel.index, next);
