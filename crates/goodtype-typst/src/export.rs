@@ -1,7 +1,4 @@
-use std::{
-    fs,
-    path::{Component, Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 use goodtype_core::{
     PageBackground, PageGeometry,
@@ -166,11 +163,8 @@ pub fn export_pages(
     let pdf_bytes = compile_pdf(&root, pages, allow_remote_packages)?;
 
     let exports = root.join("exports");
-    fs::create_dir_all(&exports)?;
-    let canonical_exports = exports.canonicalize()?;
-    if !canonical_exports.starts_with(&root) {
-        return Err(ExportError::InvalidRoot(canonical_exports));
-    }
+    let canonical_exports = goodtype_core::paths::ensure_dir(&root, &exports, "exports")
+        .map_err(|_| ExportError::InvalidRoot(exports))?;
 
     let destination = canonical_exports.join(output_name);
     let mut temporary = tempfile::NamedTempFile::new_in(&canonical_exports)?;
@@ -328,27 +322,13 @@ fn valid_color(color: &str) -> bool {
         && color[1..].bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
+/// An image path out of the notebook, checked by the same rule the store applied when it wrote
+/// one. These names come from canonical JSON, so the strict notebook rule is the right one — and
+/// sharing it means export cannot end up accepting a name the store would have refused.
 fn validate_relative_image(root: &Path, relative: &str) -> Result<(), ExportError> {
-    if relative.contains('\\') {
-        return Err(ExportError::InvalidImagePath(relative.to_owned()));
-    }
-    let path = Path::new(relative);
-    if path.as_os_str().is_empty()
-        || path.is_absolute()
-        || !path
-            .components()
-            .all(|component| matches!(component, Component::Normal(_)))
-    {
-        return Err(ExportError::InvalidImagePath(relative.to_owned()));
-    }
-    let canonical = root
-        .join(path)
-        .canonicalize()
-        .map_err(|_| ExportError::InvalidImagePath(relative.to_owned()))?;
-    if !canonical.starts_with(root) || !canonical.is_file() {
-        return Err(ExportError::InvalidImagePath(relative.to_owned()));
-    }
-    Ok(())
+    goodtype_core::paths::resolve_file(root, relative)
+        .map(|_| ())
+        .map_err(|_| ExportError::InvalidImagePath(relative.to_owned()))
 }
 
 fn combined_typst_source(pages: &[ExportPage]) -> String {
@@ -546,6 +526,8 @@ fn transformed_point(point: ExportPoint, transform: ExportTransform) -> ExportPo
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
 
     fn page() -> ExportPage {

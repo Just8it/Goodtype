@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 pub mod layout;
 pub mod object;
 pub mod outline;
+pub mod paths;
 pub mod storage;
 pub mod template;
 

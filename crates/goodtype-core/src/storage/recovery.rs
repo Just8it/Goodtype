@@ -69,10 +69,7 @@ pub(crate) fn ensure_recovery_capacity(root: &Path) -> Result<(), StorageError> 
     if !recovery.exists() {
         return Ok(());
     }
-    let recovery = fs::canonicalize(recovery)?;
-    if !recovery.starts_with(root) || !recovery.is_dir() {
-        return Err(StorageError::InvalidPath(layout::RECOVERY_DIR.into()));
-    }
+    let recovery = crate::paths::resolve_dir(root, &recovery, layout::RECOVERY_DIR)?;
     if fs::read_dir(recovery)?.count() >= RECOVERY_CANDIDATE_LIMIT {
         return Err(StorageError::InvalidNotebook(format!(
             "recovery contains {RECOVERY_CANDIDATE_LIMIT} unresolved candidates"
