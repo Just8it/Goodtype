@@ -141,7 +141,11 @@ fn clamp(value: f64, minimum: f64, maximum: f64, fallback: f64) -> f64 {
     }
 }
 
-const MAX_SWATCHES: usize = 12;
+/// Colours the bar carries per tool. Six rather than twelve: the row is two dots wide in a
+/// vertical bar, and twelve made a block taller than the rest of the palette combined. The panel
+/// keeps presets and recents, so a colour off the row is a tap away. Mirrors `MAX_SWATCHES` in
+/// `apps/desktop/src/lib/settings.ts`.
+const MAX_SWATCHES: usize = 6;
 /// Width chips per tool. Far fewer than colours: the tiles are told apart only by the thickness
 /// of the line drawn on them, and past four they stop being distinguishable at a glance. Mirrors
 /// `MAX_WIDTHS` in `apps/desktop/src/lib/settings.ts`.

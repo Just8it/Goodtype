@@ -156,7 +156,15 @@ export const ERASER_RADIUS_PT: Record<EraserSize, number> = {
   large: 14,
 };
 
-export const MAX_SWATCHES = 12;
+/**
+ * Colours the bar carries per tool.
+ *
+ * Six, not twelve. The row is two dots wide in a vertical bar, so twelve made a six-row block
+ * taller than the tools, the divider and the width row together — the bar stopped being a bar.
+ * Nothing is lost by keeping it short: the colour panel holds the presets and the eight most
+ * recent, so a colour that is not on the row is one tap away rather than gone.
+ */
+export const MAX_SWATCHES = 6;
 
 /**
  * How many stroke widths a tool's row holds.

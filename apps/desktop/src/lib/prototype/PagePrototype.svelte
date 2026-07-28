@@ -55,6 +55,7 @@
   import { keepsSelection, moveSelected, scaleSelected, toolAfterSelection } from "../ink/selection";
   import ColorPanel from "./ColorPanel.svelte";
   import WidthPanel from "./WidthPanel.svelte";
+  import EraserPanel from "./EraserPanel.svelte";
   import ToolPanel from "./ToolPanel.svelte";
   import PageSurface from "./PageSurface.svelte";
   import OverflowMenu from "../workspace/OverflowMenu.svelte";
@@ -335,6 +336,8 @@
   /// `anchor` is that chip's centre within the palette, so the panel opens where you tapped.
   let colorPanel = $state<{ index: number; anchor: number } | null>(null);
   let widthPanel = $state<{ index: number; anchor: number } | null>(null);
+  /** The eraser has one setting, so its popout needs only somewhere to hang. */
+  let eraserPanel = $state<number | null>(null);
 
   /// Quick settings for a tool slot, opened by double-pressing its tile.
   let toolPanel = $state<{ kind: "pen" | "highlighter"; slot: number; anchor: number } | null>(
@@ -357,6 +360,18 @@
       toolPanel?.kind === kind && toolPanel?.slot === slot
         ? null
         : { kind, slot, anchor: swatchAnchor(tile) };
+  }
+
+  /// The eraser follows the same rule as the pens: first press selects, second opens.
+  function selectOrOpenEraser(tile: HTMLElement) {
+    colorPanel = null;
+    widthPanel = null;
+    if (tool !== "eraser") {
+      eraserPanel = null;
+      activateTool("eraser");
+      return;
+    }
+    eraserPanel = eraserPanel === null ? swatchAnchor(tile) : null;
   }
 
   function swatchAnchor(chip: HTMLElement): number {
@@ -2782,24 +2797,33 @@
             />
           </div>
         {/if}
-        <button class:active={tool === "pen" && penPreset === 1} class="tool-tile" type="button" aria-label="Pen 1" aria-pressed={tool === "pen" && penPreset === 1} title="Pen 1 (1) — press again for settings" onclick={(event) => selectOrOpenTool("pen", 1, event.currentTarget)}>
+        <button class:active={tool === "pen" && penPreset === 1} class="tool-tile settings" type="button" aria-label="Pen 1" aria-pressed={tool === "pen" && penPreset === 1} title="Pen 1 (1) — press again for settings" onclick={(event) => selectOrOpenTool("pen", 1, event.currentTarget)}>
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15.5 3.5l5 5-9.5 9.5-5.5 1.5 1.5-5.5 9.5-9.5z"></path><path d="M6.5 19.5l1.3-3.6"></path></svg>
         </button>
-        <button class:active={tool === "pen" && penPreset === 2} class="tool-tile" type="button" aria-label="Pen 2" aria-pressed={tool === "pen" && penPreset === 2} title="Pen 2 (2) — press again for settings" onclick={(event) => selectOrOpenTool("pen", 2, event.currentTarget)}>
+        <button class:active={tool === "pen" && penPreset === 2} class="tool-tile settings" type="button" aria-label="Pen 2" aria-pressed={tool === "pen" && penPreset === 2} title="Pen 2 (2) — press again for settings" onclick={(event) => selectOrOpenTool("pen", 2, event.currentTarget)}>
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 4l6 6-9 9-5 1 1-5 7-11z"></path><path d="M12.5 6.5l5 5"></path></svg>
         </button>
-        <button class:active={tool === "highlighter"} class="tool-tile" type="button" aria-label="Highlighter" aria-pressed={tool === "highlighter"} title="Highlighter (3) — press again for settings" onclick={(event) => selectOrOpenTool("highlighter", 1, event.currentTarget)}>
+        <button class:active={tool === "highlighter"} class="tool-tile settings" type="button" aria-label="Highlighter" aria-pressed={tool === "highlighter"} title="Highlighter (3) — press again for settings" onclick={(event) => selectOrOpenTool("highlighter", 1, event.currentTarget)}>
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 15l7-9 5 4-6 9-4 1-2-5z"></path><path d="M8 20h8" stroke-width="2.4"></path></svg>
         </button>
-        <button class:active={tool === "eraser"} class="tool-tile" type="button" aria-label="Eraser" aria-pressed={tool === "eraser"} title="Erase whole strokes (4)" onclick={() => activateTool("eraser")}>
+        <button class:active={tool === "eraser"} class="tool-tile settings" type="button" aria-label="Eraser" aria-pressed={tool === "eraser"} title="Erase whole strokes (4) — press again for settings" onclick={(event) => selectOrOpenEraser(event.currentTarget)}>
           <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="12" width="13" height="7" rx="1.6" transform="rotate(-38 10 15)"></rect><path d="M9 21h11"></path></svg>
         </button>
         <span class="palette-divider"></span>
         <button class:active={tool === "lasso" || tool === "select"} class="tool-tile" type="button" aria-label="Lasso select" aria-pressed={tool === "lasso" || tool === "select"} title="Select ink with lasso (5)" onclick={() => activateTool("lasso")}>
           <svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="10" rx="8" ry="6" stroke-dasharray="3 2.6"></ellipse><path d="M9 16c0 2 1 4 3 4"></path><circle cx="12" cy="20" r="1.4"></circle></svg>
         </button>
-        <button class="tool-tile dashed" type="button" aria-label="New Typst block" title="New Typst block (T)" onclick={addTypstBlock}>
-          <span class="typst-symbol" aria-hidden="true">∑</span>
+        <!-- After the divider, with the actions: every tile above is a mode you are *in*, this
+             one makes something and leaves you where you were. -->
+        <span class="palette-divider"></span>
+        <button class="tool-tile" type="button" aria-label="New Typst block" title="New Typst block (T)" onclick={addTypstBlock}>
+          <!-- A T with a plus, not a sigma. The sigma named the maths a block can hold; the block
+               holds prose as readily, and a writer looking for "add text" was not looking for a
+               summation sign. -->
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M4 7.5V6h11v1.5M9.5 6v13M7 19h5" />
+            <path d="M18.5 4.5v6M15.5 7.5h6" stroke-width="1.9" />
+          </svg>
         </button>
 
         {#if tool === "pen" || tool === "highlighter"}
@@ -2809,7 +2833,7 @@
               {@const isActive = nearestChip(activeWidthChips, activeWidth) === chip}
               <button
                 type="button"
-                class="size-tile"
+                class="size-tile settings"
                 class:active={isActive}
                 aria-pressed={isActive}
                 title={isActive
@@ -2954,21 +2978,15 @@
               </div>
             {/if}
           </div>
-        {:else if tool === "eraser"}
-          <span class="palette-divider"></span>
-          <div class="inline-group" role="group" aria-label="Eraser hit-area size">
-            {#each [{ id: "small", d: 12 }, { id: "medium", d: 18 }, { id: "large", d: 26 }] as size (size.id)}
-              <button
-                type="button"
-                class="size-tile"
-                class:active={settings.eraserSize === size.id}
-                aria-pressed={settings.eraserSize === size.id}
-                title={`${size.id} hit area`}
-                onclick={() => setEraserSize(size.id as "small" | "medium" | "large")}
-              >
-                <span class="size-ring" style:width={`${size.d}px`} style:height={`${size.d}px`}></span>
-              </button>
-            {/each}
+        {/if}
+
+        {#if eraserPanel !== null}
+          <div class="palette-panel-anchor" style:--anchor={`${eraserPanel}px`}>
+            <EraserPanel
+              size={settings.eraserSize}
+              onChange={(size) => setEraserSize(size)}
+              onClose={() => (eraserPanel = null)}
+            />
           </div>
         {/if}
       </nav>
@@ -3354,8 +3372,6 @@
   .tool-tile.active { background: var(--blueprint); color: #fff; }
   .tool-tile svg { width: 21px; height: 21px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
   .tool-tile svg circle { fill: currentColor; stroke: none; }
-  .tool-tile.dashed { border: 1px dashed rgb(255 255 255 / 22%); }
-  .typst-symbol { font: 600 18px "STIX Two Text", "Times New Roman", serif; }
 
   .palette-divider { width: 26px; height: 1px; margin: 1px 0; background: rgb(255 255 255 / 12%); }
   .horizontal .palette-divider { width: 1px; height: 26px; margin: 0 3px; }
@@ -3385,22 +3401,11 @@
   .size-tile:hover { background: rgb(255 255 255 / 6%); }
   .size-tile.active { outline: 1.5px solid var(--blueprint); background: rgb(76 141 240 / 16%); }
   .size-line { width: 20px; border-radius: 3px; }
-  /* The outline is the tile, not a box inside it: it traces exactly what the hover fills, so the
-     empty slot occupies the same 34px as a width that is there. `box-sizing` is already
-     border-box above, so the border costs no size and the row stays aligned. */
-  .size-tile.custom {
-    border: 1px dotted rgb(255 255 255 / 32%);
-    color: var(--quiet);
-  }
-  .size-tile.custom:hover {
-    border-color: rgb(255 255 255 / 55%);
-    color: var(--text);
-  }
+  /* No outline: the row's own rhythm already says where the slot is, and a box drawn around an
+     empty tile was louder than the widths it sits beside. */
+  .size-tile.custom { color: var(--quiet); }
+  .size-tile.custom:hover { color: var(--text); }
   .size-tile.active .size-line { background: var(--text) !important; }
-  /* Border-box so the drawn circle is exactly the size asked for: otherwise each ring grows by
-     its border and the three sizes step unevenly. */
-  .size-ring { box-sizing: border-box; flex: none; border: 1.5px solid var(--muted); border-radius: 50%; }
-  .size-tile.active .size-ring { border-color: var(--blueprint-light); }
 
   .color-dot {
     position: relative;
@@ -3413,6 +3418,36 @@
   }
 
   .color-dot.active { outline: 1.5px solid var(--blueprint); outline-offset: 2px; }
+
+  /**
+   * "There is more here" — a dot on the tile you are already using.
+   *
+   * Every second-tap on this bar opens a panel, and until now the only thing that said so was a
+   * `title` tooltip. A tooltip needs hover, and a pen has none, so on this app's primary input
+   * the entire mechanism was invisible. This is drawn, so it is there for the pen too, and only
+   * on the active tile — the one where a second tap actually does something — so the bar does
+   * not turn into confetti.
+   */
+  .tool-tile.settings.active::after,
+  .size-tile.settings.active::after,
+  .color-dot.active::after {
+    position: absolute;
+    right: 3px;
+    bottom: 3px;
+    width: 3px;
+    height: 3px;
+    border-radius: 50%;
+    background: currentColor;
+    content: "";
+    opacity: 0.75;
+    pointer-events: none;
+  }
+
+  /* The active tool tile fills with blueprint, so its dot is drawn in the ink colour it sits on. */
+  .tool-tile.settings.active::after { background: #fff; }
+  .color-dot.active::after { right: 2px; bottom: 2px; background: rgb(255 255 255 / 85%); }
+  /* The tiles have to be a containing block for the dot to sit in their corner. */
+  .tool-tile, .size-tile { position: relative; }
   .color-dot.custom {
     display: grid;
     place-items: center;
