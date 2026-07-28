@@ -2525,7 +2525,23 @@
   {:else}
   <header class="command-strip">
     <div class="notebook-identity">
-      <span class="app-mark" aria-hidden="true"></span>
+      <!-- Leaving a notebook was two steps into a menu, for the one thing you do at the end of
+           every session. It is the first control in the strip now, where the way out belongs.
+           `closePage` is the same path the menu entry uses: it saves, draws the cover, and only
+           then leaves — so this is never a way to lose work. -->
+      <button
+        class="home-button"
+        type="button"
+        aria-label="Close the notebook and return to the library"
+        title="Back to the library"
+        disabled={busy}
+        onclick={() => void closePage()}
+      >
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M3.5 11.2 12 4.5l8.5 6.7" />
+          <path d="M5.8 10v8.2a1 1 0 0 0 1 1h3.4v-4.9h3.6v4.9h3.4a1 1 0 0 0 1-1V10" />
+        </svg>
+      </button>
       <div>
         <div class="notebook-title">Goodtype notebook</div>
         <div class="save-state">
@@ -3127,7 +3143,33 @@
   }
 
   .notebook-identity { min-width: 0; gap: 11px; }
-  .app-mark { width: 9px; height: 9px; flex: none; border-radius: 2px; background: #4a515c; }
+
+  /* Sized like the strip's other icon controls so the row reads as one set, and it replaces the
+     decorative square that used to sit here — the corner was already the eye's first stop. */
+  .home-button {
+    display: grid;
+    width: 40px;
+    height: 40px;
+    flex: none;
+    padding: 0;
+    border: 1px solid rgb(255 255 255 / 18%);
+    border-radius: 7px;
+    background: transparent;
+    color: var(--text);
+    cursor: pointer;
+    place-items: center;
+  }
+
+  .home-button:hover:not(:disabled) { background: rgb(255 255 255 / 8%); }
+  .home-button svg {
+    width: 20px;
+    height: 20px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.6;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
   .notebook-title {
     overflow: hidden;
     color: var(--text);
