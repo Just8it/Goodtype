@@ -373,6 +373,13 @@ pub fn list_recent_notebooks(app: tauri::AppHandle) -> Result<Vec<RecentNotebook
     Ok(recents.entries)
 }
 
+pub fn is_recent_notebook(app: &tauri::AppHandle, root: &str) -> Result<bool, String> {
+    Ok(read_config::<RecentNotebooks>(app, "recents.json")?
+        .entries
+        .iter()
+        .any(|entry| entry.root == root))
+}
+
 pub fn record_recent(
     app: &tauri::AppHandle,
     root: &str,

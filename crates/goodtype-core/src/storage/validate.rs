@@ -16,8 +16,9 @@ use crate::{
 };
 
 use super::{
-    MAX_INK_POINTS_PER_LAYER, MAX_INK_STROKES_PER_LAYER, NotebookSnapshot, StorageError,
-    StoredFile, invalid, invalid_error, paths::*,
+    MAX_INK_BYTES, MAX_INK_POINTS_PER_LAYER, MAX_INK_STROKES_PER_LAYER, MAX_JSON_BYTES,
+    NotebookSnapshot, StorageError, StoredFile, files::json_bytes, invalid, invalid_error,
+    paths::*,
 };
 
 pub(crate) fn validate_manifest(manifest: &NotebookManifest) -> Result<(), StorageError> {
@@ -74,6 +75,7 @@ pub(crate) fn validate_snapshot(
     snapshot: &NotebookSnapshot,
 ) -> Result<(), StorageError> {
     validate_manifest(&snapshot.manifest)?;
+    json_bytes(&snapshot.manifest, true, MAX_JSON_BYTES)?;
     prepare_target(root, layout::MANIFEST)?;
     let page_reference = page_reference(&snapshot.manifest, &snapshot.page.id)?;
     prepare_target(root, &page_reference.path)?;
@@ -84,6 +86,10 @@ pub(crate) fn validate_snapshot(
         )));
     }
     validate_page_content(snapshot)?;
+    json_bytes(&snapshot.page, true, MAX_JSON_BYTES)?;
+    for layer in &snapshot.ink_layers {
+        json_bytes(layer, false, MAX_INK_BYTES)?;
+    }
 
     let block_paths = referenced_paths(&snapshot.manifest, &snapshot.page, SourceRole::Block);
     let asset_paths = referenced_paths(&snapshot.manifest, &snapshot.page, SourceRole::Asset);
@@ -364,10 +370,27 @@ fn validate_files(
             )));
         }
         let target = prepare_target(root, &file.path)?;
+        if role.is_written() && file.bytes.len() > role.max_bytes() {
+            if role == SourceRole::Asset {
+                return Err(StorageError::ImageTooLarge {
+                    size: file.bytes.len(),
+                    maximum: role.max_bytes(),
+                });
+            }
+            return Err(StorageError::InvalidNotebook(format!(
+                "{} is {} bytes; maximum is {}",
+                file.path,
+                file.bytes.len(),
+                role.max_bytes()
+            )));
+        }
+        if role == SourceRole::Block && std::str::from_utf8(&file.bytes).is_err() {
+            return invalid("Typst source must be valid UTF-8");
+        }
         // Content that cannot be rewritten has to be identical to whatever is already there,
         // because every page sharing the path would otherwise change with it.
         if !role.is_rewritable() {
-            if file.bytes.is_empty() || file.bytes.len() > role.max_bytes() {
+            if file.bytes.is_empty() {
                 return Err(StorageError::ImageTooLarge {
                     size: file.bytes.len(),
                     maximum: role.max_bytes(),
@@ -495,5 +518,27 @@ mod tests {
         assert_eq!(confirmed.page.revision, 1);
         assert_eq!(confirmed.ink_layers[0].strokes.len(), 1);
         assert!(!notebook_root.join(layout::PENDING_TRANSACTION).exists());
+    }
+
+    #[test]
+    fn refuses_unreadable_or_oversized_typst_before_writing() {
+        let temporary = tempfile::tempdir().unwrap();
+        let notebook_root = temporary.path().join("notebook");
+        create_notebook(&notebook_root, &snapshot()).unwrap();
+
+        let mut oversized = open_notebook(&notebook_root).unwrap();
+        oversized.blocks[0].bytes = vec![b'x'; crate::object::MAX_BLOCK_BYTES + 1];
+        assert!(matches!(
+            save_notebook(&notebook_root, &oversized),
+            Err(StorageError::InvalidNotebook(_))
+        ));
+
+        let mut invalid_utf8 = open_notebook(&notebook_root).unwrap();
+        invalid_utf8.blocks[0].bytes = vec![0xff];
+        assert!(matches!(
+            save_notebook(&notebook_root, &invalid_utf8),
+            Err(StorageError::InvalidNotebook(_))
+        ));
+        assert_eq!(open_notebook(&notebook_root).unwrap().page.revision, 1);
     }
 }

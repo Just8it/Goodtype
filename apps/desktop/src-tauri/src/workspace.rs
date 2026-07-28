@@ -10,7 +10,7 @@ use serde_json::Value;
 use tauri::Manager;
 use tauri_plugin_dialog::DialogExt;
 
-use crate::settings::record_recent;
+use crate::settings::{is_recent_notebook, record_recent};
 
 /// Notebook roots the user has explicitly selected in this process, plus the default local
 /// notebook. Commands only operate on member roots, so the frontend can never point Rust at an
@@ -79,9 +79,13 @@ pub async fn pick_notebook_root(
 /// still contain a manifest; missing notebooks stay visible in the list but cannot open.
 #[tauri::command]
 pub fn open_recent_root(
+    app: tauri::AppHandle,
     roots: tauri::State<'_, AllowedRoots>,
     root: String,
 ) -> Result<String, String> {
+    if !is_recent_notebook(&app, &root)? {
+        return Err("this notebook was not opened by Goodtype before".to_owned());
+    }
     let path = Path::new(&root);
     if !path.join("goodtype.json").is_file() {
         return Err("this notebook is missing or was moved".to_owned());

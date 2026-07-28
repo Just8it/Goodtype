@@ -262,11 +262,35 @@ pub fn validate_name(name: &str) -> Result<(), String> {
 /// to tell the writer. Checking first is what turns "os error 183" into a sentence.
 fn free_child(root: &Path, parent: &str, name: &str) -> Result<PathBuf, String> {
     validate_name(name)?;
-    let target = resolve(root, parent)?.join(name);
+    let parent = resolve(root, parent)?;
+    if is_notebook(&parent) {
+        return Err("notebook contents cannot be changed from the library".to_owned());
+    }
+    reject_notebook_internals(root, &parent)?;
+    let target = parent.join(name);
     if target.exists() {
         return Err(format!("`{name}` already exists here"));
     }
     Ok(target)
+}
+
+/// Library commands may move a notebook as one shelf entry, but never mutate its internals.
+fn reject_notebook_internals(root: &Path, path: &Path) -> Result<(), String> {
+    let root = paths::canonical_root(root).map_err(|error| error.to_string())?;
+    if path.starts_with(root.join(INTERNAL_DIR)) {
+        return Err("library metadata cannot be changed from the shelf".to_owned());
+    }
+    let mut ancestor = path.parent();
+    while let Some(candidate) = ancestor {
+        if candidate == root {
+            break;
+        }
+        if is_notebook(candidate) {
+            return Err("notebook contents cannot be changed from the library".to_owned());
+        }
+        ancestor = candidate.parent();
+    }
+    Ok(())
 }
 
 fn relative_child(parent: &str, name: &str) -> String {
@@ -321,6 +345,7 @@ pub fn rename_library_entry(
 ) -> Result<String, String> {
     let root = current_root(&app, &roots)?;
     let source = resolve(&root, &path)?;
+    reject_notebook_internals(&root, &source)?;
     let parent = parent_of(&path);
     let target = free_child(&root, parent, &name)?;
     fs::rename(&source, &target).map_err(|error| error.to_string())?;
@@ -339,6 +364,8 @@ pub fn move_library_entry(
     let root = current_root(&app, &roots)?;
     let source = resolve(&root, &path)?;
     let into = resolve(&root, &destination)?;
+    reject_notebook_internals(&root, &source)?;
+    reject_notebook_internals(&root, &into)?;
     if !into.is_dir() || is_notebook(&into) {
         return Err("that destination is not a folder".to_owned());
     }
@@ -378,6 +405,7 @@ pub fn delete_library_entry(
 ) -> Result<(), String> {
     let root = current_root(&app, &roots)?;
     let source = resolve(&root, &path)?;
+    reject_notebook_internals(&root, &source)?;
     if source == root {
         return Err("the library itself cannot be deleted".to_owned());
     }
@@ -385,14 +413,19 @@ pub fn delete_library_entry(
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or("that entry has no name")?;
-    let trash = root.join(INTERNAL_DIR).join(TRASH_DIR);
-    fs::create_dir_all(&trash).map_err(|error| error.to_string())?;
+    let internal = paths::ensure_dir(&root, &root.join(INTERNAL_DIR), INTERNAL_DIR)
+        .map_err(|_| "the library metadata directory leaves the library".to_owned())?;
+    let trash = paths::ensure_dir(&root, &internal.join(TRASH_DIR), TRASH_DIR)
+        .map_err(|_| "the library trash leaves the library".to_owned())?;
     let stamp = std::time::SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|since| since.as_millis())
         .unwrap_or(0);
-    fs::rename(&source, trash.join(format!("{stamp}-{name}")))
-        .map_err(|error| error.to_string())?;
+    let target = trash.join(format!("{stamp}-{name}"));
+    if target.exists() {
+        return Err("a trash entry with that name already exists".to_owned());
+    }
+    fs::rename(&source, target).map_err(|error| error.to_string())?;
     forget_favourite(&root, &path)?;
     Ok(())
 }
@@ -411,6 +444,25 @@ const TRASH_DIR: &str = "trash";
 const SHELF_FILE: &str = "shelf.json";
 const MAX_SHELF_BYTES: u64 = 1024 * 1024;
 
+fn internal_file(root: &Path, name: &str, create: bool) -> Result<PathBuf, String> {
+    let root = paths::canonical_root(root).map_err(|error| error.to_string())?;
+    let directory = root.join(INTERNAL_DIR);
+    let directory = if create {
+        paths::ensure_dir(&root, &directory, INTERNAL_DIR)
+    } else {
+        paths::resolve_dir(&root, &directory, INTERNAL_DIR)
+    }
+    .map_err(|_| "the metadata directory leaves its root".to_owned())?;
+    let target = directory.join(name);
+    if target
+        .symlink_metadata()
+        .is_ok_and(|metadata| metadata.file_type().is_symlink())
+    {
+        return Err("the metadata file cannot be a symbolic link".to_owned());
+    }
+    Ok(target)
+}
+
 #[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", default)]
 struct Shelf {
@@ -420,7 +472,9 @@ struct Shelf {
 }
 
 fn read_shelf(root: &Path) -> Shelf {
-    let path = root.join(INTERNAL_DIR).join(SHELF_FILE);
+    let Ok(path) = internal_file(root, SHELF_FILE, false) else {
+        return Shelf::default();
+    };
     let within_ceiling = fs::metadata(&path)
         .map(|metadata| metadata.len() <= MAX_SHELF_BYTES)
         .unwrap_or(false);
@@ -435,10 +489,8 @@ fn read_shelf(root: &Path) -> Shelf {
 }
 
 fn write_shelf(root: &Path, shelf: &Shelf) -> Result<(), String> {
-    let directory = root.join(INTERNAL_DIR);
-    fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
     let bytes = serde_json::to_vec_pretty(shelf).map_err(|error| error.to_string())?;
-    fs::write(directory.join(SHELF_FILE), bytes).map_err(|error| error.to_string())
+    fs::write(internal_file(root, SHELF_FILE, true)?, bytes).map_err(|error| error.to_string())
 }
 
 /// Drop a favourite whose entry has just moved, been renamed, or been thrown away.
@@ -466,10 +518,6 @@ const COVER_FILE: &str = "cover.png";
 /// Wide enough for a 304px raster of a busy page, far short of anything that is not a thumbnail.
 const MAX_COVER_BYTES: usize = 2 * 1024 * 1024;
 
-fn cover_path(notebook: &Path) -> PathBuf {
-    notebook.join(layout::INTERNAL_DIR).join(COVER_FILE)
-}
-
 /// Store a rendered cover for an open notebook.
 ///
 /// Takes the notebook's absolute root, because this is called from the notebook side, where the
@@ -490,11 +538,7 @@ pub fn write_notebook_cover(
         return Err("a cover must be a PNG".to_owned());
     }
     let notebook = crate::workspace::ensure_allowed(&roots, &root)?;
-    let path = cover_path(&notebook);
-    let directory = path
-        .parent()
-        .ok_or("the notebook has no internal directory")?;
-    fs::create_dir_all(directory).map_err(|error| error.to_string())?;
+    let path = internal_file(&notebook, COVER_FILE, true)?;
     fs::write(path, png).map_err(|error| error.to_string())
 }
 
@@ -510,7 +554,12 @@ pub fn library_cover(
 ) -> Result<Option<String>, String> {
     let root = current_root(&app, &roots)?;
     let notebook = resolve(&root, &path)?;
-    let cover = cover_path(&notebook);
+    if !is_notebook(&notebook) {
+        return Ok(None);
+    }
+    let Ok(cover) = internal_file(&notebook, COVER_FILE, false) else {
+        return Ok(None);
+    };
     let within_ceiling = fs::metadata(&cover)
         .map(|metadata| metadata.len() as usize <= MAX_COVER_BYTES)
         .unwrap_or(false);
@@ -842,6 +891,44 @@ mod tests {
         // even though the command itself needs a running Tauri app.
         assert!(inner.starts_with(&outer));
         assert!(!outer.starts_with(&inner));
+    }
+
+    #[test]
+    fn library_mutations_stop_at_notebook_boundaries() {
+        let root = library();
+        let notebook = resolve(root.path(), "Semester 3/Thermodynamik").unwrap();
+        let internal = notebook.join("blocks");
+        fs::create_dir(&internal).unwrap();
+
+        assert!(reject_notebook_internals(root.path(), &notebook).is_ok());
+        assert!(reject_notebook_internals(root.path(), &internal).is_err());
+        assert!(
+            reject_notebook_internals(
+                root.path(),
+                &fs::canonicalize(root.path().join(INTERNAL_DIR)).unwrap(),
+            )
+            .is_err()
+        );
+        assert!(free_child(root.path(), "Semester 3/Thermodynamik", "intruder").is_err());
+    }
+
+    #[test]
+    fn store_owned_files_refuse_symbolic_links() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("library");
+        let outside = temporary.path().join("outside");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(&outside).unwrap();
+
+        #[cfg(windows)]
+        let linked = std::os::windows::fs::symlink_dir(&outside, root.join(INTERNAL_DIR)).is_ok();
+        #[cfg(unix)]
+        let linked = std::os::unix::fs::symlink(&outside, root.join(INTERNAL_DIR)).is_ok();
+
+        if linked {
+            assert!(internal_file(&root, SHELF_FILE, true).is_err());
+            assert!(!outside.join(SHELF_FILE).exists());
+        }
     }
 
     /// A favourite is a path, so renaming, moving or deleting the entry leaves it pointing at

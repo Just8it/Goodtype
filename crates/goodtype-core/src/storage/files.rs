@@ -14,7 +14,7 @@ use std::{
 use serde::{Serialize, de::DeserializeOwned};
 use tempfile::NamedTempFile;
 
-use super::{MAX_JSON_BYTES, StorageError, StoredFile, paths::*};
+use super::{MAX_INK_BYTES, MAX_JSON_BYTES, StorageError, StoredFile, paths::*};
 
 pub(crate) fn read_stored_files(
     root: &Path,
@@ -55,8 +55,7 @@ pub(crate) fn write_json<T: Serialize>(
     relative: &str,
     value: &T,
 ) -> Result<Vec<u8>, StorageError> {
-    let mut bytes = serde_json::to_vec_pretty(value)?;
-    bytes.push(b'\n');
+    let bytes = json_bytes(value, true, MAX_JSON_BYTES)?;
     write_atomic(root, relative, &bytes)?;
     Ok(bytes)
 }
@@ -69,9 +68,28 @@ pub(crate) fn write_json_compact<T: Serialize>(
     relative: &str,
     value: &T,
 ) -> Result<Vec<u8>, StorageError> {
-    let mut bytes = serde_json::to_vec(value)?;
-    bytes.push(b'\n');
+    let bytes = json_bytes(value, false, MAX_INK_BYTES)?;
     write_atomic(root, relative, &bytes)?;
+    Ok(bytes)
+}
+
+pub(crate) fn json_bytes<T: Serialize>(
+    value: &T,
+    pretty: bool,
+    maximum: usize,
+) -> Result<Vec<u8>, StorageError> {
+    let mut bytes = if pretty {
+        serde_json::to_vec_pretty(value)?
+    } else {
+        serde_json::to_vec(value)?
+    };
+    bytes.push(b'\n');
+    if bytes.len() > maximum {
+        return Err(StorageError::InvalidNotebook(format!(
+            "serialized file is {} bytes; maximum is {maximum}",
+            bytes.len()
+        )));
+    }
     Ok(bytes)
 }
 
