@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onDestroy, onMount, tick } from "svelte";
+  import { getCurrentWindow } from "@tauri-apps/api/window";
   import {
     commitNotebook,
     createNotebook,
@@ -21,7 +22,7 @@
   // The local `compileTypst` owns the cache check, the browser fallback and the block's preview
   // state; this is only the round trip it makes when none of those answer.
   import { compileTypst as requestTypstCompile } from "../ipc/typst";
-  import type { HistoryResult, NotebookSnapshot, StoredFile } from "../ipc/types";
+  import type { HistoryResult, NotebookSnapshot } from "../ipc/types";
   import {
     defaultNotebookRoot,
     exportNotebookPdf,
@@ -32,9 +33,7 @@
   } from "../ipc/workspace";
   import { clampZoom, type Point } from "../geometry/coordinates";
   import type {
-    InkLayer,
     NotebookManifest,
-    Page,
     PageBackground,
     PageGeometry,
     PageObject,
@@ -83,6 +82,10 @@
   } from "./pageView";
   import { createCommitTimer } from "./commitTimer";
   import { createInkCommitter, type InkCommitter } from "./inkCommitter";
+  import {
+    projectSnapshot,
+    type ManagedMixedGroup,
+  } from "./snapshot";
   import { nearestPaletteDock, type PaletteDock } from "./palette";
   import {
     addWidth as addRowWidth,
@@ -134,6 +137,7 @@
     result: TypstCompileResult | null;
   };
   type ImageState = {
+    id: string;
     path: string;
     url: string;
     alt: string;
@@ -163,8 +167,6 @@
   const MAIN_TYPST_ID = "typst-001";
   const BLOCK_PATH = "blocks/equation.typ";
   const INK_LAYER_ID = "ink-layer-001";
-  const INK_GROUP_ID = "ink-group-001";
-  const GROUP_ID = "group-001";
   const TYPST_SAVE_DEBOUNCE_MS = 250;
   const tauriAvailable =
     typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -172,6 +174,7 @@
   let root = $state("");
   let notebookTitle = $state("Goodtype");
   let notebookManifest = $state<NotebookManifest | null>(null);
+  let activeSnapshot = $state<NotebookSnapshot | null>(null);
   let activePageId = $state("page-001");
   let activeInkLayerId = $state(INK_LAYER_ID);
   let activeInkLayerPath = $state("ink/page-001-layer-001.json");
@@ -199,8 +202,9 @@
       result: null,
     },
   ]);
-  let image = $state<ImageState | null>(null);
-  let selectedImage = $state(false);
+  let images = $state<ImageState[]>([]);
+  let selectedImageId = $state<string | null>(null);
+  let mixedGroup = $state<ManagedMixedGroup | null>(null);
   let selectedTypstId = $state<string | null>(null);
   let directObjectInput = $state(false);
   /** True while the selection tool is only active because the lasso handed over to it. */
@@ -223,14 +227,20 @@
   const inkCommitTimer = createCommitTimer(() => queueCommit(inkCommitLabel));
   // Debounced ink is real unsaved work; the save indicator must not read "Saved" while it waits.
   let inkPending = $state(false);
-  let typstDirty = false;
+  let typstDirty = $state(false);
+  let pendingNeighborPages = $state(new Set<string>());
   let workspace = $state<HTMLElement>();
   let pageViewport = $state<HTMLElement>();
   let pageFrame = $state<HTMLElement>();
+  const savePending = $derived(
+    pendingTransactions > 0 ||
+      inkPending ||
+      typstDirty ||
+      pendingNeighborPages.size > 0,
+  );
 
   // The page being edited renders through the same surface as its neighbours, so its state is
   // projected into the same view model they use.
-  const ACTIVE_IMAGE_ID = "image-001";
   const activeBlockViews: BlockView[] = $derived(
     typstBlocks.map((block) => ({
       id: block.id,
@@ -246,21 +256,17 @@
     Object.fromEntries(typstBlocks.map((block) => [block.id, block.result])),
   );
   const activeImageViews: ImageView[] = $derived(
-    image
-      ? [
-          {
-            id: ACTIVE_IMAGE_ID,
-            path: image.path,
-            url: image.url,
-            alt: image.alt,
-            x: image.x,
-            y: image.y,
-            widthPt: image.widthPt,
-            heightPt: image.heightPt,
-            scale: image.scale,
-          },
-        ]
-      : [],
+    images.map((image) => ({
+      id: image.id,
+      path: image.path,
+      url: image.url,
+      alt: image.alt,
+      x: image.x,
+      y: image.y,
+      widthPt: image.widthPt,
+      heightPt: image.heightPt,
+      scale: image.scale,
+    })),
   );
 
   // Full-height source view beside the canvas. It is a sibling of the canvas region rather than
@@ -295,7 +301,7 @@
       sideEditorBlockId = target;
       if (typstBlocks.some((block) => block.id === target)) {
         selectedTypstId = target;
-        selectedImage = false;
+        selectedImageId = null;
       }
     }
     // The panel mounts this tick; take the caret once it exists.
@@ -457,15 +463,29 @@
   let notebookUndoOrder: string[] = [];
   let notebookRedoOrder: string[] = [];
   let metricsTimer: ReturnType<typeof setTimeout> | undefined;
+  let removeCloseListener: (() => void) | undefined;
+  let closeConfirmed = false;
 
   onMount(() => {
     void initialize();
     window.addEventListener("keydown", historyShortcut);
+    if (tauriAvailable) {
+      void getCurrentWindow()
+        .onCloseRequested(async (event) => {
+          if (closeConfirmed) return;
+          event.preventDefault();
+          if (!(await persist())) return;
+          closeConfirmed = true;
+          await getCurrentWindow().close();
+        })
+        .then((remove) => (removeCloseListener = remove));
+    }
   });
   onDestroy(() => {
     inkCommitTimer.cancel();
     if (typstCommitTimer) clearTimeout(typstCommitTimer);
     if (focusTimer) clearTimeout(focusTimer);
+    removeCloseListener?.();
     window.removeEventListener("keydown", historyShortcut);
     revokeImageUrl();
   });
@@ -514,12 +534,14 @@
     revokeImageUrl();
     notebookTitle = title;
     notebookManifest = null;
+    activeSnapshot = null;
     pageEntries = [];
     strokes = [];
     selectedStrokeIds = [];
     groupedStrokeIds = [];
-    image = null;
-    selectedImage = false;
+    images = [];
+    selectedImageId = null;
+    mixedGroup = null;
     selectedTypstId = null;
     activePageId = "page-001";
     activeInkLayerId = INK_LAYER_ID;
@@ -592,114 +614,46 @@
 
   function buildSnapshot(): NotebookSnapshot {
     const now = new Date().toISOString();
-    const grouped = groupedStrokeIds.length > 0;
-    const extraTypstIds = typstBlocks.slice(1).map((block) => block.id);
-    const objects: PageObject[] = typstBlocks.map((block, index) => ({
-      ...fields(
-        block.id,
-        index,
-        index === 0 && grouped ? GROUP_ID : null,
-        now,
-        block.transform,
-      ),
-      type: "typst",
-      sourcePath: block.path,
-      layoutWidthPt: block.transform.layoutWidthPt,
-      measuredWidthPt: block.result?.widthPt ?? block.transform.layoutWidthPt,
-      measuredHeightPt: block.result?.heightPt ?? 48,
-    }));
-    if (grouped) {
-      objects.push(
-        {
-          ...fields(INK_GROUP_ID, 1, GROUP_ID, now),
-          type: "ink_group",
-          inkLayerId: activeInkLayerId,
-          strokeIds: groupedStrokeIds,
-        },
-        {
-          ...fields(GROUP_ID, 0, null, now),
-          type: "group",
-          childIds: [MAIN_TYPST_ID, INK_GROUP_ID],
-        },
-      );
-    }
-    if (image) {
-      objects.push({
-        ...fields("image-001", typstBlocks.length, null, now),
-        type: "image",
-        sourcePath: image.path,
-        widthPt: image.widthPt,
-        heightPt: image.heightPt,
-        altText: image.alt,
-        x: image.x,
-        y: image.y,
-        scale: image.scale,
-      });
-    }
-
-    const page: Page = {
-      schemaVersion: 1,
-      id: activePageId,
-      revision,
-      geometry: activeGeometry,
-      background: activeBackground,
-      objects,
-      readingOrder: grouped
-        ? [GROUP_ID, ...extraTypstIds, ...(image ? ["image-001"] : [])]
-        : [...typstBlocks.map((block) => block.id), ...(image ? ["image-001"] : [])],
-      inkLayers: [{ id: activeInkLayerId, path: activeInkLayerPath }],
-    };
     const manifest = notebookManifest ?? {
       schemaVersion: 1,
       id: `notebook-${Date.now().toString(36)}`,
       title: notebookTitle,
-      pages: [{ id: page.id, path: "pages/page-001.json", geometry: page.geometry }],
+      pages: [{ id: activePageId, path: "pages/page-001.json", geometry: activeGeometry }],
       defaultPage: {
-        geometry: page.geometry,
-        background: page.background,
+        geometry: activeGeometry,
+        background: activeBackground,
       },
       sharedStylePath: null,
       createdAt,
       modifiedAt: now,
     };
-    return {
-      manifest,
-      page,
-      blocks: typstBlocks.map((block) => ({
-        path: block.path,
-        bytes: Array.from(new TextEncoder().encode(block.source)),
-      })),
-      // Assets are written once by `store_pasted_image` and are immutable afterwards.
-      // Rust resolves referenced originals from disk, so a commit never carries their bytes.
-      assets: [],
-      inkLayers: [
-        {
-          schemaVersion: 1,
-          id: activeInkLayerId,
-          pageId: page.id,
-          strokes,
-        },
-      ],
-    };
-  }
 
-  function fields(
-    id: string,
-    readingOrder: number,
-    groupId: string | null,
-    timestamp: string,
-    position = { x: 0, y: 0, scale: 1 },
-  ) {
-    return {
-      id,
-      ...position,
-      rotation: 0,
-      zIndex: readingOrder + 1,
-      readingOrder,
-      groupId,
-      createdAt: timestamp,
-      modifiedAt: timestamp,
-    };
+    return projectSnapshot({
+      base: activeSnapshot,
+      manifest,
+      pageId: activePageId,
+      revision,
+      geometry: activeGeometry,
+      background: activeBackground,
+      inkLayerId: activeInkLayerId,
+      inkLayerPath: activeInkLayerPath,
+      strokes,
+      typst: typstBlocks.map((block) => ({
+        id: block.id,
+        path: block.path,
+        source: block.source,
+        x: block.transform.x,
+        y: block.transform.y,
+        layoutWidthPt: block.transform.layoutWidthPt,
+        scale: block.transform.scale,
+        measuredWidthPt: block.result?.widthPt ?? block.transform.layoutWidthPt,
+        measuredHeightPt: block.result?.heightPt ?? 48,
+      })),
+      images,
+      mixedGroup,
+      groupedStrokeIds,
+      now,
+    });
   }
 
   function applySnapshot(snapshot: NotebookSnapshot) {
@@ -712,6 +666,7 @@
     typstDirty = false;
     revokeImageUrl();
     notebookManifest = snapshot.manifest;
+    activeSnapshot = snapshot;
     activePageId = snapshot.page.id;
     // The active page's state below is now the single source of truth for this page; drop the
     // copy it carried while it was a neighbour so the two can never disagree.
@@ -763,33 +718,58 @@
       (object): object is Extract<PageObject, { type: "ink_group" }> =>
         object.type === "ink_group",
     );
-    groupedStrokeIds = inkGroup?.strokeIds ?? [];
-
-    const imageObject = snapshot.page.objects.find(
-      (object): object is Extract<PageObject, { type: "image" }> =>
-        object.type === "image",
-    );
-    const asset = imageObject
-      ? snapshot.assets.find((file) => file.path === imageObject.sourcePath)
+    const group = inkGroup
+      ? snapshot.page.objects.find(
+          (object): object is Extract<PageObject, { type: "group" }> =>
+            object.type === "group" &&
+            object.childIds.length === 2 &&
+            object.childIds.includes(inkGroup.id) &&
+            inkGroup.groupId === object.id,
+        )
       : undefined;
-    if (imageObject && asset) {
-      const blob = new Blob([new Uint8Array(asset.bytes)], {
-        type: mimeForPath(asset.path),
+    const groupedTypstId = group?.childIds.find((id) =>
+      snapshot.page.objects.some(
+        (object) =>
+          object.type === "typst" &&
+          object.id === id &&
+          object.groupId === group.id,
+      ),
+    );
+    mixedGroup =
+      inkGroup && group && groupedTypstId
+        ? {
+            inkGroupId: inkGroup.id,
+            groupId: group.id,
+            typstId: groupedTypstId,
+            active: true,
+          }
+        : null;
+    groupedStrokeIds = mixedGroup ? inkGroup!.strokeIds : [];
+
+    images = snapshot.page.objects
+      .filter(
+        (object): object is Extract<PageObject, { type: "image" }> =>
+          object.type === "image",
+      )
+      .flatMap((object) => {
+        const asset = snapshot.assets.find((file) => file.path === object.sourcePath);
+        if (!asset) return [];
+        const blob = new Blob([new Uint8Array(asset.bytes)], {
+          type: mimeForPath(asset.path),
+        });
+        return [{
+          id: object.id,
+          path: asset.path,
+          url: URL.createObjectURL(blob),
+          alt: object.altText,
+          x: object.x,
+          y: object.y,
+          widthPt: object.widthPt,
+          heightPt: object.heightPt,
+          scale: object.scale,
+        }];
       });
-      image = {
-        path: asset.path,
-        url: URL.createObjectURL(blob),
-        alt: imageObject.altText,
-        x: imageObject.x,
-        y: imageObject.y,
-        widthPt: imageObject.widthPt,
-        heightPt: imageObject.heightPt,
-        scale: imageObject.scale,
-      };
-    } else {
-      image = null;
-    }
-    selectedImage = false;
+    selectedImageId = null;
     selectedTypstId = null;
   }
 
@@ -896,7 +876,7 @@
       applySnapshot(result.snapshot);
       canUndo = result.canUndo;
       canRedo = result.canRedo;
-      evictDistantPages();
+      await evictDistantPages();
       status = `Editing page ${activePageNumber()}`;
     } catch (error) {
       status = `Could not switch to that page: ${message(error)}`;
@@ -935,7 +915,12 @@
     committer = createInkCommitter({
       save: async (strokes, label) => {
         const entry = pageEntries.find((page) => page.id === pageId);
-        if (!entry?.snapshot) return;
+        if (!entry?.snapshot) {
+          pendingNeighborPages = new Set(
+            [...pendingNeighborPages].filter((id) => id !== pageId),
+          );
+          return;
+        }
         const inkLayers = entry.snapshot.inkLayers.map((layer, index) =>
           index === 0 ? { ...layer, strokes } : layer,
         );
@@ -952,11 +937,13 @@
           neighborStrokes[pageId] = strokesFromSnapshot(result.snapshot);
           status = `${label} on page ${number}`;
         } catch (error) {
-          // Fall back to the last saved ink so the page never shows work it did not store.
-          neighborStrokes[pageId] = entry.snapshot
-            ? strokesFromSnapshot(entry.snapshot)
-            : [];
-          status = `Could not save page ${number}: ${message(error)}`;
+          reportCommitFailure(`${label} on page ${number}`, error);
+        } finally {
+          if (!committer?.pending()) {
+            pendingNeighborPages = new Set(
+              [...pendingNeighborPages].filter((id) => id !== pageId),
+            );
+          }
         }
       },
     });
@@ -1008,7 +995,9 @@
 
   function commitNeighborInk(pageId: string, strokes: Stroke[], label: string) {
     neighborStrokes[pageId] = strokes;
-    neighborCommitter(pageId).commit(strokes, label);
+    const committer = neighborCommitter(pageId);
+    pendingNeighborPages = new Set(pendingNeighborPages).add(pageId);
+    committer.commit(strokes, label);
   }
 
   async function compileNeighborTypst(
@@ -1043,24 +1032,26 @@
     return neighborCommitters.get(pageId)?.flush() ?? Promise.resolve();
   }
 
-  function releaseNeighbor(pageId: string) {
+  async function releaseNeighbor(pageId: string): Promise<boolean> {
+    await flushNeighbor(pageId);
+    if (transactionFailed) return false;
     neighborUrls.get(pageId)?.dispose();
     neighborUrls.delete(pageId);
     neighborCommitters.get(pageId)?.dispose();
     neighborCommitters.delete(pageId);
     delete neighborStrokes[pageId];
     delete neighborResults[pageId];
+    return true;
   }
 
   /// Keep only the active page's neighbors as full bundles (Phase 2 §7 residency budget).
   /// Evicted pages fall back to placeholders and reload on demand near the viewport.
-  function evictDistantPages() {
+  async function evictDistantPages() {
     const active = pageEntries.findIndex((page) => page.id === activePageId);
     if (active < 0) return;
     for (const [index, entry] of pageEntries.entries()) {
       if (Math.abs(index - active) > 2 && entry.snapshot) {
-        entry.snapshot = null;
-        releaseNeighbor(entry.id);
+        if (await releaseNeighbor(entry.id)) entry.snapshot = null;
       }
     }
   }
@@ -1152,9 +1143,18 @@
     strokes = [];
     selectedStrokeIds = [];
     groupedStrokeIds = [];
-    image = null;
+    revokeImageUrl();
+    images = [];
+    activeSnapshot = activeSnapshot
+      ? {
+          ...activeSnapshot,
+          page: { ...activeSnapshot.page, objects: [], readingOrder: [] },
+          blocks: [],
+        }
+      : null;
     selectedTypstId = null;
-    selectedImage = false;
+    selectedImageId = null;
+    mixedGroup = null;
     queueCommit("Cleared page");
   }
 
@@ -1261,7 +1261,7 @@
       selectedTypstId = typstBlocks.some((block) => block.id === hit.objectId)
         ? hit.objectId
         : null;
-      selectedImage = false;
+      selectedImageId = null;
       status = `Found on page ${hit.pageNumber}`;
     }
   }
@@ -1440,7 +1440,7 @@
   function updateTypstTransform(id: string, next: TypstTransform) {
     const previous = typstBlocks.find((block) => block.id === id)?.transform;
     if (!previous) return;
-    if (id === MAIN_TYPST_ID && groupedStrokeIds.length > 0) {
+    if (mixedGroup?.active && id === mixedGroup.typstId && groupedStrokeIds.length > 0) {
       let nextStrokes = strokes;
       const scaleRatio = next.scale / Math.max(previous.scale, 0.05);
       if (scaleRatio !== 1) {
@@ -1522,7 +1522,7 @@
       },
     ];
     selectedTypstId = id;
-    selectedImage = false;
+    selectedImageId = null;
     status = "Created a new Typst block";
     queueCommit("Created Typst block");
   }
@@ -1537,11 +1537,42 @@
 
   function groupSelectedInk() {
     if (selectedStrokeIds.length === 0) return;
+    const typstId = selectedTypstId ?? typstBlocks[0]?.id;
+    if (!typstId) return;
+    const typstObject = activeSnapshot?.page.objects.find((object) => object.id === typstId);
+    if (
+      (typstObject?.groupId && typstObject.groupId !== mixedGroup?.groupId) ||
+      (mixedGroup?.active && mixedGroup.typstId !== typstId) ||
+      strokes.some(
+        (stroke) =>
+          selectedStrokeIds.includes(stroke.id) &&
+          stroke.groupId &&
+          stroke.groupId !== mixedGroup?.inkGroupId,
+      )
+    ) {
+      status = "Ungroup the existing selection before creating another mixed group";
+      return;
+    }
+    const occupied = new Set(activeSnapshot?.page.objects.map((object) => object.id) ?? []);
+    const freshId = (prefix: string) => {
+      let number = 1;
+      while (occupied.has(`${prefix}-${number}`)) number += 1;
+      const id = `${prefix}-${number}`;
+      occupied.add(id);
+      return id;
+    };
+    mixedGroup ??= {
+      inkGroupId: freshId("ink-group"),
+      groupId: freshId("group"),
+      typstId,
+      active: true,
+    };
+    mixedGroup = { ...mixedGroup, typstId, active: true };
     const selected = new Set(selectedStrokeIds);
     groupedStrokeIds = [...selectedStrokeIds];
     strokes = strokes.map((stroke) => ({
       ...stroke,
-      groupId: selected.has(stroke.id) ? INK_GROUP_ID : null,
+      groupId: selected.has(stroke.id) ? mixedGroup!.inkGroupId : stroke.groupId,
     }));
     status = `Grouped ${groupedStrokeIds.length} ink stroke${groupedStrokeIds.length === 1 ? "" : "s"} with the Typst block`;
     queueCommit("Grouped ink with Typst");
@@ -1578,7 +1609,7 @@
     if (!keepsSelection(next)) {
       updateInkSelection([]);
       selectedTypstId = null;
-      selectedImage = false;
+      selectedImageId = null;
     }
     status = `${next === "pen" ? `Pen ${penPreset}` : TOOL_NAMES[next]} active`;
   }
@@ -1742,7 +1773,9 @@
     selectedTypstId = object?.classList.contains("typst-block")
       ? object.dataset.objectId ?? null
       : null;
-    selectedImage = object?.classList.contains("image-object") ?? false;
+    selectedImageId = object?.classList.contains("image-object")
+      ? object.dataset.objectId ?? null
+      : null;
     if (object && event.target instanceof Element && event.target.closest(".ink-surface")) {
       event.preventDefault();
       event.stopPropagation();
@@ -1766,7 +1799,7 @@
       return;
     }
     selectedTypstId = null;
-    selectedImage = false;
+    selectedImageId = null;
   }
 
   /**
@@ -1935,17 +1968,30 @@
   function deleteSelection(): boolean {
     if (selectedTypstId) {
       const id = selectedTypstId;
-      if (id === MAIN_TYPST_ID && groupedStrokeIds.length > 0) ungroupInk();
+      const object = activeSnapshot?.page.objects.find((candidate) => candidate.id === id);
+      if (object?.groupId && object.groupId !== mixedGroup?.groupId) {
+        status = "Ungroup this object before deleting it";
+        return false;
+      }
+      if (id === mixedGroup?.typstId && mixedGroup.active) ungroupInk();
       typstBlocks = typstBlocks.filter((block) => block.id !== id);
       selectedTypstId = null;
       queueCommit("Deleted Typst block");
       status = "Deleted the Typst block";
       return true;
     }
-    if (selectedImage && image) {
-      revokeImageUrl();
-      image = null;
-      selectedImage = false;
+    if (selectedImageId) {
+      const object = activeSnapshot?.page.objects.find(
+        (candidate) => candidate.id === selectedImageId,
+      );
+      if (object?.groupId) {
+        status = "Ungroup this object before deleting it";
+        return false;
+      }
+      const removed = images.find((image) => image.id === selectedImageId);
+      if (removed?.url.startsWith("blob:")) URL.revokeObjectURL(removed.url);
+      images = images.filter((image) => image.id !== selectedImageId);
+      selectedImageId = null;
       queueCommit("Deleted image");
       status = "Removed the image from this page; the original file is kept";
       return true;
@@ -1981,8 +2027,12 @@
       scheduleInkCommit("Moved Typst block");
       return true;
     }
-    if (selectedImage && image) {
-      image = { ...image, x: image.x + dx, y: image.y + dy };
+    if (selectedImageId) {
+      images = images.map((image) =>
+        image.id === selectedImageId
+          ? { ...image, x: image.x + dx, y: image.y + dy }
+          : image,
+      );
       scheduleInkCommit("Moved image");
       return true;
     }
@@ -1996,9 +2046,13 @@
 
   function ungroupInk() {
     strokes = strokes.map((stroke) =>
-      groupedStrokeIds.includes(stroke.id) ? { ...stroke, groupId: null } : stroke,
+      groupedStrokeIds.includes(stroke.id) &&
+      (!mixedGroup || stroke.groupId === mixedGroup.inkGroupId)
+        ? { ...stroke, groupId: null }
+        : stroke,
     );
     groupedStrokeIds = [];
+    if (mixedGroup) mixedGroup = { ...mixedGroup, active: false };
     status = "Removed the Typst and ink group";
     queueCommit("Ungrouped ink and Typst");
   }
@@ -2030,9 +2084,17 @@
       }
     }
 
-    revokeImageUrl();
     const fit = Math.min(1, 220 / dimensions.width, 160 / dimensions.height);
-    image = {
+    const existingIds = new Set([
+      ...typstBlocks.map((block) => block.id),
+      ...images.map((image) => image.id),
+      ...(activeSnapshot?.page.objects.map((object) => object.id) ?? []),
+    ]);
+    let number = images.length + 1;
+    while (existingIds.has(`image-${String(number).padStart(3, "0")}`)) number += 1;
+    const id = `image-${String(number).padStart(3, "0")}`;
+    images = [...images, {
+      id,
       path,
       url,
       alt: file.name || "Pasted image",
@@ -2041,8 +2103,8 @@
       widthPt: Math.max(1, dimensions.width * fit),
       heightPt: Math.max(1, dimensions.height * fit),
       scale: 1,
-    };
-    selectedImage = true;
+    }];
+    selectedImageId = id;
     selectedTypstId = null;
     status = "Pasted one original image";
     queueCommit("Pasted image");
@@ -2070,6 +2132,10 @@
         snapshot.page.revision = revision;
         try {
           const result = await commitNotebook(root, snapshot);
+          activeSnapshot = result.snapshot;
+          notebookManifest = result.snapshot.manifest;
+          const entry = pageEntries.find((page) => page.id === result.snapshot.page.id);
+          if (entry) entry.snapshot = result.snapshot;
           revision = result.snapshot.page.revision;
           canUndo = result.canUndo;
           canRedo = result.canRedo;
@@ -2107,6 +2173,14 @@
   }
 
   function changeStrokes(next: Stroke[], label: string) {
+    const nextIds = new Set(next.map((stroke) => stroke.id));
+    const protectedGrouped = strokes.filter(
+      (stroke) =>
+        !nextIds.has(stroke.id) &&
+        stroke.groupId &&
+        stroke.groupId !== mixedGroup?.inkGroupId,
+    );
+    if (protectedGrouped.length > 0) next = [...next, ...protectedGrouped];
     const remaining = new Set(next.map((stroke) => stroke.id));
     groupedStrokeIds = groupedStrokeIds.filter((id) => remaining.has(id));
     strokes = next;
@@ -2120,9 +2194,9 @@
     if (sideEditorOpen) sideEditor?.focus();
   }
 
-  function changeImage(next: Partial<Pick<ImageState, "x" | "y" | "scale">>) {
-    if (!image) return;
-    image = { ...image, ...next };
+  function changeImage(id: string, next: Partial<Pick<ImageState, "x" | "y" | "scale">>) {
+    if (!images.some((image) => image.id === id)) return;
+    images = images.map((image) => (image.id === id ? { ...image, ...next } : image));
     queueCommit("Updated image");
   }
 
@@ -2232,7 +2306,7 @@
       addPageOpen = false;
       metricsOpen = false;
       selectedTypstId = null;
-      selectedImage = false;
+      selectedImageId = null;
       directObjectInput = false;
       return;
     }
@@ -2295,6 +2369,7 @@
     flushInkCommit();
     flushTypstCommit();
     await transactionQueue;
+    await Promise.all([...neighborCommitters.values()].map((committer) => committer.flush()));
     saveMs = performance.now() - startedAt;
     if (transactionFailed) return false;
     status = `All changes saved at revision ${revision}`;
@@ -2355,7 +2430,9 @@
   }
 
   function revokeImageUrl() {
-    if (image?.url.startsWith("blob:")) URL.revokeObjectURL(image.url);
+    for (const image of images) {
+      if (image.url.startsWith("blob:")) URL.revokeObjectURL(image.url);
+    }
   }
 
   /**
@@ -2560,8 +2637,8 @@
       <div>
         <div class="notebook-title">Goodtype notebook</div>
         <div class="save-state">
-          <span class:warning={transactionFailed} class:saving={pendingTransactions > 0 || inkPending} class="state-dot"></span>
-          <span>{transactionFailed ? "Save blocked" : pendingTransactions > 0 || inkPending ? "Saving" : "Saved"}</span>
+          <span class:warning={transactionFailed} class:saving={savePending} class="state-dot"></span>
+          <span>{transactionFailed ? "Save blocked" : savePending ? "Saving" : "Saved"}</span>
           <span class="revision">r{revision}</span>
         </div>
       </div>
@@ -2708,7 +2785,7 @@
                     calibration={settings.calibration}
                     directObjectInput={active && directObjectInput}
                     selectedBlockId={active ? selectedTypstId : null}
-                    selectedImageId={active && selectedImage ? ACTIVE_IMAGE_ID : null}
+                    selectedImageId={active ? selectedImageId : null}
                     onCompile={(id, request) =>
                       active
                         ? compileTypst(id, request)
@@ -2717,15 +2794,15 @@
                     onTransform={(id, transform) => updateTypstTransform(id, transform)}
                     onSelectBlock={(id) => {
                       selectedTypstId = id;
-                      selectedImage = false;
+                      selectedImageId = null;
                     }}
                     onDeselectBlock={() => (selectedTypstId = null)}
-                    onSelectImage={() => {
-                      selectedImage = true;
+                    onSelectImage={(id) => {
+                      selectedImageId = id;
                       selectedTypstId = null;
                     }}
-                    onMoveImage={(_id, position) => changeImage(position)}
-                    onScaleImage={(_id, scale) => changeImage({ scale })}
+                    onMoveImage={(id, position) => changeImage(id, position)}
+                    onScaleImage={(id, scale) => changeImage(id, { scale })}
                     onStrokeFinalized={(stroke) =>
                       active
                         ? addStroke(stroke)
@@ -3038,7 +3115,7 @@
     <div class:failure={transactionFailed} class="operation-status" title={status}>{status}</div>
     <span class="page-count">Page {activePageNumber()} of {notebookManifest?.pages.length ?? 1}</span><span class="footer-divider"></span>
     <button type="button" onclick={() => changeZoom(1)}>{Math.round(zoom * 100)}%</button>
-    <span class="footer-divider"></span><span class:failure={transactionFailed} class="local-state">{transactionFailed ? "Needs attention" : "Local · saved"}</span>
+    <span class="footer-divider"></span><span class:failure={transactionFailed} class="local-state">{transactionFailed ? "Needs attention" : savePending ? "Local · saving" : "Local · saved"}</span>
   </footer>
 
   {#if searchOpen}
