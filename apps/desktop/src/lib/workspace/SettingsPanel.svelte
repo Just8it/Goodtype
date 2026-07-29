@@ -29,6 +29,15 @@
     <section aria-labelledby="settings-pressure">
       <p class="hint">Stroke sizes and colors are on the palette bar — one tap, no submenu. This window holds pressure, calibration, and app behavior.</p>
       <h3 id="settings-pressure">Pressure calibration</h3>
+      <label class="choice">
+        <input
+          type="checkbox"
+          checked={settings.pressureEnabled}
+          onchange={(event) =>
+            onChange({ ...settings, pressureEnabled: event.currentTarget.checked })}
+        />
+        <span><strong>Use stylus pressure</strong><em>Disable for uniform-width strokes across all pressure-sensitive pens</em></span>
+      </label>
       <div class="row">
         <label>
           <span>Curve</span>

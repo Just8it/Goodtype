@@ -7,14 +7,19 @@
  * caller reaching for "record that this opened" should not have to know which module owns it.
  */
 import { invoke } from "@tauri-apps/api/core";
+import type { RecentNotebook } from "../settings";
 
 /** The default notebook directory, created if absent. Used when there are no recents. */
 export function defaultNotebookRoot(): Promise<string> {
   return invoke<string>("phase0_notebook_root");
 }
 
-export function listRecentNotebooks(): Promise<unknown[]> {
-  return invoke<unknown[]>("list_recent_notebooks");
+export function listRecentNotebooks(): Promise<RecentNotebook[]> {
+  return invoke<RecentNotebook[]>("list_recent_notebooks");
+}
+
+export function recordNotebookPage(root: string, pageId: string): Promise<void> {
+  return invoke("record_notebook_page", { root, pageId });
 }
 
 export function recordNotebookOpened(

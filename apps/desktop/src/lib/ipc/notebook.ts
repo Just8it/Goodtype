@@ -12,7 +12,12 @@
 import { invoke } from "@tauri-apps/api/core";
 
 import type { PageBackground, PageGeometry, PagePosition } from "../model";
-import type { HistoryCommand, HistoryResult, NotebookSnapshot } from "./types";
+import type {
+  HistoryCommand,
+  HistoryResult,
+  NotebookSnapshot,
+  StructureHistoryResult,
+} from "./types";
 
 export function createNotebook(
   root: string,
@@ -55,13 +60,11 @@ export function createPage(
   position: PagePosition,
   background: PageBackground | null,
   geometry: PageGeometry | null,
-): Promise<NotebookSnapshot> {
-  return invoke<NotebookSnapshot>("create_page", {
+  activePageId: string,
+): Promise<StructureHistoryResult> {
+  return invoke<StructureHistoryResult>("create_page", {
     root,
-    modifiedAt,
-    position,
-    background,
-    geometry,
+    request: { modifiedAt, position, background, geometry, activePageId },
   });
 }
 
@@ -69,16 +72,16 @@ export function duplicatePage(
   root: string,
   pageId: string,
   modifiedAt: string,
-): Promise<NotebookSnapshot> {
-  return invoke<NotebookSnapshot>("duplicate_page", { root, pageId, modifiedAt });
+): Promise<StructureHistoryResult> {
+  return invoke<StructureHistoryResult>("duplicate_page", { root, pageId, modifiedAt });
 }
 
 export function deletePage(
   root: string,
   pageId: string,
   modifiedAt: string,
-): Promise<NotebookSnapshot> {
-  return invoke<NotebookSnapshot>("delete_page", { root, pageId, modifiedAt });
+): Promise<StructureHistoryResult> {
+  return invoke<StructureHistoryResult>("delete_page", { root, pageId, modifiedAt });
 }
 
 export function reorderPages(
@@ -86,13 +89,21 @@ export function reorderPages(
   orderedIds: string[],
   modifiedAt: string,
   activePageId: string,
-): Promise<NotebookSnapshot> {
-  return invoke<NotebookSnapshot>("reorder_pages", {
+): Promise<StructureHistoryResult> {
+  return invoke<StructureHistoryResult>("reorder_pages", {
     root,
     orderedIds,
     modifiedAt,
     activePageId,
   });
+}
+
+export function runStructureHistory(
+  root: string,
+  command: "undo_page_structure" | "redo_page_structure",
+  modifiedAt: string,
+): Promise<StructureHistoryResult> {
+  return invoke<StructureHistoryResult>(command, { root, modifiedAt });
 }
 
 /**

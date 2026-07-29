@@ -38,6 +38,7 @@
     interactive = false,
     root = null,
     inlineEditing = true,
+    sharedStyle = "",
     onRequestEdit,
     tool = "select",
     color = "#16212b",
@@ -79,6 +80,7 @@
     root?: string | null;
     /** False while the side view is open: blocks route editing there instead. */
     inlineEditing?: boolean;
+    sharedStyle?: string;
     onRequestEdit?: (id: string) => void;
     tool?: InkTool;
     color?: string;
@@ -95,7 +97,12 @@
     selectedImageId?: string | null;
     onCompile: (
       id: string,
-      request: { source: string; widthPt: number; generation: number },
+      request: {
+        source: string;
+        sharedStyle?: string | null;
+        widthPt: number;
+        generation: number;
+      },
     ) => void;
     onSourceChange?: (id: string, source: string) => void;
     onTransform?: (id: string, transform: TypstTransform) => void;
@@ -130,8 +137,11 @@
       initialY={block.y}
       initialLayoutWidthPt={block.layoutWidthPt}
       initialScale={block.scale}
+      zIndex={block.zIndex}
+      readingOrder={block.readingOrder}
       compileResult={results[block.id] ?? null}
-      cached={getCachedTypst(block.source, block.layoutWidthPt) ?? null}
+      cached={getCachedTypst(`${sharedStyle}\n${block.source}`, block.layoutWidthPt) ?? null}
+      compileContext={sharedStyle}
       {root}
       selected={interactive && selectedBlockId === block.id}
       {toPageDelta}
@@ -139,7 +149,7 @@
       {pageHeightPt}
       onSelect={interactive ? () => onSelectBlock?.(block.id) : undefined}
       onDeselect={interactive ? () => onDeselectBlock?.() : undefined}
-      onCompile={(request) => onCompile(block.id, request)}
+      onCompile={(request) => onCompile(block.id, { ...request, sharedStyle })}
       onSourceChange={(source) => onSourceChange?.(block.id, source)}
       onTransform={(transform) => onTransform?.(block.id, transform)}
       onEditingChange={(editing) =>
@@ -157,6 +167,8 @@
       widthPt={image.widthPt}
       heightPt={image.heightPt}
       scale={image.scale}
+      zIndex={image.zIndex}
+      readingOrder={image.readingOrder}
       selected={interactive && selectedImageId === image.id}
       {toPageDelta}
       {pageWidthPt}

@@ -950,6 +950,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "ecow"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "62bac48c16a993694c703f2991527d422d9efb8ec5625756004ba30e97683720"
+
+[[package]]
 name = "either"
 version = "1.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1599,6 +1605,7 @@ dependencies = [
  "typst-layout",
  "typst-pdf",
  "typst-svg",
+ "typstyle-core",
 ]
 
 [[package]]
@@ -2248,6 +2255,15 @@ name = "ipnet"
 version = "2.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d98f6fed1fde3f8c21bc40a1abb88dd75e67924f9cffc3ef95607bad8017f8e2"
+
+[[package]]
+name = "itertools"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8b4baf93f58d4425749ca49a51c50ebab072c5df6994d08fed93541c331481dc"
+dependencies = [
+ "either",
+]
 
 [[package]]
 name = "itoa"
@@ -3297,6 +3313,16 @@ name = "precomputed-hash"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "925383efa346730478fb4838dbe9137d2a47675ad789c546d150a6e1dd4ab31c"
+
+[[package]]
+name = "prettyless"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "749d63085aa461d80b3233e48781bf9e9dca8147fbc98f577e0697c6827dc418"
+dependencies = [
+ "typed-arena",
+ "unicode-width",
+]
 
 [[package]]
 name = "proc-macro-crate"
@@ -5145,7 +5171,7 @@ checksum = "d1cb79435d128de5d5443a058a983f6dcc16738760fa55ed703762bc278b1fd3"
 dependencies = [
  "arrayvec",
  "comemo",
- "ecow",
+ "ecow 0.2.6",
  "rustc-hash",
  "typst-eval",
  "typst-html",
@@ -5174,7 +5200,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a8823e1822bd181d8bee47b05632d16bf3a0a8ab042e01d815826350d7ae16c3"
 dependencies = [
  "comemo",
- "ecow",
+ "ecow 0.2.6",
  "indexmap 2.14.0",
  "rustc-hash",
  "stacker",
@@ -5196,7 +5222,7 @@ dependencies = [
  "az",
  "bumpalo",
  "comemo",
- "ecow",
+ "ecow 0.2.6",
  "palette",
  "rustc-hash",
  "time",
@@ -5217,7 +5243,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ffbba2bc8bb6b08410e4ee6f8ca04f12e79c9f42d37d03b0776870a8920c08b"
 dependencies = [
  "comemo",
- "ecow",
+ "ecow 0.2.6",
  "indexmap 2.14.0",
  "rustc-hash",
  "serde",
@@ -5236,7 +5262,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "27ee52e27dfab0da5ac3d19e7e43a21fbc7ff83af9301119468bae89fa857a8b"
 dependencies = [
  "dirs",
- "ecow",
+ "ecow 0.2.6",
  "env_proxy",
  "fastrand",
  "flate2",
@@ -5266,7 +5292,7 @@ dependencies = [
  "bumpalo",
  "codex",
  "comemo",
- "ecow",
+ "ecow 0.2.6",
  "either",
  "hypher",
  "icu_properties",
@@ -5306,7 +5332,7 @@ dependencies = [
  "codex",
  "comemo",
  "csv",
- "ecow",
+ "ecow 0.2.6",
  "either",
  "flate2",
  "fontdb",
@@ -5381,7 +5407,7 @@ dependencies = [
  "bytemuck",
  "codex",
  "comemo",
- "ecow",
+ "ecow 0.2.6",
  "flate2",
  "image",
  "indexmap 2.14.0",
@@ -5409,7 +5435,7 @@ dependencies = [
  "arrayvec",
  "bumpalo",
  "comemo",
- "ecow",
+ "ecow 0.2.6",
  "regex",
  "typst-html",
  "typst-library",
@@ -5427,7 +5453,7 @@ checksum = "5df6dc785695aae085678bd6657aa04a1d26058a76ed042e738658078bca681e"
 dependencies = [
  "base64 0.22.1",
  "comemo",
- "ecow",
+ "ecow 0.2.6",
  "flate2",
  "hayro",
  "hayro-svg",
@@ -5452,7 +5478,7 @@ version = "0.15.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92a20d79df5d10c7fb0b4f7c18e4b2671edfc21e5ed9ad9894e18cccefd1c70f"
 dependencies = [
- "ecow",
+ "ecow 0.2.6",
  "rustc-hash",
  "serde",
  "toml 0.8.2",
@@ -5492,6 +5518,22 @@ dependencies = [
  "smallvec",
  "thin-vec",
  "unicode-math-class",
+]
+
+[[package]]
+name = "typstyle-core"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "12e1c3153b4239cb9641f6fd35a6a64c8577d0607ab9dcfcc001630505afe36d"
+dependencies = [
+ "ecow 0.3.0",
+ "itertools",
+ "prettyless",
+ "rustc-hash",
+ "smallvec",
+ "thiserror 2.0.19",
+ "typst-syntax",
+ "unicode-width",
 ]
 
 [[package]]
@@ -5641,6 +5683,12 @@ name = "unicode-vo"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b1d386ff53b415b7fe27b50bb44679e2cc4660272694b7b6f3326d8480823a94"
+
+[[package]]
+name = "unicode-width"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b4ac048d71ede7ee76d585517add45da530660ef4390e49b098733c6e897f254"
 
 [[package]]
 name = "unsafe-libyaml"

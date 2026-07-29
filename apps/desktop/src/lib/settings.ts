@@ -253,6 +253,7 @@ export type RecentNotebook = {
   title: string;
   pinned: boolean;
   lastOpened: string;
+  lastPageId: string | null;
 };
 
 export type SearchHit = {

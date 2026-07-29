@@ -16,6 +16,8 @@ typst-ide = "0.15.1"
 typst-layout = "0.15.1"
 typst-pdf = "0.15.1"
 typst-svg = "0.15.1"
+# Formatting is independent of language analysis; use the small library instead of Tinymist.
+typstyle-core = "0.15.0"
 # Typst Universe packages, offline-first. Same loader typst-cli uses.
 typst-kit = { version = "0.15.1", default-features = false, features = [
     "system-downloader",

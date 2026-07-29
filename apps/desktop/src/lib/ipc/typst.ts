@@ -17,6 +17,7 @@ import type { TypstCompileResult } from "../editor/typst";
  */
 export type TypstCompileRequest = {
   source: string;
+  sharedStyle?: string | null;
   widthPt: number;
   generation: number;
 };
@@ -26,4 +27,18 @@ export function compileTypst(
   request: TypstCompileRequest,
 ): Promise<TypstCompileResult> {
   return invoke<TypstCompileResult>("compile_typst", { root, request });
+}
+
+export type TypstHover = { value: string; code: boolean };
+
+export function hoverTypst(
+  root: string,
+  source: string,
+  cursor: number,
+): Promise<TypstHover | null> {
+  return invoke<TypstHover | null>("hover_typst", { root, source, cursor });
+}
+
+export function formatTypst(root: string, source: string): Promise<string> {
+  return invoke<string>("format_typst", { root, source });
 }

@@ -12,6 +12,7 @@
     openPage,
     reorderPages,
     runHistory,
+    runStructureHistory,
     storePastedImage,
   } from "../ipc/notebook";
   import {
@@ -28,6 +29,7 @@
     exportNotebookPdf,
     listRecentNotebooks,
     recordNotebookOpened,
+    recordNotebookPage,
     writeMetrics,
     writeNotebookCover,
   } from "../ipc/workspace";
@@ -88,6 +90,11 @@
   } from "./snapshot";
   import { nearestPaletteDock, type PaletteDock } from "./palette";
   import {
+    moveReadingObject,
+    moveVisualObject,
+    type VisualMove,
+  } from "./objectOrder";
+  import {
     addWidth as addRowWidth,
     canRemoveWidth,
     editWidth as editRowWidth,
@@ -135,6 +142,8 @@
     source: string;
     transform: TypstTransform;
     result: TypstCompileResult | null;
+    zIndex: number;
+    readingOrder: number;
   };
   type ImageState = {
     id: string;
@@ -146,6 +155,8 @@
     widthPt: number;
     heightPt: number;
     scale: number;
+    zIndex: number;
+    readingOrder: number;
   };
   type PaletteDrag = {
     pointerId: number;
@@ -158,6 +169,9 @@
   };
   type PinchStart = { distance: number; zoom: number };
   type TypstScaleEdit = { id: string; transform: TypstTransform };
+  type NotebookAction =
+    | { kind: "page"; pageId: string }
+    | { kind: "structure" };
 
   // A4 exactly: 210mm x 297mm at 72pt/inch. It was rounded to 595x842, which is a tenth of a
   // millimetre narrow — invisible on its own, and wrong the moment a template promises 5mm
@@ -174,6 +188,7 @@
   let root = $state("");
   let notebookTitle = $state("Goodtype");
   let notebookManifest = $state<NotebookManifest | null>(null);
+  let sharedStyleSource = $state("");
   let activeSnapshot = $state<NotebookSnapshot | null>(null);
   let activePageId = $state("page-001");
   let activeInkLayerId = $state(INK_LAYER_ID);
@@ -200,6 +215,8 @@
       source: "= Newton's second law\n\n$ F = m a $",
       transform: { x: 96, y: 120, layoutWidthPt: 230, scale: 1 },
       result: null,
+      zIndex: 1,
+      readingOrder: 0,
     },
   ]);
   let images = $state<ImageState[]>([]);
@@ -250,6 +267,8 @@
       y: block.transform.y,
       layoutWidthPt: block.transform.layoutWidthPt,
       scale: block.transform.scale,
+      zIndex: block.zIndex,
+      readingOrder: block.readingOrder,
     })),
   );
   const activeResults: Record<string, TypstCompileResult | null> = $derived(
@@ -266,6 +285,8 @@
       widthPt: image.widthPt,
       heightPt: image.heightPt,
       scale: image.scale,
+      zIndex: image.zIndex,
+      readingOrder: image.readingOrder,
     })),
   );
 
@@ -273,6 +294,7 @@
   // an overlay, so the canvas genuinely narrows — and the palette, which is positioned inside
   // that region, follows the paper instead of colliding with the panel.
   let sideEditorOpen = $state(false);
+  let sideEditorStyle = $state(false);
   let sideEditorBlockId = $state<string | null>(null);
   /// The page the target block belongs to, so scrolling elsewhere does not lose it.
   let sideEditorPageId = $state<string | null>(null);
@@ -283,8 +305,8 @@
   );
   /// `edit` when the target is on the page in view, `away` when it is held on another page, and
   /// `none` when nothing has been picked yet. The target only changes when the writer picks one.
-  const sideEditorMode = $derived<"edit" | "away" | "none">(
-    sideEditorBlock ? "edit" : sideEditorBlockId ? "away" : "none",
+  const sideEditorMode = $derived<"edit" | "style" | "away" | "none">(
+    sideEditorStyle ? "style" : sideEditorBlock ? "edit" : sideEditorBlockId ? "away" : "none",
   );
   const sideEditorPageNumber = $derived(
     sideEditorPageId
@@ -293,6 +315,7 @@
   );
 
   function openSideEditor(blockId?: string) {
+    sideEditorStyle = false;
     // Keeps whatever was last opened; only an explicit pick retargets the panel.
     const target = blockId ?? sideEditorBlockId ?? selectedTypstId ?? typstBlocks[0]?.id ?? null;
     sideEditorOpen = true;
@@ -315,6 +338,18 @@
   function toggleSideEditor() {
     if (sideEditorOpen) closeSideEditor();
     else openSideEditor();
+  }
+
+  function openSharedStyle() {
+    if (!notebookManifest) return;
+    if (!notebookManifest.sharedStylePath) {
+      notebookManifest = { ...notebookManifest, sharedStylePath: "style.typ" };
+      queueCommit("Created shared Typst style");
+    }
+    sideEditorStyle = true;
+    sideEditorOpen = true;
+    moreOpen = false;
+    void tick().then(() => sideEditor?.focus());
   }
 
   /// Tracks the frame of whichever page currently has edit focus, so zoom-to-point keeps working
@@ -460,8 +495,8 @@
   let shelfLocation = $state<ShelfLocation>(SHELF_ROOT);
   // Session-local order of committed changes across pages, so notebook-scoped undo can route
   // Ctrl+Z to the page that changed most recently.
-  let notebookUndoOrder: string[] = [];
-  let notebookRedoOrder: string[] = [];
+  let notebookUndoOrder: NotebookAction[] = [];
+  let notebookRedoOrder: NotebookAction[] = [];
   let metricsTimer: ReturnType<typeof setTimeout> | undefined;
   let removeCloseListener: (() => void) | undefined;
   let closeConfirmed = false;
@@ -534,6 +569,7 @@
     revokeImageUrl();
     notebookTitle = title;
     notebookManifest = null;
+    sharedStyleSource = "";
     activeSnapshot = null;
     pageEntries = [];
     strokes = [];
@@ -555,6 +591,8 @@
         source: "= Notes\n\nType Typst here, or write with the pen.",
         transform: { x: 96, y: 120, layoutWidthPt: 230, scale: 1 },
         result: null,
+        zIndex: 1,
+        readingOrder: 0,
       },
     ];
   }
@@ -579,6 +617,16 @@
         snapshot = buildSnapshot();
         await createNotebook(root, snapshot);
       }
+      const resume = (await listRecentNotebooks().catch(() => [])).find(
+        (entry) => entry.root === root,
+      )?.lastPageId;
+      if (
+        resume &&
+        resume !== snapshot.page.id &&
+        snapshot.manifest.pages.some((page) => page.id === resume)
+      ) {
+        snapshot = await openPage(root, resume);
+      }
       transactionFailed = false;
       conflictDetail = null;
       notebookUndoOrder = [];
@@ -592,7 +640,9 @@
         root,
         snapshot.manifest.title || "Goodtype notebook",
         new Date().toISOString(),
-      ).catch(() => {});
+      )
+        .then(() => recordNotebookPage(root, snapshot.page.id))
+        .catch(() => {});
       await refreshRecoveryCandidates();
     } catch (error) {
       status = `Could not open the notebook: ${message(error)}`;
@@ -648,8 +698,13 @@
         scale: block.transform.scale,
         measuredWidthPt: block.result?.widthPt ?? block.transform.layoutWidthPt,
         measuredHeightPt: block.result?.heightPt ?? 48,
+        zIndex: block.zIndex,
+        readingOrder: block.readingOrder,
       })),
       images,
+      sharedStyle: manifest.sharedStylePath
+        ? { path: manifest.sharedStylePath, source: sharedStyleSource }
+        : null,
       mixedGroup,
       groupedStrokeIds,
       now,
@@ -666,6 +721,12 @@
     typstDirty = false;
     revokeImageUrl();
     notebookManifest = snapshot.manifest;
+    const style = snapshot.manifest.sharedStylePath
+      ? snapshot.blocks.find((file) => file.path === snapshot.manifest.sharedStylePath)
+      : undefined;
+    sharedStyleSource = style
+      ? new TextDecoder().decode(new Uint8Array(style.bytes))
+      : "";
     activeSnapshot = snapshot;
     activePageId = snapshot.page.id;
     // The active page's state below is now the single source of truth for this page; drop the
@@ -711,6 +772,8 @@
             scale: object.scale,
           },
           result: null,
+          zIndex: object.zIndex,
+          readingOrder: object.readingOrder,
         };
       });
 
@@ -767,6 +830,8 @@
           widthPt: object.widthPt,
           heightPt: object.heightPt,
           scale: object.scale,
+          zIndex: object.zIndex,
+          readingOrder: object.readingOrder,
         }];
       });
     selectedImageId = null;
@@ -874,6 +939,7 @@
 
       const result = await focusPage(root, pageId);
       applySnapshot(result.snapshot);
+      void recordNotebookPage(root, pageId).catch(() => {});
       canUndo = result.canUndo;
       canRedo = result.canRedo;
       await evictDistantPages();
@@ -1003,9 +1069,10 @@
   async function compileNeighborTypst(
     pageId: string,
     blockId: string,
-    request: { source: string; widthPt: number; generation: number },
+    request: { source: string; sharedStyle?: string | null; widthPt: number; generation: number },
   ) {
-    const cached = getCachedTypst(request.source, request.widthPt);
+    const cacheSource = `${request.sharedStyle ?? ""}\n${request.source}`;
+    const cached = getCachedTypst(cacheSource, request.widthPt);
     if (cached) {
       neighborResults[pageId] = {
         ...neighborResults[pageId],
@@ -1016,7 +1083,7 @@
     if (!tauriAvailable) return;
     try {
       const result = await requestTypstCompile(root, request);
-      setCachedTypst(request.source, request.widthPt, result);
+      setCachedTypst(cacheSource, request.widthPt, result);
       neighborResults[pageId] = {
         ...neighborResults[pageId],
         [blockId]: result,
@@ -1072,13 +1139,12 @@
     if (!tauriAvailable || !(await persist())) return;
     busy = true;
     try {
-      const snapshot = await duplicatePage(root, activePageId, new Date().toISOString());
+      const result = await duplicatePage(root, activePageId, new Date().toISOString());
       pageEntries = [];
-      applySnapshot(snapshot);
-      canUndo = false;
-      canRedo = false;
+      applySnapshot(result.snapshot);
+      recordStructureAction();
       await tick();
-      scrollToPage(snapshot.page.id);
+      scrollToPage(result.snapshot.page.id);
       status = `Duplicated into page ${activePageNumber()}`;
     } catch (error) {
       status = `Could not duplicate the page: ${message(error)}`;
@@ -1100,15 +1166,12 @@
     }
     busy = true;
     try {
-      const snapshot = await deletePage(root, activePageId, new Date().toISOString());
-      notebookUndoOrder = notebookUndoOrder.filter((id) => id !== activePageId);
-      notebookRedoOrder = notebookRedoOrder.filter((id) => id !== activePageId);
+      const result = await deletePage(root, activePageId, new Date().toISOString());
       pageEntries = [];
-      applySnapshot(snapshot);
-      canUndo = false;
-      canRedo = false;
+      applySnapshot(result.snapshot);
+      recordStructureAction();
       await tick();
-      scrollToPage(snapshot.page.id);
+      scrollToPage(result.snapshot.page.id);
       status = `Deleted page ${pageNumber}`;
     } catch (error) {
       status = `Could not delete the page: ${message(error)}`;
@@ -1138,6 +1201,8 @@
         source: "",
         transform: { x: 96, y: 120, layoutWidthPt: 230, scale: 1 },
         result: null,
+        zIndex: 1,
+        readingOrder: 0,
       },
     ];
     strokes = [];
@@ -1212,6 +1277,7 @@
         title: "Notebook",
         entries: [
           { kind: "action", id: "search", label: "Search notebook", hint: "Ctrl F", onSelect: () => (searchOpen = true) },
+          { kind: "action", id: "style", label: "Edit shared Typst style", onSelect: openSharedStyle },
           { kind: "action", id: "settings", label: "Settings", hint: "Ctrl ,", onSelect: () => (settingsOpen = true) },
           { kind: "action", id: "save", label: "Confirm saved", onSelect: () => void persist() },
           { kind: "action", id: "metrics", label: "Timing evidence", onSelect: () => (metricsOpen = true) },
@@ -1232,14 +1298,15 @@
     [order[index], order[target]] = [order[target], order[index]];
     busy = true;
     try {
-      const snapshot = await reorderPages(
+      const result = await reorderPages(
         root,
         order,
         new Date().toISOString(),
         activePageId,
       );
       pageEntries = [];
-      applySnapshot(snapshot);
+      applySnapshot(result.snapshot);
+      recordStructureAction();
       await tick();
       scrollToPage(activePageId);
       status = `Moved page to position ${target + 1}`;
@@ -1312,24 +1379,26 @@
     if (!(await persist())) return;
     busy = true;
     try {
-      const snapshot = await createPage(
+      const result = await createPage(
         root,
         new Date().toISOString(),
         position,
         background,
         geometry,
+        activePageId,
       );
       pageEntries = [];
-      applySnapshot(snapshot);
-      canUndo = false;
-      canRedo = false;
+      applySnapshot(result.snapshot);
+      recordStructureAction();
       // Load whatever now sits above the new page so the scroll lands with context above it
       // rather than against the top of an otherwise empty run.
-      const index = snapshot.manifest.pages.findIndex((page) => page.id === snapshot.page.id);
-      const above = index > 0 ? snapshot.manifest.pages[index - 1] : undefined;
+      const index = result.snapshot.manifest.pages.findIndex(
+        (page) => page.id === result.snapshot.page.id,
+      );
+      const above = index > 0 ? result.snapshot.manifest.pages[index - 1] : undefined;
       if (above) await ensurePageLoaded(above.id);
       await tick();
-      scrollToPage(snapshot.page.id);
+      scrollToPage(result.snapshot.page.id);
       status = `Added page ${activePageNumber()}`;
     } catch (error) {
       status = `Could not add page: ${message(error)}`;
@@ -1392,15 +1461,17 @@
 
   async function compileTypst(id: string, request: {
     source: string;
+    sharedStyle?: string | null;
     widthPt: number;
     generation: number;
   }) {
     const startedAt = performance.now();
     let result: TypstCompileResult;
     if (!tauriAvailable) {
+      const browserSource = `${request.sharedStyle ?? ""}\n${request.source}`;
       result = {
         generation: request.generation,
-        svg: previewSvg(request.source, request.widthPt),
+        svg: previewSvg(browserSource, request.widthPt),
         widthPt: request.widthPt,
         heightPt: 64,
         // The browser stand-in draws its own SVG at exactly the block's size, with nothing
@@ -1410,7 +1481,8 @@
       };
       compileMs = performance.now() - startedAt;
     } else {
-      const cached = getCachedTypst(request.source, request.widthPt);
+      const cacheSource = `${request.sharedStyle ?? ""}\n${request.source}`;
+      const cached = getCachedTypst(cacheSource, request.widthPt);
       if (cached) {
         // Unchanged source: reuse the compiled SVG, stamped with this request's generation so
         // the block's preview state machine accepts it. No recompile, no IPC round trip.
@@ -1418,7 +1490,7 @@
       } else {
         try {
           result = await requestTypstCompile(root, request);
-          setCachedTypst(request.source, request.widthPt, result);
+          setCachedTypst(cacheSource, request.widthPt, result);
         } catch (error) {
           result = {
             generation: request.generation,
@@ -1475,6 +1547,13 @@
     typstCommitTimer = setTimeout(flushTypstCommit, TYPST_SAVE_DEBOUNCE_MS);
   }
 
+  function updateSharedStyle(source: string) {
+    sharedStyleSource = source;
+    typstDirty = true;
+    if (typstCommitTimer) clearTimeout(typstCommitTimer);
+    typstCommitTimer = setTimeout(flushTypstCommit, TYPST_SAVE_DEBOUNCE_MS);
+  }
+
   function previewTypstScale(event: Event) {
     if (!selectedTypstId) return;
     const block = typstBlocks.find((candidate) => candidate.id === selectedTypstId);
@@ -1519,6 +1598,13 @@
           scale: 1,
         },
         result: null,
+        zIndex:
+          Math.max(
+            0,
+            ...typstBlocks.map((block) => block.zIndex),
+            ...images.map((image) => image.zIndex),
+          ) + 1,
+        readingOrder: typstBlocks.length + images.length,
       },
     ];
     selectedTypstId = id;
@@ -2103,6 +2189,13 @@
       widthPt: Math.max(1, dimensions.width * fit),
       heightPt: Math.max(1, dimensions.height * fit),
       scale: 1,
+      zIndex:
+        Math.max(
+          0,
+          ...typstBlocks.map((block) => block.zIndex),
+          ...images.map((image) => image.zIndex),
+        ) + 1,
+      readingOrder: typstBlocks.length + images.length,
     }];
     selectedImageId = id;
     selectedTypstId = null;
@@ -2167,9 +2260,22 @@
   }
 
   function recordNotebookAction(pageId: string) {
-    notebookUndoOrder.push(pageId);
+    notebookUndoOrder.push({ kind: "page", pageId });
     if (notebookUndoOrder.length > 200) notebookUndoOrder.shift();
     notebookRedoOrder = [];
+    canUndo = true;
+    canRedo = false;
+  }
+
+  function recordStructureAction() {
+    // A manifest change invalidates page snapshots retained by Rust, but older manifest states
+    // remain replayable because page files are kept. Drop only the page entries from the route.
+    notebookUndoOrder = notebookUndoOrder.filter((action) => action.kind === "structure");
+    notebookUndoOrder.push({ kind: "structure" });
+    notebookRedoOrder = [];
+    canUndo = true;
+    canRedo = false;
+    if (tauriAvailable && root) void recordNotebookPage(root, activePageId).catch(() => {});
   }
 
   function changeStrokes(next: Stroke[], label: string) {
@@ -2200,6 +2306,52 @@
     queueCommit("Updated image");
   }
 
+  function selectedObjectId(): string | null {
+    return selectedTypstId ?? selectedImageId;
+  }
+
+  function applyObjectOrder(page: NonNullable<typeof activeSnapshot>["page"], label: string) {
+    if (!activeSnapshot) return;
+    activeSnapshot = { ...activeSnapshot, page };
+    const fields = new Map(page.objects.map((object) => [object.id, object]));
+    typstBlocks = typstBlocks.map((block) => {
+      const object = fields.get(block.id);
+      return object
+        ? { ...block, zIndex: object.zIndex, readingOrder: object.readingOrder }
+        : block;
+    });
+    images = images.map((image) => {
+      const object = fields.get(image.id);
+      return object
+        ? { ...image, zIndex: object.zIndex, readingOrder: object.readingOrder }
+        : image;
+    });
+    queueCommit(label);
+  }
+
+  function changeVisualOrder(move: VisualMove) {
+    const id = selectedObjectId();
+    if (!id || !activeSnapshot) return;
+    applyObjectOrder(
+      {
+        ...activeSnapshot.page,
+        objects: moveVisualObject(activeSnapshot.page.objects, id, move),
+      },
+      "Changed visual order",
+    );
+  }
+
+  function changeReadingOrder(direction: -1 | 1) {
+    const id = selectedObjectId();
+    if (!id || !activeSnapshot) return;
+    const next = moveReadingObject(activeSnapshot.page, id, direction);
+    if (next === activeSnapshot.page) {
+      status = "That object cannot move further in reading order";
+      return;
+    }
+    applyObjectOrder(next, "Changed reading order");
+  }
+
   function undo() {
     void routeHistory("undo_notebook", "Undid change");
   }
@@ -2214,16 +2366,39 @@
     command: "undo_notebook" | "redo_notebook",
     label: string,
   ) {
+    if (!(await persist())) return;
+    const order = command === "undo_notebook" ? notebookUndoOrder : notebookRedoOrder;
+    const target = order.at(-1);
+    if (target?.kind === "structure") {
+      queueStructureHistory(
+        command === "undo_notebook" ? "undo_page_structure" : "redo_page_structure",
+        label,
+      );
+      return;
+    }
     if (settings.undoScope === "notebook") {
-      const order = command === "undo_notebook" ? notebookUndoOrder : notebookRedoOrder;
-      const target = order.at(-1);
-      if (target && target !== activePageId) {
-        await activatePage(target);
-        if (activePageId !== target) return;
-        scrollToPage(target);
+      if (target?.kind === "page" && target.pageId !== activePageId) {
+        await activatePage(target.pageId);
+        if (activePageId !== target.pageId) return;
+        scrollToPage(target.pageId);
       }
     }
     queueHistory(command, label);
+  }
+
+  function lastPageActionIndex(actions: NotebookAction[], pageId: string): number {
+    for (let index = actions.length - 1; index >= 0; index -= 1) {
+      const action = actions[index];
+      if (action.kind === "page" && action.pageId === pageId) return index;
+    }
+    return -1;
+  }
+
+  function lastStructureActionIndex(actions: NotebookAction[]): number {
+    for (let index = actions.length - 1; index >= 0; index -= 1) {
+      if (actions[index].kind === "structure") return index;
+    }
+    return -1;
   }
 
   function queueHistory(command: "undo_notebook" | "redo_notebook", label: string) {
@@ -2237,18 +2412,58 @@
           const result = await runHistory(root, command, activePageId);
           const pageId = result.snapshot.page.id;
           if (command === "undo_notebook") {
-            const index = notebookUndoOrder.lastIndexOf(pageId);
+            const index = lastPageActionIndex(notebookUndoOrder, pageId);
             if (index >= 0) notebookUndoOrder.splice(index, 1);
-            notebookRedoOrder.push(pageId);
+            notebookRedoOrder.push({ kind: "page", pageId });
           } else {
-            const index = notebookRedoOrder.lastIndexOf(pageId);
+            const index = lastPageActionIndex(notebookRedoOrder, pageId);
             if (index >= 0) notebookRedoOrder.splice(index, 1);
-            notebookUndoOrder.push(pageId);
+            notebookUndoOrder.push({ kind: "page", pageId });
           }
           applySnapshot(result.snapshot);
-          canUndo = result.canUndo;
-          canRedo = result.canRedo;
+          canUndo = result.canUndo || notebookUndoOrder.length > 0;
+          canRedo = result.canRedo || notebookRedoOrder.length > 0;
           status = `${label}; saved revision ${revision}`;
+        } catch (error) {
+          reportCommitFailure(label, error);
+        }
+      })
+      .finally(() => {
+        pendingTransactions -= 1;
+      });
+  }
+
+  function queueStructureHistory(
+    command: "undo_page_structure" | "redo_page_structure",
+    label: string,
+  ) {
+    if (!tauriAvailable || transactionFailed) return;
+    pendingTransactions += 1;
+    transactionQueue = transactionQueue
+      .then(async () => {
+        try {
+          const result = await runStructureHistory(
+            root,
+            command,
+            new Date().toISOString(),
+          );
+          if (command === "undo_page_structure") {
+            const index = lastStructureActionIndex(notebookUndoOrder);
+            if (index >= 0) notebookUndoOrder.splice(index, 1);
+            notebookRedoOrder.push({ kind: "structure" });
+          } else {
+            const index = lastStructureActionIndex(notebookRedoOrder);
+            if (index >= 0) notebookRedoOrder.splice(index, 1);
+            notebookUndoOrder.push({ kind: "structure" });
+          }
+          pageEntries = [];
+          applySnapshot(result.snapshot);
+          void recordNotebookPage(root, result.snapshot.page.id).catch(() => {});
+          canUndo = result.canUndo || notebookUndoOrder.length > 0;
+          canRedo = result.canRedo || notebookRedoOrder.length > 0;
+          await tick();
+          scrollToPage(result.snapshot.page.id);
+          status = `${label} page-list change`;
         } catch (error) {
           reportCommitFailure(label, error);
         }
@@ -2707,7 +2922,7 @@
       <SideEditor
         bind:this={sideEditor}
         mode={sideEditorMode}
-        source={sideEditorBlock?.source ?? ""}
+        source={sideEditorStyle ? sharedStyleSource : (sideEditorBlock?.source ?? "")}
         blockLabel={sideEditorBlockId ? `Typst block ${sideEditorBlockId}` : ""}
         awayPageNumber={sideEditorPageNumber}
         hasAnyBlock={typstBlocks.length > 0}
@@ -2715,7 +2930,10 @@
         dock={settings.sideEditorDock}
         width={settings.sideEditorWidth}
         diagnostics={sideEditorBlock?.result?.diagnostics ?? []}
-        onChange={(next) => sideEditorBlock && updateTypstSource(sideEditorBlock.id, next)}
+        onChange={(next) =>
+          sideEditorStyle
+            ? updateSharedStyle(next)
+            : sideEditorBlock && updateTypstSource(sideEditorBlock.id, next)}
         onClose={closeSideEditor}
         onDockChange={(dock) => changeSettings({ ...settings, sideEditorDock: dock })}
         onWidthChange={(next) => changeSettings({ ...settings, sideEditorWidth: next })}
@@ -2756,7 +2974,25 @@
             aria-current={active ? "page" : undefined}
             use:observePage={entry.id}
           >
-            <span class="page-number">Page {index + 1}</span>
+            <div class="page-number">
+              <span>Page {index + 1}</span>
+              {#if active && pageCount > 1}
+                <button
+                  type="button"
+                  aria-label={`Move page ${index + 1} up`}
+                  title="Move page up"
+                  disabled={index === 0 || busy}
+                  onclick={() => void moveActivePage(-1)}
+                >&uarr;</button>
+                <button
+                  type="button"
+                  aria-label={`Move page ${index + 1} down`}
+                  title="Move page down"
+                  disabled={index === pageCount - 1 || busy}
+                  onclick={() => void moveActivePage(1)}
+                >&darr;</button>
+              {/if}
+            </div>
             <div class="page-frame" use:trackActiveFrame={active} style:width={`${box.widthPt * zoom}px`} style:height={`${box.heightPt * zoom}px`}>
               <div class="page" style:width={`${box.widthPt}px`} style:height={`${box.heightPt}px`} style:transform={`scale(${zoom})`}>
                 {#if active || entry.snapshot}
@@ -2772,6 +3008,7 @@
                     {zoom}
                     interactive={active}
                     {root}
+                    sharedStyle={sharedStyleSource}
                     inlineEditing={!sideEditorOpen}
                     onRequestEdit={(id) => openSideEditor(id)}
                     {tool}
@@ -3074,6 +3311,17 @@
           {#if selectedStrokeIds.length > 0}<button type="button" onclick={groupSelectedInk}>Group with Typst</button>{/if}
           {#if groupedStrokeIds.length > 0}<button type="button" onclick={ungroupInk}>Ungroup</button>{/if}
         </div>
+      {:else if selectedTypstId || selectedImageId}
+        <div class="context-actions" aria-label="Selected object order">
+          <span>Layer</span>
+          <button type="button" title="Send to back" aria-label="Send selected object to back" onclick={() => changeVisualOrder("back")}>Back</button>
+          <button type="button" title="Move backward one layer" aria-label="Move selected object backward one layer" onclick={() => changeVisualOrder("backward")}>−1</button>
+          <button type="button" title="Move forward one layer" aria-label="Move selected object forward one layer" onclick={() => changeVisualOrder("forward")}>+1</button>
+          <button type="button" title="Bring to front" aria-label="Bring selected object to front" onclick={() => changeVisualOrder("front")}>Front</button>
+          <span>Reading</span>
+          <button type="button" aria-label="Move selected object earlier in reading order" onclick={() => changeReadingOrder(-1)}>Earlier</button>
+          <button type="button" aria-label="Move selected object later in reading order" onclick={() => changeReadingOrder(1)}>Later</button>
+        </div>
       {/if}
 
       <div class="zoom-pill">
@@ -3361,11 +3609,31 @@
     position: absolute;
     top: 0;
     right: calc(100% + 12px);
+    display: flex;
+    align-items: center;
+    gap: 4px;
     color: var(--quiet);
     font-size: 10px;
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
   }
+  .page-number button {
+    width: 26px;
+    height: 26px;
+    border: 1px solid rgb(255 255 255 / 10%);
+    border-radius: 6px;
+    background: var(--panel);
+    color: var(--muted);
+    cursor: pointer;
+  }
+  .page-number button:hover:not(:disabled),
+  .page-number button:focus-visible {
+    background: var(--panel-high);
+    color: var(--text);
+    outline: 2px solid var(--blueprint-light);
+    outline-offset: 1px;
+  }
+  .page-number button:disabled { opacity: 0.35; cursor: default; }
   .page-frame { position: relative; flex: none; }
   .page {
     position: relative;

@@ -15,6 +15,7 @@ const MAX_DIMENSION_PT: f64 = 100_000.0;
 pub struct ExportPage {
     pub width_pt: f64,
     pub height_pt: f64,
+    pub shared_style: Option<String>,
     /// The paper. Carried through rather than assumed white, so a page written on ruled paper
     /// exports as ruled paper — the template is part of the page, not a screen decoration.
     pub background: PageBackground,
@@ -195,9 +196,13 @@ fn compile_pdf(
     let mut overlay: Vec<(String, Vec<u8>)> = Vec::new();
     for (page_index, page) in pages.iter().enumerate() {
         for (index, block) in page.blocks.iter().enumerate() {
+            let source = match page.shared_style.as_deref() {
+                Some(style) if !style.is_empty() => format!("{style}\n{}", block.source),
+                _ => block.source.clone(),
+            };
             overlay.push((
                 format!("block-{page_index}-{index}.typ"),
-                block.source.clone().into_bytes(),
+                source.into_bytes(),
             ));
         }
         if let Some(paper) = template_svg(page) {
@@ -236,6 +241,15 @@ fn validate_page(root: &Path, page: &ExportPage) -> Result<(), ExportError> {
     if page.blocks.len() + page.strokes.len() + page.images.len() > MAX_PAGE_ITEMS {
         return Err(ExportError::InvalidPage("too many page items".to_owned()));
     }
+    if page
+        .shared_style
+        .as_ref()
+        .is_some_and(|style| style.len() > MAX_SOURCE_BYTES)
+    {
+        return Err(ExportError::InvalidPage(
+            "shared Typst style is too large".to_owned(),
+        ));
+    }
 
     match &page.background {
         PageBackground::Plain { color } => {
@@ -262,6 +276,15 @@ fn validate_page(root: &Path, page: &ExportPage) -> Result<(), ExportError> {
         if block.source.len() > MAX_SOURCE_BYTES {
             return Err(ExportError::InvalidPage(
                 "Typst block source is too large".to_owned(),
+            ));
+        }
+        if page
+            .shared_style
+            .as_ref()
+            .is_some_and(|style| style.len() + block.source.len() > MAX_SOURCE_BYTES)
+        {
+            return Err(ExportError::InvalidPage(
+                "combined Typst style and block source is too large".to_owned(),
             ));
         }
     }
@@ -565,6 +588,7 @@ mod tests {
         ExportPage {
             width_pt: 595.0,
             height_pt: 842.0,
+            shared_style: None,
             background: PageBackground::Plain {
                 color: "#ffffff".to_owned(),
             },
@@ -808,6 +832,7 @@ mod tests {
         let third = ExportPage {
             width_pt: 595.0,
             height_pt: 842.0,
+            shared_style: None,
             background: PageBackground::Plain {
                 color: "#ffffff".to_owned(),
             },
@@ -836,5 +861,31 @@ mod tests {
             export_pages(root.path(), "empty.pdf", &[], false),
             Err(ExportError::InvalidPage(_))
         ));
+    }
+
+    #[test]
+    fn exports_a_hundred_page_notebook() {
+        let root = tempfile::tempdir().unwrap();
+        let mut blank = page();
+        blank.blocks.clear();
+        blank.strokes.clear();
+        let pages = vec![blank; 100];
+
+        assert_eq!(
+            combined_typst_source(&pages).matches("#set page(").count(),
+            100
+        );
+        let result = export_pages(root.path(), "hundred-pages.pdf", &pages, false).unwrap();
+        assert!(fs::read(result.output_path).unwrap().starts_with(b"%PDF-"));
+    }
+
+    #[test]
+    fn shared_style_is_compiled_with_each_block() {
+        let root = tempfile::tempdir().unwrap();
+        let mut styled = page();
+        styled.shared_style = Some("#error(\"shared style reached export\")".to_owned());
+
+        let error = export_page(root.path(), "styled.pdf", &styled, false).unwrap_err();
+        assert!(matches!(error, ExportError::CompilerFailed(_)));
     }
 }

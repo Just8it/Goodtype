@@ -8,6 +8,8 @@ use crate::workspace::{AllowedRoots, ensure_allowed};
 #[serde(rename_all = "camelCase")]
 pub struct CompileBlockRequest {
     source: String,
+    #[serde(default)]
+    shared_style: Option<String>,
     width_pt: f64,
     generation: u64,
 }
@@ -41,10 +43,14 @@ pub async fn compile_typst(
     // The package policy is Rust's, read from settings — never supplied by the frontend.
     let allow_remote_packages = packages.allowed();
     tauri::async_runtime::spawn_blocking(move || {
+        let source = match request.shared_style {
+            Some(style) if !style.is_empty() => format!("{style}\n{}", request.source),
+            _ => request.source,
+        };
         compile_typst_block(
             &root,
             &CompileRequest {
-                source: request.source,
+                source,
                 width_pt: request.width_pt,
                 generation: request.generation,
                 allow_remote_packages,
@@ -85,6 +91,12 @@ pub struct CompletionItem {
     offset: usize,
 }
 
+#[derive(Serialize)]
+pub struct HoverResult {
+    value: String,
+    code: bool,
+}
+
 /// Complete at a caret inside a Typst block. Analysis uses the same root-scoped
 /// world as compilation, so results cannot reach outside the notebook or a resolved package.
 #[tauri::command]
@@ -114,6 +126,44 @@ pub async fn complete_typst(
                     .collect()
             })
             .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn hover_typst(
+    roots: tauri::State<'_, AllowedRoots>,
+    packages: tauri::State<'_, RemotePackages>,
+    root: String,
+    source: String,
+    cursor: usize,
+) -> Result<Option<HoverResult>, String> {
+    let root = ensure_allowed(&roots, &root)?;
+    let allow_remote_packages = packages.allowed();
+    tauri::async_runtime::spawn_blocking(move || {
+        goodtype_typst::hover(&root, source, cursor, allow_remote_packages)
+            .map(|result| {
+                result.map(|hover| HoverResult {
+                    value: hover.value,
+                    code: hover.code,
+                })
+            })
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn format_typst(
+    roots: tauri::State<'_, AllowedRoots>,
+    root: String,
+    source: String,
+) -> Result<String, String> {
+    let _root = ensure_allowed(&roots, &root)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        goodtype_typst::format_source(source).map_err(|error| error.to_string())
     })
     .await
     .map_err(|error| error.to_string())?

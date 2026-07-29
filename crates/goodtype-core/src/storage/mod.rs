@@ -30,8 +30,9 @@ pub use history::{
     redo_notebook, undo_notebook,
 };
 pub use pages::{
-    PagePosition, create_notebook, create_page, delete_page, duplicate_page, open_notebook,
-    open_page, reorder_pages, save_notebook,
+    NotebookStructureHistory, PagePosition, StructureHistoryResult, advance_structure,
+    create_notebook, create_page, delete_page, duplicate_page, observe_structure, open_notebook,
+    open_page, redo_structure, reorder_pages, save_notebook, undo_structure,
 };
 pub use recovery::{
     RecoveryCandidate, discard_recovery_candidate, list_recovery_candidates,

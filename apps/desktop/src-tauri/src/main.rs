@@ -40,6 +40,7 @@ fn main() {
             workspace::pick_notebook_root,
             workspace::open_recent_root,
             workspace::record_notebook_opened,
+            workspace::record_notebook_page,
             workspace::write_phase0_metrics,
             settings::load_app_settings,
             settings::save_app_settings,
@@ -57,6 +58,8 @@ fn main() {
             notebook::duplicate_page,
             notebook::delete_page,
             notebook::reorder_pages,
+            notebook::undo_page_structure,
+            notebook::redo_page_structure,
             notebook::search_notebook,
             notebook::list_recovery_candidates,
             notebook::restore_recovery_candidate,
@@ -64,6 +67,8 @@ fn main() {
             notebook::store_pasted_image,
             typst::compile_typst,
             typst::complete_typst,
+            typst::hover_typst,
+            typst::format_typst,
             export::export_notebook_pdf,
         ])
         .run(tauri::generate_context!())

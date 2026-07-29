@@ -33,8 +33,11 @@
     initialY,
     initialLayoutWidthPt,
     initialScale = 1,
+    zIndex = 0,
+    readingOrder = 0,
     compileResult = null,
     cached = null,
+    compileContext = "",
     root = null,
     selected = false,
     toPageDelta,
@@ -55,8 +58,12 @@
     initialY: number;
     initialLayoutWidthPt: number;
     initialScale?: number;
+    zIndex?: number;
+    readingOrder?: number;
     compileResult?: TypstCompileResult | null;
     cached?: CachedTypst | null;
+    /** Shared notebook source whose changes require a fresh preview. */
+    compileContext?: string;
     /** Notebook root, forwarded so the editor can ask Rust for completions. */
     root?: string | null;
     selected?: boolean;
@@ -95,6 +102,8 @@
   let preview = $state(emptyTypstPreview());
   let svgUrl = $state<string | null>(null);
   let compileTimer: ReturnType<typeof setTimeout> | undefined;
+  let mounted = $state(false);
+  let appliedCompileContext = $state("");
 
   // What the block actually occupies. Falls back to a line's worth while a first compile is
   // still in flight, so a brand-new block is clamped by something rather than by zero.
@@ -107,6 +116,8 @@
   const svgWidthPx = $derived((preview.widthPt ?? layoutWidthPt) + 2 * preview.padPt);
 
   onMount(() => {
+    mounted = true;
+    appliedCompileContext = compileContext;
     x = initialX;
     y = initialY;
     layoutWidthPt = initialLayoutWidthPt;
@@ -141,6 +152,12 @@
       svgUrl = nextUrl;
     }
     preview = nextPreview;
+  });
+
+  $effect(() => {
+    if (!mounted || compileContext === appliedCompileContext) return;
+    appliedCompileContext = compileContext;
+    requestCompile(0);
   });
 
   $effect(() => {
@@ -271,7 +288,8 @@
   style:top={`${y}px`}
   style:width={`${layoutWidthPt}px`}
   style:transform={`scale(${scale})`}
-  aria-label={`Typst block ${id}`}
+  style:z-index={editing ? 1000 : zIndex}
+  aria-label={`Typst block ${id}, reading position ${readingOrder + 1}`}
   onpointermove={moveGesture}
   onpointerup={finishGesture}
   onpointercancel={finishGesture}
@@ -296,6 +314,7 @@
   <button
     type="button"
     class="preview"
+    aria-pressed={selected}
     aria-label={`Select Typst block ${id}; double-click to edit`}
     title="Click to select; double-click to edit"
     onpointerdown={beginMove}

@@ -26,5 +26,8 @@ export type HistoryResult = {
   canRedo: boolean;
 };
 
+/** The same shape for manifest page-list history; kept distinct for command clarity. */
+export type StructureHistoryResult = HistoryResult;
+
 /** Which direction `runHistory` steps. The strings are the Rust command names. */
 export type HistoryCommand = "undo_notebook" | "redo_notebook";

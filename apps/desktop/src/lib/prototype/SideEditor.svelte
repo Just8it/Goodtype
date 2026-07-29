@@ -25,7 +25,7 @@
     onCreateBlock,
   }: {
     /** `edit` — the target is on this page; `away` — it is on another page; `none` — no target. */
-    mode?: "edit" | "away" | "none";
+    mode?: "edit" | "style" | "away" | "none";
     source?: string;
     blockLabel?: string;
     awayPageNumber?: number | null;
@@ -50,7 +50,11 @@
     return Math.round(Math.min(ceiling, Math.max(MIN_WIDTH, next)));
   }
 
-  let editor = $state<{ focus: () => void }>();
+  let editor = $state<{
+    focus: () => void;
+    showHelp: () => Promise<void>;
+    formatDocument: () => Promise<void>;
+  }>();
   /// Reported to assistive tech; the real ceiling is half the window (see `clampWidth`).
   let maxWidth = $state(MIN_WIDTH);
   $effect(() => {
@@ -99,7 +103,21 @@
   aria-label="Typst source"
 >
   <header>
-    <span class="title">{mode === "edit" || mode === "away" ? blockLabel : "Typst source"}</span>
+    <span class="title">{mode === "style" ? "Notebook style" : mode === "edit" || mode === "away" ? blockLabel : "Typst source"}</span>
+    {#if mode === "edit" || mode === "style"}
+      <button
+        type="button"
+        class="text-action"
+        title="Explain at caret (F1)"
+        onclick={() => void editor?.showHelp()}
+      >Help</button>
+      <button
+        type="button"
+        class="text-action"
+        title="Format document (Ctrl+Shift+F)"
+        onclick={() => void editor?.formatDocument()}
+      >Format</button>
+    {/if}
     <button
       type="button"
       class="icon"
@@ -123,14 +141,14 @@
     </button>
   </header>
 
-  {#if mode === "edit"}
+  {#if mode === "edit" || mode === "style"}
     <div class="body">
       <TypstEditor
         bind:this={editor}
         value={source}
         {root}
         maxLines={null}
-        ariaLabel={`Source for ${blockLabel}`}
+        ariaLabel={mode === "style" ? "Shared notebook Typst style" : `Source for ${blockLabel}`}
         onChange={(next) => onChange(next)}
         onExit={onClose}
       />
@@ -240,6 +258,25 @@
     color: #aeb5be;
     cursor: pointer;
     place-items: center;
+  }
+
+  .text-action {
+    height: 24px;
+    padding: 0 7px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: #aeb5be;
+    font-size: 11px;
+    cursor: pointer;
+  }
+
+  .text-action:hover,
+  .text-action:focus-visible {
+    background: rgb(255 255 255 / 8%);
+    color: #e9ebee;
+    outline: 2px solid #7fb0f7;
+    outline-offset: 1px;
   }
 
   .icon:hover {

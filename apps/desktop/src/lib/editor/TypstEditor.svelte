@@ -4,8 +4,9 @@
   import { Prec } from "@codemirror/state";
   import { basicSetup, EditorView } from "codemirror";
   import { onMount } from "svelte";
-  import { createTypstCompletionSource } from "./completion";
+  import { createTypstCompletionSource, toByteOffset } from "./completion";
   import { typstSnippetSource } from "./snippets";
+  import { formatTypst, hoverTypst, type TypstHover } from "../ipc/typst";
 
   let {
     value,
@@ -28,6 +29,8 @@
   let host: HTMLDivElement;
   let view: EditorView | undefined;
   let applyingExternalValue = false;
+  let help = $state<TypstHover | null>(null);
+  let helpStatus = $state("");
   const lineCount = $derived(value ? value.split("\n").length : 1);
   const hiddenLines = $derived(
     maxLines === null ? 0 : Math.max(0, lineCount - maxLines),
@@ -53,7 +56,25 @@
         EditorView.theme({}, { dark: true }),
         // Tab accepts the highlighted candidate; when no completion is open this returns false
         // so Tab falls through to snippet-field navigation and then to indentation.
-        Prec.highest(keymap.of([{ key: "Tab", run: acceptCompletion }])),
+        Prec.highest(
+          keymap.of([
+            { key: "Tab", run: acceptCompletion },
+            {
+              key: "F1",
+              run: () => {
+                void showHelp();
+                return true;
+              },
+            },
+            {
+              key: "Mod-Shift-f",
+              run: () => {
+                void formatDocument();
+                return true;
+              },
+            },
+          ]),
+        ),
         EditorView.contentAttributes.of({ "aria-label": ariaLabel }),
         EditorView.domEventHandlers({
           keydown(event) {
@@ -64,6 +85,8 @@
         }),
         EditorView.updateListener.of((update) => {
           if (update.docChanged && !applyingExternalValue) {
+            help = null;
+            helpStatus = "";
             onChange(update.state.doc.toString());
           }
         }),
@@ -84,6 +107,40 @@
     view?.focus();
   }
 
+  export async function showHelp() {
+    if (!view || !root) return;
+    const source = view.state.doc.toString();
+    helpStatus = "Looking up Typst help...";
+    try {
+      help = await hoverTypst(
+        root,
+        source,
+        toByteOffset(source, view.state.selection.main.head),
+      );
+      helpStatus = help ? "" : "No Typst help at the caret";
+    } catch {
+      help = null;
+      helpStatus = "Typst help is unavailable";
+    }
+  }
+
+  export async function formatDocument() {
+    if (!view || !root) return;
+    const source = view.state.doc.toString();
+    helpStatus = "Formatting Typst...";
+    try {
+      const formatted = await formatTypst(root, source);
+      if (formatted !== source) {
+        view.dispatch({
+          changes: { from: 0, to: view.state.doc.length, insert: formatted },
+        });
+      }
+      helpStatus = formatted === source ? "Typst source is already formatted" : "Formatted Typst source";
+    } catch {
+      helpStatus = "Typst formatting failed";
+    }
+  }
+
   $effect(() => {
     if (!view || view.state.doc.toString() === value) return;
     applyingExternalValue = true;
@@ -96,6 +153,11 @@
 
 <div class="editor" class:filled={maxLines === null} style:--max-lines={maxLines ?? 0}>
   <div class="host" bind:this={host}></div>
+  {#if help || helpStatus}
+    <div class:code={help?.code} class="help" role="status" aria-live="polite">
+      {help?.value ?? helpStatus}
+    </div>
+  {/if}
   {#if hiddenLines > 0}
     <!-- The box is capped on purpose, so say so rather than looking truncated. -->
     <p class="overflow-hint">
@@ -166,6 +228,19 @@
     background: #1b1e24;
     color: #aeb5be;
     font: 10px/1.4 Bahnschrift, "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  }
+
+  .help {
+    padding: 7px 9px;
+    border: 1px solid rgb(255 255 255 / 10%);
+    border-top: 0;
+    background: #1b1e24;
+    color: #aeb5be;
+    font: 11px/1.45 Bahnschrift, "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  }
+
+  .help.code {
+    font-family: "Cascadia Mono", Consolas, monospace;
   }
 
   .editor :global(.cm-gutters) {

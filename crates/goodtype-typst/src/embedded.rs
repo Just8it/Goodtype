@@ -16,11 +16,12 @@ use std::sync::{Mutex, OnceLock};
 
 use typst::diag::{FileError, FileResult, Severity, SourceDiagnostic};
 use typst::foundations::{Bytes, Datetime, Duration};
+use typst::syntax::Side;
 use typst::syntax::{FileId, RootedPath, Source, VirtualPath, VirtualRoot};
 use typst::text::{Font, FontBook};
 use typst::utils::LazyHash;
 use typst::{Library, LibraryExt, World};
-use typst_ide::{CompletionKind, IdeWorld};
+use typst_ide::{CompletionKind, IdeWorld, Tooltip};
 use typst_kit::downloader::{Downloader, SystemDownloader};
 use typst_kit::packages::{FsPackages, SystemPackages, UniversePackages};
 use typst_layout::PagedDocument;
@@ -194,6 +195,41 @@ pub(crate) fn complete(
             offset,
         })
         .collect()
+}
+
+pub(crate) fn hover(
+    root: &Path,
+    source_text: String,
+    cursor: usize,
+    allow_remote_packages: bool,
+) -> Option<crate::Hover> {
+    let world = BlockWorld::for_main(
+        "main.typ",
+        source_text,
+        root.to_path_buf(),
+        allow_remote_packages,
+    );
+    let source = world.source(world.main()).ok()?;
+    if cursor > source.text().len() || !source.text().is_char_boundary(cursor) {
+        return None;
+    }
+    typst_ide::tooltip(
+        &world,
+        Option::<&PagedDocument>::None,
+        &source,
+        cursor,
+        Side::After,
+    )
+    .map(|tooltip| match tooltip {
+        Tooltip::Text(value) => crate::Hover {
+            value: value.to_string(),
+            code: false,
+        },
+        Tooltip::Code(value) => crate::Hover {
+            value: value.to_string(),
+            code: true,
+        },
+    })
 }
 
 fn diagnostic_from_source(diagnostic: &SourceDiagnostic) -> Diagnostic {

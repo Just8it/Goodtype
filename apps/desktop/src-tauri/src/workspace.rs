@@ -10,7 +10,7 @@ use serde_json::Value;
 use tauri::Manager;
 use tauri_plugin_dialog::DialogExt;
 
-use crate::settings::{is_recent_notebook, record_recent};
+use crate::settings::{is_recent_notebook, record_recent, record_recent_page};
 
 /// Notebook roots the user has explicitly selected in this process, plus the default local
 /// notebook. Commands only operate on member roots, so the frontend can never point Rust at an
@@ -104,6 +104,18 @@ pub fn record_notebook_opened(
 ) -> Result<(), String> {
     let canonical = ensure_allowed(&roots, &root)?;
     record_recent(&app, &path_string(canonical)?, &title, &opened_at)
+}
+
+/// Store view state beside recents, never in the canonical notebook.
+#[tauri::command]
+pub fn record_notebook_page(
+    app: tauri::AppHandle,
+    roots: tauri::State<'_, AllowedRoots>,
+    root: String,
+    page_id: String,
+) -> Result<(), String> {
+    let canonical = ensure_allowed(&roots, &root)?;
+    record_recent_page(&app, &path_string(canonical)?, &page_id)
 }
 
 #[tauri::command]

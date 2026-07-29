@@ -27,6 +27,8 @@
     widthPt: number;
     heightPt: number;
     scale: number;
+    zIndex?: number;
+    readingOrder?: number;
     selected?: boolean;
     toPageDelta?: (screenDx: number, screenDy: number) => Position;
     /** The sheet this image has to stay reachable on. */
@@ -45,6 +47,8 @@
     widthPt,
     heightPt,
     scale,
+    zIndex = 0,
+    readingOrder = 0,
     selected = false,
     toPageDelta = (screenDx, screenDy) => ({ x: screenDx, y: screenDy }),
     pageWidthPt,
@@ -170,10 +174,13 @@
   style:width={`${widthPt}px`}
   style:height={`${heightPt}px`}
   style:transform={`scale(${previewScale})`}
+  style:z-index={zIndex}
+  aria-label={`${alt}, reading position ${readingOrder + 1}`}
 >
   <button
     class="move-surface"
     type="button"
+    aria-pressed={selected}
     aria-label={`Move ${alt}`}
     onpointerdown={beginMove}
     onpointermove={update}

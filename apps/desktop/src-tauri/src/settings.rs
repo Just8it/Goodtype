@@ -275,6 +275,8 @@ pub struct RecentNotebook {
     pub title: String,
     pub pinned: bool,
     pub last_opened: String,
+    #[serde(default)]
+    pub last_page_id: Option<String>,
 }
 
 fn config_file(app: &tauri::AppHandle, name: &str) -> Result<PathBuf, String> {
@@ -392,6 +394,11 @@ pub fn record_recent(
         .iter()
         .find(|entry| entry.root == root)
         .is_some_and(|entry| entry.pinned);
+    let last_page_id = recents
+        .entries
+        .iter()
+        .find(|entry| entry.root == root)
+        .and_then(|entry| entry.last_page_id.clone());
     recents.entries.retain(|entry| entry.root != root);
     recents.entries.insert(
         0,
@@ -400,6 +407,7 @@ pub fn record_recent(
             title: title.to_owned(),
             pinned,
             last_opened: opened_at.to_owned(),
+            last_page_id,
         },
     );
     while recents.entries.len() > MAX_RECENTS {
@@ -409,6 +417,20 @@ pub fn record_recent(
         };
         recents.entries.remove(index);
     }
+    write_config(app, "recents.json", &recents)
+}
+
+pub fn record_recent_page(app: &tauri::AppHandle, root: &str, page_id: &str) -> Result<(), String> {
+    if page_id.is_empty() || page_id.len() > 128 {
+        return Err("page id must be present and bounded".to_owned());
+    }
+    let mut recents = read_config::<RecentNotebooks>(app, "recents.json")?;
+    let entry = recents
+        .entries
+        .iter_mut()
+        .find(|entry| entry.root == root)
+        .ok_or_else(|| "notebook is not in recents".to_owned())?;
+    entry.last_page_id = Some(page_id.to_owned());
     write_config(app, "recents.json", &recents)
 }
 

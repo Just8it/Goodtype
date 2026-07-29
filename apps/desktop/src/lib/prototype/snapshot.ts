@@ -19,6 +19,8 @@ export type EditableTypst = {
   scale: number;
   measuredWidthPt: number;
   measuredHeightPt: number;
+  zIndex: number;
+  readingOrder: number;
 };
 
 export type EditableImage = {
@@ -30,6 +32,8 @@ export type EditableImage = {
   widthPt: number;
   heightPt: number;
   scale: number;
+  zIndex: number;
+  readingOrder: number;
 };
 
 export type ManagedMixedGroup = {
@@ -51,6 +55,7 @@ type Projection = {
   strokes: Stroke[];
   typst: EditableTypst[];
   images: EditableImage[];
+  sharedStyle: { path: string; source: string } | null;
   mixedGroup: ManagedMixedGroup | null;
   groupedStrokeIds: string[];
   now: string;
@@ -99,15 +104,15 @@ export function projectSnapshot(input: Projection): NotebookSnapshot {
     objects.push(object);
   }
 
-  for (const [index, block] of input.typst.entries()) {
+  for (const block of input.typst) {
     if (emitted.has(block.id)) continue;
     emitted.add(block.id);
-    objects.push(newTypst(block, input.mixedGroup, input.now, objects.length + index));
+    objects.push(newTypst(block, input.mixedGroup, input.now));
   }
-  for (const [index, image] of input.images.entries()) {
+  for (const image of input.images) {
     if (emitted.has(image.id)) continue;
     emitted.add(image.id);
-    objects.push(newImage(image, input.now, objects.length + index));
+    objects.push(newImage(image, input.now));
   }
 
   if (input.mixedGroup?.active) {
@@ -117,7 +122,13 @@ export function projectSnapshot(input: Projection): NotebookSnapshot {
       ...(previousInk?.type === "ink_group"
         ? previousInk
         : {
-            ...newFields(input.mixedGroup.inkGroupId, objects.length, input.mixedGroup.groupId, input.now),
+            ...newFields(
+              input.mixedGroup.inkGroupId,
+              objects.length,
+              objects.length + 1,
+              input.mixedGroup.groupId,
+              input.now,
+            ),
             type: "ink_group" as const,
             inkLayerId: input.inkLayerId,
             strokeIds: [],
@@ -131,7 +142,13 @@ export function projectSnapshot(input: Projection): NotebookSnapshot {
       ...(previousGroup?.type === "group"
         ? previousGroup
         : {
-            ...newFields(input.mixedGroup.groupId, objects.length, null, input.now),
+            ...newFields(
+              input.mixedGroup.groupId,
+              objects.length,
+              objects.length + 1,
+              null,
+              input.now,
+            ),
             type: "group" as const,
             childIds: [],
           }),
@@ -161,6 +178,12 @@ export function projectSnapshot(input: Projection): NotebookSnapshot {
       readingOrder.push(object.id);
     }
   }
+  const objectById = new Map(objects.map((object) => [object.id, object]));
+  readingOrder.sort(
+    (left, right) =>
+      (objectById.get(left)?.readingOrder ?? 0) -
+      (objectById.get(right)?.readingOrder ?? 0),
+  );
   const orderById = new Map(readingOrder.map((id, index) => [id, index]));
   const orderedObjects = objects.map((object) => {
     const order = orderById.get(object.id);
@@ -188,12 +211,12 @@ export function projectSnapshot(input: Projection): NotebookSnapshot {
     input.strokes,
   );
   const editableBlocks = new Map(
-    input.typst.map((block) => [
+    [
+      ...input.typst.map((block) => ({ path: block.path, source: block.source })),
+      ...(input.sharedStyle ? [input.sharedStyle] : []),
+    ].map((block) => [
       block.path,
-      {
-        path: block.path,
-        bytes: Array.from(new TextEncoder().encode(block.source)),
-      },
+      { path: block.path, bytes: Array.from(new TextEncoder().encode(block.source)) },
     ]),
   );
   const blockPaths = new Set([
@@ -235,6 +258,8 @@ function patchTypst(
     x: block.x,
     y: block.y,
     scale: block.scale,
+    zIndex: block.zIndex,
+    readingOrder: block.readingOrder,
     groupId,
     modifiedAt: now,
     sourcePath: block.path,
@@ -254,6 +279,8 @@ function patchImage(
     x: image.x,
     y: image.y,
     scale: image.scale,
+    zIndex: image.zIndex,
+    readingOrder: image.readingOrder,
     modifiedAt: now,
     sourcePath: image.path,
     widthPt: image.widthPt,
@@ -266,12 +293,12 @@ function newTypst(
   block: EditableTypst,
   mixedGroup: ManagedMixedGroup | null,
   now: string,
-  order: number,
 ): Extract<PageObject, { type: "typst" }> {
   return {
     ...newFields(
       block.id,
-      order,
+      block.readingOrder,
+      block.zIndex,
       mixedGroup?.active && mixedGroup.typstId === block.id ? mixedGroup.groupId : null,
       now,
     ),
@@ -289,10 +316,9 @@ function newTypst(
 function newImage(
   image: EditableImage,
   now: string,
-  order: number,
 ): Extract<PageObject, { type: "image" }> {
   return {
-    ...newFields(image.id, order, null, now),
+    ...newFields(image.id, image.readingOrder, image.zIndex, null, now),
     type: "image",
     x: image.x,
     y: image.y,
@@ -304,14 +330,20 @@ function newImage(
   };
 }
 
-function newFields(id: string, readingOrder: number, groupId: string | null, now: string) {
+function newFields(
+  id: string,
+  readingOrder: number,
+  zIndex: number,
+  groupId: string | null,
+  now: string,
+) {
   return {
     id,
     x: 0,
     y: 0,
     rotation: 0,
     scale: 1,
-    zIndex: readingOrder + 1,
+    zIndex,
     readingOrder,
     groupId,
     createdAt: now,

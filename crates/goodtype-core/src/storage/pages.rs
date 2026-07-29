@@ -17,8 +17,8 @@ use crate::{
 };
 
 use super::{
-    MAX_IMAGE_BYTES, MAX_INK_BYTES, MAX_JSON_BYTES, NotebookSnapshot, StorageError, StoredFile,
-    files::*, invalid, invalid_error, paths::*, recovery::*, validate::*, write::*,
+    HISTORY_LIMIT, MAX_IMAGE_BYTES, MAX_INK_BYTES, MAX_JSON_BYTES, NotebookSnapshot, StorageError,
+    StoredFile, files::*, invalid, invalid_error, paths::*, recovery::*, validate::*, write::*,
 };
 
 pub fn create_notebook(
@@ -128,12 +128,7 @@ struct ManifestGuard {
 }
 
 impl ManifestGuard {
-    /// `modified_at` is checked here because every operation that reaches the manifest stamps it,
-    /// and every one of them used to validate it separately.
-    fn open(selected_root: &Path, modified_at: &str) -> Result<Self, StorageError> {
-        if modified_at.is_empty() || modified_at.len() > 64 {
-            return invalid("page timestamp must be present and bounded");
-        }
+    fn read(selected_root: &Path) -> Result<Self, StorageError> {
         let root = canonical_root(selected_root)?;
         recover_interrupted_transaction(&root)?;
         let bytes = read_limited(resolve_existing(&root, layout::MANIFEST)?, MAX_JSON_BYTES)?;
@@ -144,6 +139,15 @@ impl ManifestGuard {
             bytes,
             manifest,
         })
+    }
+
+    /// `modified_at` is checked here because every operation that reaches the manifest stamps it,
+    /// and every one of them used to validate it separately.
+    fn open(selected_root: &Path, modified_at: &str) -> Result<Self, StorageError> {
+        if modified_at.is_empty() || modified_at.len() > 64 {
+            return invalid("page timestamp must be present and bounded");
+        }
+        Self::read(selected_root)
     }
 
     /// As [`Self::open`], and additionally resolve every page file the manifest names. Operations
@@ -516,6 +520,164 @@ pub fn reorder_pages(
     open_page(&root, active_page_id)
 }
 
+#[derive(Clone, Debug)]
+struct StructureSnapshot {
+    manifest: NotebookManifest,
+    active_page_id: String,
+}
+
+/// Session-only history for changes to the manifest page list.
+///
+/// Page files are deliberately absent: create and duplicate write fresh immutable identities,
+/// while delete only removes a manifest reference. Restoring the manifest is therefore enough
+/// to undo every page-list operation without copying page payloads into memory.
+#[derive(Debug, Default)]
+pub struct NotebookStructureHistory {
+    undo: Vec<StructureSnapshot>,
+    redo: Vec<StructureSnapshot>,
+    current: Option<StructureSnapshot>,
+    current_manifest_bytes: Option<Vec<u8>>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StructureHistoryResult {
+    pub snapshot: NotebookSnapshot,
+    pub can_undo: bool,
+    pub can_redo: bool,
+}
+
+/// Observe the page list before a structure operation. An outside manifest change invalidates
+/// the session history rather than becoming something undo may overwrite.
+pub fn observe_structure(
+    selected_root: &Path,
+    active_page_id: &str,
+    history: &mut NotebookStructureHistory,
+) -> Result<(), StorageError> {
+    let guard = ManifestGuard::read(selected_root)?;
+    page_reference(&guard.manifest, active_page_id)?;
+    if history
+        .current_manifest_bytes
+        .as_ref()
+        .is_some_and(|bytes| bytes != &guard.bytes)
+    {
+        history.undo.clear();
+        history.redo.clear();
+    }
+    history.current = Some(StructureSnapshot {
+        manifest: guard.manifest,
+        active_page_id: active_page_id.to_owned(),
+    });
+    history.current_manifest_bytes = Some(guard.bytes);
+    Ok(())
+}
+
+/// Record the manifest produced by a successful page-list operation.
+pub fn advance_structure(
+    selected_root: &Path,
+    snapshot: &NotebookSnapshot,
+    history: &mut NotebookStructureHistory,
+) -> Result<StructureHistoryResult, StorageError> {
+    let previous = history
+        .current
+        .take()
+        .ok_or_else(|| invalid_error("page structure must be observed before changing it"))?;
+    push_structure(&mut history.undo, previous);
+    history.redo.clear();
+    let guard = ManifestGuard::read(selected_root)?;
+    history.current = Some(StructureSnapshot {
+        manifest: guard.manifest,
+        active_page_id: snapshot.page.id.clone(),
+    });
+    history.current_manifest_bytes = Some(guard.bytes);
+    Ok(structure_result(snapshot.clone(), history))
+}
+
+pub fn undo_structure(
+    selected_root: &Path,
+    modified_at: &str,
+    history: &mut NotebookStructureHistory,
+) -> Result<StructureHistoryResult, StorageError> {
+    restore_structure(selected_root, modified_at, history, true)
+}
+
+pub fn redo_structure(
+    selected_root: &Path,
+    modified_at: &str,
+    history: &mut NotebookStructureHistory,
+) -> Result<StructureHistoryResult, StorageError> {
+    restore_structure(selected_root, modified_at, history, false)
+}
+
+fn restore_structure(
+    selected_root: &Path,
+    modified_at: &str,
+    history: &mut NotebookStructureHistory,
+    undo: bool,
+) -> Result<StructureHistoryResult, StorageError> {
+    let mut guard = ManifestGuard::open(selected_root, modified_at)?;
+    if history.current_manifest_bytes.as_ref() != Some(&guard.bytes) {
+        history.undo.clear();
+        history.redo.clear();
+        return Err(invalid_error(
+            "external change detected; reopen the notebook before changing page history",
+        ));
+    }
+    let source = if undo {
+        &mut history.undo
+    } else {
+        &mut history.redo
+    };
+    let mut target = source
+        .pop()
+        .ok_or_else(|| invalid_error("nothing to undo or redo in page structure"))?;
+    let current = history
+        .current
+        .take()
+        .ok_or_else(|| invalid_error("page structure must be observed before undo or redo"))?;
+    target.manifest.modified_at = modified_at.to_owned();
+    validate_manifest_files(guard.root(), &target.manifest)?;
+    guard.manifest = target.manifest.clone();
+    let root = guard.root().to_path_buf();
+    guard.commit(if undo {
+        "undoing a page-list change"
+    } else {
+        "redoing a page-list change"
+    })?;
+    let snapshot = open_page(&root, &target.active_page_id)?;
+
+    if undo {
+        push_structure(&mut history.redo, current);
+    } else {
+        push_structure(&mut history.undo, current);
+    }
+    let observed = ManifestGuard::read(&root)?;
+    history.current = Some(StructureSnapshot {
+        manifest: observed.manifest,
+        active_page_id: target.active_page_id,
+    });
+    history.current_manifest_bytes = Some(observed.bytes);
+    Ok(structure_result(snapshot, history))
+}
+
+fn push_structure(stack: &mut Vec<StructureSnapshot>, snapshot: StructureSnapshot) {
+    if stack.len() == HISTORY_LIMIT {
+        stack.remove(0);
+    }
+    stack.push(snapshot);
+}
+
+fn structure_result(
+    snapshot: NotebookSnapshot,
+    history: &NotebookStructureHistory,
+) -> StructureHistoryResult {
+    StructureHistoryResult {
+        snapshot,
+        can_undo: !history.undo.is_empty(),
+        can_redo: !history.redo.is_empty(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::{
@@ -612,6 +774,34 @@ mod tests {
         assert_eq!(
             hits.iter().map(|hit| hit.page_number).collect::<Vec<_>>(),
             [1, 3]
+        );
+    }
+
+    #[test]
+    fn opens_edges_of_a_hundred_page_notebook() {
+        let temporary = tempfile::tempdir().unwrap();
+        let notebook_root = temporary.path().join("notebook");
+        create_notebook(&notebook_root, &snapshot()).unwrap();
+        for minute in 1..100 {
+            create_page(
+                &notebook_root,
+                &format!("2026-07-29T10:{:02}:00Z", minute % 60),
+                &PagePosition::Last,
+                None,
+                None,
+            )
+            .unwrap();
+        }
+
+        let opened = open_notebook(&notebook_root).unwrap();
+        assert_eq!(opened.manifest.pages.len(), 100);
+        assert_eq!(
+            open_page(&notebook_root, "page-050").unwrap().page.id,
+            "page-050"
+        );
+        assert_eq!(
+            open_page(&notebook_root, "page-100").unwrap().page.id,
+            "page-100"
         );
     }
 
@@ -788,5 +978,37 @@ mod tests {
         delete_page(&notebook_root, "page-002", "2026-07-23T19:05:00Z").unwrap();
         let error = delete_page(&notebook_root, "page-003", "2026-07-23T19:06:00Z").unwrap_err();
         assert!(matches!(error, StorageError::InvalidNotebook(_)));
+    }
+
+    #[test]
+    fn page_structure_changes_undo_and_redo_without_deleting_page_files() {
+        let temporary = tempfile::tempdir().unwrap();
+        let notebook_root = temporary.path().join("notebook");
+        create_notebook(&notebook_root, &snapshot()).unwrap();
+        let mut history = NotebookStructureHistory::default();
+
+        observe_structure(&notebook_root, "page-001", &mut history).unwrap();
+        let added = create_page(
+            &notebook_root,
+            "2026-07-29T10:00:00Z",
+            &PagePosition::Last,
+            None,
+            None,
+        )
+        .unwrap();
+        let added = advance_structure(&notebook_root, &added, &mut history).unwrap();
+        assert_eq!(added.snapshot.manifest.pages.len(), 2);
+        assert!(added.can_undo && !added.can_redo);
+
+        let undone = undo_structure(&notebook_root, "2026-07-29T10:01:00Z", &mut history).unwrap();
+        assert_eq!(undone.snapshot.page.id, "page-001");
+        assert_eq!(undone.snapshot.manifest.pages.len(), 1);
+        assert!(notebook_root.join("pages/page-002.json").is_file());
+        assert!(!undone.can_undo && undone.can_redo);
+
+        let redone = redo_structure(&notebook_root, "2026-07-29T10:02:00Z", &mut history).unwrap();
+        assert_eq!(redone.snapshot.page.id, "page-002");
+        assert_eq!(redone.snapshot.manifest.pages.len(), 2);
+        assert!(redone.can_undo && !redone.can_redo);
     }
 }

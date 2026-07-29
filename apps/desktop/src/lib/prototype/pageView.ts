@@ -13,6 +13,8 @@ export type BlockView = {
   y: number;
   layoutWidthPt: number;
   scale: number;
+  zIndex: number;
+  readingOrder: number;
 };
 
 export type ImageView = {
@@ -25,6 +27,8 @@ export type ImageView = {
   widthPt: number;
   heightPt: number;
   scale: number;
+  zIndex: number;
+  readingOrder: number;
 };
 
 type StoredFile = { path: string; bytes: number[] };
@@ -58,6 +62,8 @@ export function blockViewsFromSnapshot(snapshot: SnapshotLike): BlockView[] {
       y: object.y,
       layoutWidthPt: object.layoutWidthPt,
       scale: object.scale,
+      zIndex: object.zIndex,
+      readingOrder: object.readingOrder,
     }));
 }
 
@@ -87,6 +93,8 @@ export function imageViewsFromSnapshot(
           widthPt: object.widthPt,
           heightPt: object.heightPt,
           scale: object.scale,
+          zIndex: object.zIndex,
+          readingOrder: object.readingOrder,
         },
       ];
     });

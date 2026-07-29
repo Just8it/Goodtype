@@ -67,6 +67,12 @@ pub struct Completion {
     pub offset: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Hover {
+    pub value: String,
+    pub code: bool,
+}
+
 /// Complete at `cursor` (a byte offset) inside a block's source.
 ///
 /// `explicit` marks a completion the user asked for (Ctrl+Space) rather than one triggered by
@@ -78,6 +84,42 @@ pub fn complete(
     explicit: bool,
     allow_remote_packages: bool,
 ) -> Result<Vec<Completion>, CompileError> {
+    let root = checked_root_and_source(notebook_root, &source)?;
+    Ok(embedded::complete(
+        &root,
+        source,
+        cursor,
+        explicit,
+        allow_remote_packages,
+    ))
+}
+
+pub fn hover(
+    notebook_root: &Path,
+    source: String,
+    cursor: usize,
+    allow_remote_packages: bool,
+) -> Result<Option<Hover>, CompileError> {
+    let root = checked_root_and_source(notebook_root, &source)?;
+    Ok(embedded::hover(
+        &root,
+        source,
+        cursor,
+        allow_remote_packages,
+    ))
+}
+
+pub fn format_source(source: String) -> Result<String, CompileError> {
+    if source.len() > MAX_SOURCE_BYTES {
+        return Err(CompileError::SourceTooLarge(source.len()));
+    }
+    typstyle_core::Typstyle::default()
+        .format_text(source)
+        .render()
+        .map_err(|error| CompileError::Format(error.to_string()))
+}
+
+fn checked_root_and_source(notebook_root: &Path, source: &str) -> Result<PathBuf, CompileError> {
     let root = notebook_root
         .canonicalize()
         .map_err(|_| CompileError::InvalidRoot(notebook_root.to_path_buf()))?;
@@ -87,13 +129,7 @@ pub fn complete(
     if source.len() > MAX_SOURCE_BYTES {
         return Err(CompileError::SourceTooLarge(source.len()));
     }
-    Ok(embedded::complete(
-        &root,
-        source,
-        cursor,
-        explicit,
-        allow_remote_packages,
-    ))
+    Ok(root)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -114,6 +150,7 @@ pub enum CompileError {
     InvalidWidth(f64),
     SourceTooLarge(usize),
     Io(std::io::Error),
+    Format(String),
 }
 
 impl std::fmt::Display for CompileError {
@@ -134,6 +171,7 @@ impl std::fmt::Display for CompileError {
                 )
             }
             Self::Io(error) => error.fmt(formatter),
+            Self::Format(error) => write!(formatter, "Typst formatting failed: {error}"),
         }
     }
 }
@@ -371,6 +409,19 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn explains_and_formats_typst_in_process() {
+        let root = tempfile::tempdir().unwrap();
+        let source = "#box".to_owned();
+        let help = hover(root.path(), source, 2, false)
+            .unwrap()
+            .expect("box should have built-in documentation");
+        assert!(help.value.contains("container"));
+
+        let formatted = format_source("#let x=(1,2,3)\n#x".to_owned()).unwrap();
+        assert_eq!(formatted, "#let x = (1, 2, 3)\n#x\n");
     }
 
     #[test]
