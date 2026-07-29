@@ -99,6 +99,7 @@
     canRemoveWidth,
     editWidth as editRowWidth,
     removeWidth as removeRowWidth,
+    WIDTH_BOUNDS_MM,
   } from "./widths";
   import ConflictDialog from "../workspace/ConflictDialog.svelte";
   import RecoveryDialog from "../workspace/RecoveryDialog.svelte";
@@ -478,6 +479,8 @@
   }
   let settingsOpen = $state(false);
   let settingsSaveTimer: ReturnType<typeof setTimeout> | undefined;
+  let settingsSaveQueue: Promise<void> = Promise.resolve();
+  let settingsVersion = 0;
   let searchOpen = $state(false);
   let conflictDetail = $state<string | null>(null);
   let recoveryCandidates = $state<RecoveryCandidate[]>([]);
@@ -1126,11 +1129,18 @@
   function changeSettings(next: AppSettings) {
     settings = next;
     paletteDock = next.paletteDock;
+    const version = ++settingsVersion;
     if (settingsSaveTimer) clearTimeout(settingsSaveTimer);
     settingsSaveTimer = setTimeout(() => {
-      void saveSettings(tauriAvailable, settings)
-        .then((sanitized) => (settings = sanitized))
-        .catch((error) => (status = `Settings were not saved: ${message(error)}`));
+      const pending = settings;
+      settingsSaveQueue = settingsSaveQueue.then(async () => {
+        try {
+          const sanitized = await saveSettings(tauriAvailable, pending);
+          if (version === settingsVersion) settings = sanitized;
+        } catch (error) {
+          status = `Settings were not saved: ${message(error)}`;
+        }
+      });
     }, 400);
   }
 
@@ -1793,8 +1803,22 @@
   }
 
   function putWidths(widths: number[], select: number) {
-    changeSettings({ ...settings, [widthKey()]: widths } as AppSettings);
-    setActiveWidth(select);
+    const key = widthKey();
+    if (tool === "highlighter") {
+      changeSettings({
+        ...settings,
+        [key]: widths,
+        highlighter: { ...settings.highlighter, widthPt: select },
+      } as AppSettings);
+    } else {
+      changeSettings({
+        ...settings,
+        [key]: widths,
+        penPresets: settings.penPresets.map((preset, index) =>
+          index === penPreset - 1 ? { ...preset, widthPt: select } : preset,
+        ),
+      } as AppSettings);
+    }
   }
 
   /**
@@ -3204,6 +3228,8 @@
                     ? activeWidth
                     : activeWidthChips[widthPanel.index]}
                   kind={tool === "highlighter" ? "highlighter" : "pen"}
+                  minimumMm={WIDTH_BOUNDS_MM[tool === "highlighter" ? "highlighter" : "pen"].minimum}
+                  maximumMm={WIDTH_BOUNDS_MM[tool === "highlighter" ? "highlighter" : "pen"].maximum}
                   canRemove={widthPanel.index !== -1 && canRemoveWidth(activeWidthChips)}
                   onCommit={(next) => {
                     if (widthPanel?.index === -1) addWidth(next);

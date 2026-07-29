@@ -5,11 +5,19 @@ import {
   editWidth,
   normaliseWidths,
   removeWidth,
+  WIDTH_BOUNDS_MM,
 } from "./widths";
 
 const MAX = 4;
 
 describe("the stroke width row", () => {
+  it("only offers sizes the Rust settings store accepts", () => {
+    expect(WIDTH_BOUNDS_MM.pen.minimum * 2.835).toBeGreaterThanOrEqual(0.2);
+    expect(WIDTH_BOUNDS_MM.pen.maximum * 2.835).toBeLessThanOrEqual(12);
+    expect(WIDTH_BOUNDS_MM.highlighter.minimum * 2.835).toBeGreaterThanOrEqual(1);
+    expect(WIDTH_BOUNDS_MM.highlighter.maximum * 2.835).toBeLessThanOrEqual(20);
+  });
+
   it("never gives up its last width", () => {
     expect(canRemoveWidth([1.6])).toBe(false);
     expect(removeWidth([1.6], 0)).toEqual([1.6]);

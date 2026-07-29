@@ -6,6 +6,12 @@
  * enforced in three places inside the component and true only by agreement between them.
  */
 
+/** Millimetre limits that stay inside Rust's persisted point ranges after UI rounding. */
+export const WIDTH_BOUNDS_MM = {
+  pen: { minimum: 0.1, maximum: 4 },
+  highlighter: { minimum: 0.4, maximum: 7 },
+} as const;
+
 /** A width the row will keep, rounded to the precision a nib is specified at. */
 function tidy(widthPt: number): number {
   return Math.round(widthPt * 1000) / 1000;
