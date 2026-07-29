@@ -183,6 +183,7 @@
   const BLOCK_PATH = "blocks/equation.typ";
   const INK_LAYER_ID = "ink-layer-001";
   const TYPST_SAVE_DEBOUNCE_MS = 250;
+  const collectMetrics = import.meta.env.DEV;
   const tauriAvailable =
     typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
@@ -523,14 +524,15 @@
     inkCommitTimer.cancel();
     if (typstCommitTimer) clearTimeout(typstCommitTimer);
     if (focusTimer) clearTimeout(focusTimer);
+    if (metricsTimer) clearTimeout(metricsTimer);
     removeCloseListener?.();
     window.removeEventListener("keydown", historyShortcut);
     revokeImageUrl();
   });
 
   $effect(() => {
+    if (!collectMetrics || !tauriAvailable || !root || !notebookChosen) return;
     const metrics = metricsPayload();
-    if (!tauriAvailable || !root || !notebookChosen) return;
     // Metrics are dev telemetry; batching writes keeps them off the per-stroke path.
     if (metricsTimer) clearTimeout(metricsTimer);
     metricsTimer = setTimeout(() => {
@@ -1290,7 +1292,9 @@
           { kind: "action", id: "style", label: "Edit shared Typst style", onSelect: openSharedStyle },
           { kind: "action", id: "settings", label: "Settings", hint: "Ctrl ,", onSelect: () => (settingsOpen = true) },
           { kind: "action", id: "save", label: "Confirm saved", onSelect: () => void persist() },
-          { kind: "action", id: "metrics", label: "Timing evidence", onSelect: () => (metricsOpen = true) },
+          ...(collectMetrics
+            ? [{ kind: "action" as const, id: "metrics", label: "Timing evidence", onSelect: () => (metricsOpen = true) }]
+            : []),
           { kind: "action", id: "close", label: "Close notebook", onSelect: closePage },
         ],
       },
@@ -1489,7 +1493,7 @@
         padPt: 0,
         diagnostics: [],
       };
-      compileMs = performance.now() - startedAt;
+      if (collectMetrics) compileMs = performance.now() - startedAt;
     } else {
       const cacheSource = `${request.sharedStyle ?? ""}\n${request.source}`;
       const cached = getCachedTypst(cacheSource, request.widthPt);
@@ -1512,7 +1516,7 @@
           };
         }
       }
-      compileMs = performance.now() - startedAt;
+      if (collectMetrics) compileMs = performance.now() - startedAt;
     }
     typstBlocks = typstBlocks.map((block) =>
       block.id === id ? { ...block, result } : block,
@@ -2609,7 +2613,7 @@
     flushTypstCommit();
     await transactionQueue;
     await Promise.all([...neighborCommitters.values()].map((committer) => committer.flush()));
-    saveMs = performance.now() - startedAt;
+    if (collectMetrics) saveMs = performance.now() - startedAt;
     if (transactionFailed) return false;
     status = `All changes saved at revision ${revision}`;
     return true;
@@ -2623,7 +2627,7 @@
       // Rust builds the ordered multi-page PDF from the canonical files, so the export
       // matches what is saved, not what this view holds.
       const path = await exportNotebookPdf(root, "notebook.pdf");
-      exportMs = performance.now() - startedAt;
+      if (collectMetrics) exportMs = performance.now() - startedAt;
       status = `Exported PDF to ${path}`;
     } catch (error) {
       status = `PDF export failed: ${message(error)}`;
@@ -2658,7 +2662,7 @@
         canRedo = false;
       }
       transactionFailed = false;
-      reopenMs = performance.now() - startedAt;
+      if (collectMetrics) reopenMs = performance.now() - startedAt;
       pageOpen = true;
       status = `Reopened saved revision ${revision}`;
     } catch (error) {
@@ -2708,7 +2712,7 @@
       const after = frame.getBoundingClientRect();
       viewport.scrollLeft += after.left + pagePoint.x * zoom - clientX;
       viewport.scrollTop += after.top + pagePoint.y * zoom - clientY;
-      zoomFrameMs = performance.now() - startedAt;
+      if (collectMetrics) zoomFrameMs = performance.now() - startedAt;
     });
   }
 
@@ -2774,6 +2778,7 @@
   }
 
   function recordStrokeMetrics(metrics: StrokePerformance) {
+    if (!collectMetrics) return;
     strokeMetrics = [...strokeMetrics.slice(-19), metrics];
   }
 
@@ -3075,9 +3080,11 @@
                     onSelectionChange={(next) => {
                       if (active) updateInkSelection(next);
                     }}
-                    onStrokeMetrics={(metrics) => {
-                      if (active) recordStrokeMetrics(metrics);
-                    }}
+                    onStrokeMetrics={collectMetrics
+                      ? (metrics) => {
+                          if (active) recordStrokeMetrics(metrics);
+                        }
+                      : undefined}
                   />
                 {:else}
                   <span class="page-loading">Loading page…</span>
@@ -3431,7 +3438,7 @@
   {/if}
   {/if}
 
-  {#if metricsOpen}
+  {#if collectMetrics && metricsOpen}
     <div class="panel-scrim" role="presentation">
       <aside class="diagnostics-panel" aria-label="Timing evidence">
         <div class="panel-heading">
@@ -3444,7 +3451,7 @@
           <dt>Active feedback median / p95 / worst</dt><dd>{timingSummary("activeFeedbackMs")}</dd>
           <dt>Maximum sample gap median / p95 / worst</dt><dd>{timingSummary("maxSampleGapMs")}</dd>
           <dt>Stroke commit median / p95 / worst</dt><dd>{timingSummary("commitMs")}</dd>
-          <dt>Latest Typst subprocess</dt><dd>{milliseconds(compileMs)} + {TYPST_IDLE_DEBOUNCE_MS} ms debounce</dd>
+          <dt>Latest Typst compile</dt><dd>{milliseconds(compileMs)} + {TYPST_IDLE_DEBOUNCE_MS} ms debounce</dd>
           <dt>Latest zoom frame</dt><dd>{milliseconds(zoomFrameMs)}</dd>
           <dt>Save / reopen / export</dt><dd>{milliseconds(saveMs)} / {milliseconds(reopenMs)} / {milliseconds(exportMs)}</dd>
         </dl>

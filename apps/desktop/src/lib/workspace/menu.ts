@@ -5,10 +5,10 @@
 // every future page-level feature has to land in — templates, bookmarks, rotation, outline — and
 // each of those should cost an entry, not a rewrite.
 //
-// The three kinds cover what the menu needs to express. Resist adding a fourth without a reason:
-// a menu that can render anything stops being a menu.
+// The two kinds cover what the menu currently needs to express. Resist adding another without a
+// real entry that needs it: a menu that can render anything stops being a menu.
 
-export type MenuEntry = MenuAction | MenuToggle | MenuNumber;
+export type MenuEntry = MenuAction | MenuNumber;
 
 type Shared = {
   /** Stable identity for the keyed each block. */
@@ -25,13 +25,6 @@ export type MenuAction = Shared & {
   /** Red styling. Reserve it for entries that destroy work the writer cannot retype. */
   destructive?: boolean;
   onSelect: () => void;
-};
-
-/** A setting that flips in place. The menu stays open, since flipping one often precedes another. */
-export type MenuToggle = Shared & {
-  kind: "toggle";
-  value: boolean;
-  onChange: (value: boolean) => void;
 };
 
 /** A bounded number committed on Enter or blur — a page to jump to, a count, a size. */

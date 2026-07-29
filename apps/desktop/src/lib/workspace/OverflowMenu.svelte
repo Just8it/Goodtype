@@ -1,6 +1,6 @@
 <script lang="ts">
   import { dismissable } from "./dismiss";
-  import type { MenuEntry, MenuSection } from "./menu";
+  import type { MenuAction, MenuEntry, MenuSection } from "./menu";
 
   /**
    * The overflow menu. Renders whatever `sections` describe, so a new page-level feature costs
@@ -22,15 +22,10 @@
     onClose: () => void;
   } = $props();
 
-  function run(entry: MenuEntry) {
+  function run(entry: MenuAction) {
     if (entry.disabled) return;
-    if (entry.kind === "action") {
-      entry.onSelect();
-      onClose();
-    } else if (entry.kind === "toggle") {
-      // Stays open: flipping one setting often precedes flipping the next.
-      entry.onChange(!entry.value);
-    }
+    entry.onSelect();
+    onClose();
   }
 
   function commitNumber(entry: MenuEntry, raw: string) {
@@ -73,16 +68,12 @@
       {:else}
         <button
           type="button"
-          class:destructive={entry.kind === "action" && entry.destructive}
+          class:destructive={entry.destructive}
           disabled={entry.disabled}
-          role={entry.kind === "toggle" ? "switch" : undefined}
-          aria-checked={entry.kind === "toggle" ? entry.value : undefined}
           onclick={() => run(entry)}
         >
           {entry.label}
-          {#if entry.kind === "toggle"}
-            <span class="menu-switch" class:on={entry.value} aria-hidden="true"></span>
-          {:else if entry.hint}
+          {#if entry.hint}
             <span class="menu-hint">{entry.hint}</span>
           {/if}
         </button>
@@ -216,31 +207,4 @@
     outline-offset: 1px;
   }
 
-  .menu-switch {
-    width: 30px;
-    height: 17px;
-    margin-left: auto;
-    border-radius: 9px;
-    background: rgb(255 255 255 / 16%);
-    transition: background 120ms ease;
-  }
-
-  .menu-switch::after {
-    display: block;
-    width: 13px;
-    height: 13px;
-    border-radius: 50%;
-    margin: 2px;
-    background: var(--text);
-    content: "";
-    transition: transform 120ms ease;
-  }
-
-  .menu-switch.on {
-    background: var(--blueprint);
-  }
-
-  .menu-switch.on::after {
-    transform: translateX(13px);
-  }
 </style>

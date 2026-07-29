@@ -1,6 +1,4 @@
 // ponytail: manually mirror the Phase 0 Rust model; generate it only if measured drift becomes a problem.
-export const SCHEMA_VERSION = 1;
-
 export type NotebookManifest = {
   schemaVersion: number;
   id: string;
