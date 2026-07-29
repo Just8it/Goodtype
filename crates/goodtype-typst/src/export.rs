@@ -29,6 +29,9 @@ pub struct ExportTypstBlock {
     pub y: f64,
     pub layout_width_pt: f64,
     pub scale: f64,
+    pub rotation_degrees: f64,
+    pub z_index: i32,
+    pub order: usize,
     pub source: String,
 }
 
@@ -73,6 +76,9 @@ pub struct ExportImage {
     pub width_pt: f64,
     pub height_pt: f64,
     pub scale: f64,
+    pub rotation_degrees: f64,
+    pub z_index: i32,
+    pub order: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -248,6 +254,11 @@ fn validate_page(root: &Path, page: &ExportPage) -> Result<(), ExportError> {
         valid_position(block.x, block.y)?;
         valid_positive_dimension(block.layout_width_pt, "block width")?;
         valid_positive_dimension(block.scale, "block scale")?;
+        if !block.rotation_degrees.is_finite() {
+            return Err(ExportError::InvalidPage(
+                "non-finite block rotation".to_owned(),
+            ));
+        }
         if block.source.len() > MAX_SOURCE_BYTES {
             return Err(ExportError::InvalidPage(
                 "Typst block source is too large".to_owned(),
@@ -294,6 +305,11 @@ fn validate_page(root: &Path, page: &ExportPage) -> Result<(), ExportError> {
         valid_positive_dimension(image.width_pt, "image width")?;
         valid_positive_dimension(image.height_pt, "image height")?;
         valid_positive_dimension(image.scale, "image scale")?;
+        if !image.rotation_degrees.is_finite() {
+            return Err(ExportError::InvalidPage(
+                "non-finite image rotation".to_owned(),
+            ));
+        }
     }
     Ok(())
 }
@@ -371,27 +387,42 @@ fn generated_typst_source(page: &ExportPage, page_index: usize) -> String {
             page.width_pt, page.height_pt
         ));
     }
+    let mut objects = Vec::with_capacity(page.blocks.len() + page.images.len());
     for (index, block) in page.blocks.iter().enumerate() {
-        source.push_str(&format!(
-            "#place(top + left, dx: {}pt, dy: {}pt)[#scale(x: {}%, y: {}%, origin: top + left)[#block(width: {}pt)[#include \"block-{page_index}-{index}.typ\"]]]\n",
-            block.x,
-            block.y,
-            block.scale * 100.0,
-            block.scale * 100.0,
-            block.layout_width_pt,
+        objects.push((
+            block.z_index,
+            block.order,
+            format!(
+                "#place(top + left, dx: {}pt, dy: {}pt)[#rotate({}deg, origin: top + left)[#scale(x: {}%, y: {}%, origin: top + left)[#block(width: {}pt)[#include \"block-{page_index}-{index}.typ\"]]]]\n",
+                block.x,
+                block.y,
+                block.rotation_degrees,
+                block.scale * 100.0,
+                block.scale * 100.0,
+                block.layout_width_pt,
+            ),
         ));
     }
     for image in &page.images {
-        source.push_str(&format!(
-            "#place(top + left, dx: {}pt, dy: {}pt)[#scale(x: {}%, y: {}%, origin: top + left)[#image(\"/{}\", width: {}pt, height: {}pt)]]\n",
-            image.x,
-            image.y,
-            image.scale * 100.0,
-            image.scale * 100.0,
-            typst_string(&image.relative_path),
-            image.width_pt,
-            image.height_pt,
+        objects.push((
+            image.z_index,
+            image.order,
+            format!(
+                "#place(top + left, dx: {}pt, dy: {}pt)[#rotate({}deg, origin: top + left)[#scale(x: {}%, y: {}%, origin: top + left)[#image(\"/{}\", width: {}pt, height: {}pt)]]]\n",
+                image.x,
+                image.y,
+                image.rotation_degrees,
+                image.scale * 100.0,
+                image.scale * 100.0,
+                typst_string(&image.relative_path),
+                image.width_pt,
+                image.height_pt,
+            ),
         ));
+    }
+    objects.sort_by_key(|(z_index, order, _)| (*z_index, *order));
+    for (_, _, object) in objects {
+        source.push_str(&object);
     }
     source.push_str(&format!(
         "#place(top + left)[#image(\"ink-{page_index}.svg\", width: {}pt, height: {}pt)]\n",
@@ -542,6 +573,9 @@ mod tests {
                 y: 96.0,
                 layout_width_pt: 240.0,
                 scale: 1.25,
+                rotation_degrees: 0.0,
+                z_index: 2,
+                order: 0,
                 source: include_str!("../../../fixtures/pdf/phase0b/block.typ").to_owned(),
             }],
             strokes: vec![ExportStroke {
@@ -576,12 +610,29 @@ mod tests {
 
     #[test]
     fn generates_native_blocks_and_vector_ink() {
-        let page = page();
+        let mut page = page();
+        page.blocks[0].rotation_degrees = 15.0;
+        page.images.push(ExportImage {
+            relative_path: "assets/underlay.svg".to_owned(),
+            x: 10.0,
+            y: 10.0,
+            width_pt: 20.0,
+            height_pt: 20.0,
+            scale: 1.0,
+            rotation_degrees: -5.0,
+            z_index: 1,
+            order: 1,
+        });
         let source = generated_typst_source(&page, 0);
         let ink = ink_svg(&page);
 
         assert!(source.contains("#include \"block-0-0.typ\""));
         assert!(source.contains("#scale(x: 125%"));
+        assert!(source.contains("#rotate(15deg, origin: top + left)"));
+        assert!(
+            source.find("underlay.svg").unwrap() < source.find("block-0-0.typ").unwrap(),
+            "lower z-index must be emitted first: {source}"
+        );
         assert!(source.contains("#image(\"ink-0.svg\""));
         // Ink exports as a filled silhouette, not a stroked centreline. The centre
         // line runs (22,43)→(42,63) after the transform, at width 4, so the outline sits half a
@@ -734,6 +785,9 @@ mod tests {
             width_pt: 72.0,
             height_pt: 72.0,
             scale: 1.0,
+            rotation_degrees: 0.0,
+            z_index: 2,
+            order: 1,
         });
 
         let result = export_page(root.path(), "phase0b.pdf", &page, false).unwrap();

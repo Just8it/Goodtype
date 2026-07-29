@@ -4,6 +4,7 @@ use goodtype_typst::export::{
     export_pages,
 };
 
+use crate::notebook::{NotebookHistories, with_notebook};
 use crate::settings::RemotePackages;
 use crate::workspace::{AllowedRoots, ensure_allowed};
 
@@ -12,35 +13,39 @@ use crate::workspace::{AllowedRoots, ensure_allowed};
 #[tauri::command]
 pub async fn export_notebook_pdf(
     roots: tauri::State<'_, AllowedRoots>,
+    histories: tauri::State<'_, NotebookHistories>,
     packages: tauri::State<'_, RemotePackages>,
     root: String,
     output_name: String,
 ) -> Result<String, String> {
     let root = ensure_allowed(&roots, &root)?;
+    let histories = histories.inner().clone();
     // Match the on-screen preview: an export resolves packages under the same policy.
     let allow_remote_packages = packages.allowed();
     tauri::async_runtime::spawn_blocking(move || {
-        let notebook_root = root.as_path();
-        let manifest = storage::open_notebook(notebook_root)
-            .map_err(|error| error.to_string())?
-            .manifest;
+        with_notebook(&histories, || {
+            let notebook_root = root.as_path();
+            let manifest = storage::open_notebook(notebook_root)
+                .map_err(|error| error.to_string())?
+                .manifest;
 
-        let mut pages = Vec::with_capacity(manifest.pages.len());
-        for reference in &manifest.pages {
-            let bundle = storage::open_page(notebook_root, &reference.id)
-                .map_err(|error| format!("page {}: {error}", reference.id))?;
-            pages.push(export_page_from_bundle(&bundle)?);
-        }
+            let mut pages = Vec::with_capacity(manifest.pages.len());
+            for reference in &manifest.pages {
+                let bundle = storage::open_page(notebook_root, &reference.id)
+                    .map_err(|error| format!("page {}: {error}", reference.id))?;
+                pages.push(export_page_from_bundle(&bundle)?);
+            }
 
-        export_pages(notebook_root, &output_name, &pages, allow_remote_packages)
-            .map_err(|error| error.to_string())
-            .and_then(|result| {
-                result
-                    .output_path
-                    .into_os_string()
-                    .into_string()
-                    .map_err(|_| "the PDF path is not valid Unicode".to_owned())
-            })
+            export_pages(notebook_root, &output_name, &pages, allow_remote_packages)
+                .map_err(|error| error.to_string())
+                .and_then(|result| {
+                    result
+                        .output_path
+                        .into_os_string()
+                        .into_string()
+                        .map_err(|_| "the PDF path is not valid Unicode".to_owned())
+                })
+        })
     })
     .await
     .map_err(|error| error.to_string())?
@@ -58,7 +63,7 @@ fn export_page_from_bundle(bundle: &storage::NotebookSnapshot) -> Result<ExportP
 
     let mut blocks = Vec::new();
     let mut images = Vec::new();
-    for object in &bundle.page.objects {
+    for (order, object) in bundle.page.objects.iter().enumerate() {
         match object {
             PageObject::Typst {
                 fields,
@@ -70,6 +75,9 @@ fn export_page_from_bundle(bundle: &storage::NotebookSnapshot) -> Result<ExportP
                 y: fields.y,
                 layout_width_pt: *layout_width_pt,
                 scale: fields.scale,
+                rotation_degrees: fields.rotation,
+                z_index: fields.z_index,
+                order,
                 source: source_for(source_path)?,
             }),
             PageObject::Image {
@@ -85,6 +93,9 @@ fn export_page_from_bundle(bundle: &storage::NotebookSnapshot) -> Result<ExportP
                 width_pt: *width_pt,
                 height_pt: *height_pt,
                 scale: fields.scale,
+                rotation_degrees: fields.rotation,
+                z_index: fields.z_index,
+                order,
             }),
             _ => {}
         }
