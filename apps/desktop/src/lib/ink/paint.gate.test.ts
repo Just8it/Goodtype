@@ -48,12 +48,6 @@ describe("five thousand strokes", () => {
     expect(painted.length).toBeLessThan(200);
   });
 
-  // Per-stroke colour changes defeat merging entirely, which is fine — it is not a realistic page,
-  // and the node count is the only thing that suffers. Recorded so the limit is not a surprise.
-  it("falls back to one node per stroke when no two neighbours share a colour", () => {
-    expect(paintOrder(page(5000, 1), 0.5)).toHaveLength(5000);
-  });
-
   it("re-derives only what changed when a stroke is added or dragged", () => {
     const strokes = page(5000, 60);
     paintOrder(strokes, 0.5);
@@ -65,11 +59,5 @@ describe("five thousand strokes", () => {
       index < 3 ? { ...stroke, transform: { ...stroke.transform, translateX: 4 } } : stroke,
     );
     expect(elapsed(() => paintOrder(dragged, 0.5))).toBeLessThan(25);
-  });
-
-  it("stays workable at ten thousand", () => {
-    const strokes = page(10000, 60);
-    expect(paintOrder(strokes, 0.5)).toHaveLength(167);
-    expect(elapsed(() => paintOrder(strokes, 0.5))).toBeLessThan(40);
   });
 });

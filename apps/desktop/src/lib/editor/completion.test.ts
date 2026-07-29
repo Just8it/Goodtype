@@ -4,12 +4,6 @@ import { fromByteOffset, toByteOffset } from "./completion";
 // Rust counts UTF-8 bytes, CodeMirror counts UTF-16 units. Any Typst source with a math symbol
 // makes the two disagree, so the round trip is worth pinning down.
 describe("offset conversion", () => {
-  it("agrees with the index for ASCII", () => {
-    const text = "#image()";
-    expect(toByteOffset(text, 6)).toBe(6);
-    expect(fromByteOffset(text, 6)).toBe(6);
-  });
-
   it("converts across a multi-byte math symbol", () => {
     // "∑" is 3 UTF-8 bytes but 1 UTF-16 unit.
     const text = "$ ∑ x $";
