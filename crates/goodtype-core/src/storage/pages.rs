@@ -265,6 +265,97 @@ pub fn create_page(
     open_page(&root, &snapshot.page.id)
 }
 
+/// Add every source page from one preserved PDF as consecutive notebook pages.
+///
+/// Page and ink files land first and the manifest lands last. A failed import can therefore
+/// leave recoverable orphan files, but it cannot make the notebook reference half an import.
+pub fn import_pdf_pages(
+    selected_root: &Path,
+    modified_at: &str,
+    position: &PagePosition,
+    source_path: &str,
+    geometries: &[PageGeometry],
+) -> Result<NotebookSnapshot, StorageError> {
+    if geometries.is_empty() || geometries.len() > 1_000 {
+        return invalid("a PDF import must contain between 1 and 1000 pages");
+    }
+
+    let mut guard = ManifestGuard::open_resolved(selected_root, modified_at)?;
+    let root = guard.root().to_path_buf();
+    let insert_at = match position {
+        PagePosition::Last => guard.manifest.pages.len(),
+        PagePosition::Before { page_id } => neighbour_index(&guard.manifest, page_id)?,
+        PagePosition::After { page_id } => neighbour_index(&guard.manifest, page_id)? + 1,
+    };
+    let mut pages = Vec::with_capacity(geometries.len());
+
+    for (index, geometry) in geometries.iter().enumerate() {
+        let FreshPage {
+            id,
+            page_path,
+            ink_id,
+            ink_path,
+        } = fresh_page_identifiers(&root, &guard.manifest);
+        guard.manifest.pages.insert(
+            insert_at + index,
+            PageReference {
+                id: id.clone(),
+                path: page_path.clone(),
+                geometry: geometry.clone(),
+            },
+        );
+        let page = Page {
+            schema_version: SCHEMA_VERSION,
+            id: id.clone(),
+            revision: 1,
+            geometry: geometry.clone(),
+            background: PageBackground::Pdf {
+                source_path: source_path.to_owned(),
+                page: u32::try_from(index + 1).expect("PDF import capped at 1000 pages"),
+            },
+            objects: Vec::new(),
+            reading_order: Vec::new(),
+            ink_layers: vec![InkLayerReference {
+                id: ink_id.clone(),
+                path: ink_path.clone(),
+            }],
+        };
+        pages.push((
+            page,
+            page_path,
+            InkLayer {
+                schema_version: SCHEMA_VERSION,
+                id: ink_id,
+                page_id: id,
+                strokes: Vec::new(),
+            },
+            ink_path,
+        ));
+    }
+    guard.manifest.modified_at = modified_at.to_owned();
+
+    for (page, _, ink, _) in &pages {
+        validate_snapshot(
+            &root,
+            &NotebookSnapshot {
+                manifest: guard.manifest.clone(),
+                page: page.clone(),
+                blocks: Vec::new(),
+                assets: Vec::new(),
+                ink_layers: vec![ink.clone()],
+            },
+        )?;
+    }
+    guard.ensure_unchanged("importing PDF pages")?;
+    for (page, page_path, ink, ink_path) in &pages {
+        write_json_compact(&root, ink_path, ink)?;
+        write_json(&root, page_path, page)?;
+    }
+    write_json(&root, layout::MANIFEST, &guard.manifest)?;
+
+    open_page(&root, &pages[0].0.id)
+}
+
 /// Allocate a fresh identity for everything a duplicated page owns.
 ///
 /// Assets and the shared style are deliberately absent from the source map: anything left
@@ -681,7 +772,7 @@ fn structure_result(
 #[cfg(test)]
 mod tests {
     use crate::{
-        PageObject,
+        PageBackground, PageGeometry, PageObject,
         storage::{fixtures::*, *},
     };
     use std::path::Path;
@@ -919,6 +1010,56 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn imports_pdf_pages_consecutively_with_their_own_geometry() {
+        let temporary = tempfile::tempdir().unwrap();
+        let notebook_root = temporary.path().join("notebook");
+        create_notebook(&notebook_root, &snapshot()).unwrap();
+        let source =
+            store_pdf_reference(&notebook_root, "lecture.pdf", b"%PDF-1.7\nfixture").unwrap();
+
+        let imported = import_pdf_pages(
+            &notebook_root,
+            "2026-07-29T12:00:00Z",
+            &PagePosition::After {
+                page_id: "page-001".into(),
+            },
+            &source,
+            &[
+                PageGeometry {
+                    width_pt: 595.0,
+                    height_pt: 842.0,
+                },
+                PageGeometry {
+                    width_pt: 842.0,
+                    height_pt: 595.0,
+                },
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(imported.page.id, "page-002");
+        assert_eq!(
+            imported
+                .manifest
+                .pages
+                .iter()
+                .map(|page| page.id.as_str())
+                .collect::<Vec<_>>(),
+            ["page-001", "page-002", "page-003"]
+        );
+        assert!(matches!(
+            imported.page.background,
+            PageBackground::Pdf { page: 1, .. }
+        ));
+        let second = open_page(&notebook_root, "page-003").unwrap();
+        assert_eq!(second.page.geometry.width_pt, 842.0);
+        assert!(matches!(
+            second.page.background,
+            PageBackground::Pdf { page: 2, .. }
+        ));
     }
 
     #[test]

@@ -154,6 +154,49 @@ pub fn store_pasted_image(
     Ok(relative)
 }
 
+pub fn store_pdf_reference(
+    selected_root: &Path,
+    filename: &str,
+    bytes: &[u8],
+) -> Result<String, StorageError> {
+    if bytes.is_empty() || bytes.len() > crate::object::MAX_PDF_BYTES {
+        return Err(StorageError::InvalidNotebook(format!(
+            "PDF is {} bytes; maximum is {}",
+            bytes.len(),
+            crate::object::MAX_PDF_BYTES
+        )));
+    }
+    if !bytes[..bytes.len().min(1024)]
+        .windows(5)
+        .any(|window| window == b"%PDF-")
+    {
+        return Err(StorageError::InvalidNotebook(
+            "selected file is not a PDF".into(),
+        ));
+    }
+    validate_safe_filename(filename)?;
+    if !filename.to_ascii_lowercase().ends_with(".pdf") {
+        return Err(StorageError::InvalidPath(filename.into()));
+    }
+
+    let root = canonical_root(selected_root)?;
+    let relative = layout::reference_path(filename);
+    write_once(&root, &relative, bytes)?;
+    Ok(relative)
+}
+
+pub fn read_pdf_reference(selected_root: &Path, relative: &str) -> Result<Vec<u8>, StorageError> {
+    if !relative.to_ascii_lowercase().ends_with(".pdf") {
+        return Err(StorageError::InvalidPath(relative.into()));
+    }
+    let root = canonical_root(selected_root)?;
+    validate_stored_path(relative, SourceRole::Reference)?;
+    read_limited(
+        resolve_existing(&root, relative)?,
+        crate::object::MAX_PDF_BYTES,
+    )
+}
+
 /// Persists every file in the snapshot and returns the canonical fingerprint of the files
 /// it wrote. Computing the fingerprint here, from the bytes just written, saves reading every
 /// canonical file back a second time on the commit and undo/redo paths.

@@ -24,22 +24,22 @@ mod write;
 #[cfg(test)]
 mod fixtures;
 
-pub use crate::object::MAX_IMAGE_BYTES;
+pub use crate::object::{MAX_IMAGE_BYTES, MAX_PDF_BYTES};
 pub use history::{
     HistoryResult, NotebookHistory, commit_notebook, focus_page, observe_notebook, observe_page,
     redo_notebook, undo_notebook,
 };
 pub use pages::{
     NotebookStructureHistory, PagePosition, StructureHistoryResult, advance_structure,
-    create_notebook, create_page, delete_page, duplicate_page, observe_structure, open_notebook,
-    open_page, redo_structure, reorder_pages, save_notebook, undo_structure,
+    create_notebook, create_page, delete_page, duplicate_page, import_pdf_pages, observe_structure,
+    open_notebook, open_page, redo_structure, reorder_pages, save_notebook, undo_structure,
 };
 pub use recovery::{
     RecoveryCandidate, discard_recovery_candidate, list_recovery_candidates,
     restore_recovery_candidate,
 };
 pub use search::{SearchHit, search_notebook};
-pub use write::store_pasted_image;
+pub use write::{read_pdf_reference, store_pasted_image, store_pdf_reference};
 
 /// The store's size budget, in one place.
 ///

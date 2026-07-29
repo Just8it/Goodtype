@@ -261,7 +261,23 @@ fn validate_page(root: &Path, page: &ExportPage) -> Result<(), ExportError> {
         // and must not assume the page came through a write it can vouch for.
         PageBackground::Template { template } => goodtype_core::template::validate(template)
             .map_err(|reason| ExportError::InvalidPage(reason.to_owned()))?,
-        PageBackground::Pdf { .. } => {}
+        PageBackground::Pdf { source_path, page } => {
+            if *page == 0 {
+                return Err(ExportError::InvalidPage(
+                    "PDF page numbers start at one".to_owned(),
+                ));
+            }
+            if Path::new(source_path)
+                .components()
+                .next()
+                .is_none_or(|component| {
+                    component.as_os_str() != goodtype_core::SourceRole::Reference.directory()
+                })
+            {
+                return Err(ExportError::InvalidImagePath(source_path.clone()));
+            }
+            validate_relative_image(root, source_path)?;
+        }
     }
 
     for block in &page.blocks {
@@ -408,6 +424,19 @@ fn generated_typst_source(page: &ExportPage, page_index: usize) -> String {
         source.push_str(&format!(
             "#place(top + left)[#image(\"paper-{page_index}.svg\", width: {}pt, height: {}pt)]\n",
             page.width_pt, page.height_pt
+        ));
+    }
+    if let PageBackground::Pdf {
+        source_path,
+        page: pdf_page,
+    } = &page.background
+    {
+        source.push_str(&format!(
+            "#place(top + left)[#image(\"/{}\", page: {}, width: {}pt, height: {}pt, fit: \"stretch\")]\n",
+            typst_string(source_path),
+            pdf_page,
+            page.width_pt,
+            page.height_pt
         ));
     }
     let mut objects = Vec::with_capacity(page.blocks.len() + page.images.len());
@@ -723,6 +752,22 @@ mod tests {
         assert!(template_svg(&plain).is_none());
     }
 
+    #[test]
+    fn a_pdf_background_exports_before_the_ink() {
+        let mut page = page();
+        page.background = PageBackground::Pdf {
+            source_path: "references/lecture.pdf".to_owned(),
+            page: 3,
+        };
+
+        let source = generated_typst_source(&page, 0);
+        let pdf = source
+            .find(r#"#image("/references/lecture.pdf", page: 3"#)
+            .expect("PDF background placed");
+        let ink = source.find("ink-0.svg").expect("ink placed");
+        assert!(pdf < ink, "PDF background must be under the ink: {source}");
+    }
+
     /// Pressure has to survive into the exported geometry — it used to be visible on screen and
     /// flat in the PDF, because a stroked centreline cannot vary its width.
     #[test]
@@ -819,6 +864,26 @@ mod tests {
         assert!(result.output_path.ends_with("exports/phase0b.pdf"));
         assert!(bytes.starts_with(b"%PDF-"));
         export_page(root.path(), "phase0b.pdf", &page, false).unwrap();
+    }
+
+    #[test]
+    fn compiler_embeds_a_pdf_page_beneath_goodtype_content() {
+        let root = tempfile::tempdir().unwrap();
+        let source = export_page(root.path(), "source.pdf", &page(), false).unwrap();
+        fs::create_dir(root.path().join("references")).unwrap();
+        fs::copy(
+            source.output_path,
+            root.path().join("references/lecture.pdf"),
+        )
+        .unwrap();
+
+        let mut annotated = page();
+        annotated.background = PageBackground::Pdf {
+            source_path: "references/lecture.pdf".to_owned(),
+            page: 1,
+        };
+        let result = export_page(root.path(), "annotated.pdf", &annotated, false).unwrap();
+        assert!(fs::read(result.output_path).unwrap().starts_with(b"%PDF-"));
     }
 
     #[test]

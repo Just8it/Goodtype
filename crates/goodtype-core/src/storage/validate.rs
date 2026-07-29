@@ -412,7 +412,7 @@ fn validate_files(
 
 /// Where a file in this role is allowed to sit. The shared style is the one exception: it
 /// belongs to the notebook rather than to any page, so it lives at the root.
-fn validate_stored_path(path: &str, role: SourceRole) -> Result<(), StorageError> {
+pub(crate) fn validate_stored_path(path: &str, role: SourceRole) -> Result<(), StorageError> {
     validate_relative(path)?;
     match role {
         SourceRole::Asset => validate_asset_path(path),

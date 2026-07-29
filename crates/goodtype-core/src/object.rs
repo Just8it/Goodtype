@@ -32,6 +32,9 @@ pub const MAX_BLOCK_BYTES: usize = 1024 * 1024;
 /// Pasted images. Large enough for a photograph, small enough that one paste cannot make a
 /// notebook unopenable.
 pub const MAX_IMAGE_BYTES: usize = 20 * 1024 * 1024;
+/// Imported PDFs are often complete lecture decks. Keep a hard ceiling, but do not reuse the
+/// photograph limit for a document that legitimately contains hundreds of pages.
+pub const MAX_PDF_BYTES: usize = 128 * 1024 * 1024;
 
 impl SourceRole {
     /// The one directory a file in this role may live in.
@@ -51,9 +54,8 @@ impl SourceRole {
     pub const fn max_bytes(self) -> usize {
         match self {
             Self::Block => MAX_BLOCK_BYTES,
-            // Imported material is resolved rather than loaded, so this ceiling is what would
-            // apply if it ever were — deliberately the conservative one.
-            Self::Asset | Self::Reference => MAX_IMAGE_BYTES,
+            Self::Asset => MAX_IMAGE_BYTES,
+            Self::Reference => MAX_PDF_BYTES,
         }
     }
 

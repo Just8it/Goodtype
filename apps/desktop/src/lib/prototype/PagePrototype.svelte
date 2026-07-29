@@ -8,8 +8,10 @@
     deletePage,
     duplicatePage,
     focusPage,
+    importPdfPages,
     openNotebook,
     openPage,
+    pickPdfReference,
     reorderPages,
     runHistory,
     runStructureHistory,
@@ -64,6 +66,7 @@
   import AddPageMenu from "../workspace/AddPageMenu.svelte";
   import type { AddPageGroup, AddPageSource, AddPageWhere } from "../workspace/addPage";
   import { templatePreviewSvg } from "../page/template";
+  import { pdfPageGeometries } from "../pdf/document";
   import { PAPER_TONES, templateGroups } from "../page/templates";
   import {
     DEFAULT_PAGE_SIZE,
@@ -1421,6 +1424,42 @@
     }
   }
 
+  async function importPdf(position: PagePosition) {
+    moreOpen = false;
+    addPageOpen = false;
+    if (!tauriAvailable || !(await persist())) return;
+    busy = true;
+    try {
+      const sourcePath = await pickPdfReference(root);
+      if (!sourcePath) return;
+      status = "Reading PDF pages…";
+      const geometries = await pdfPageGeometries(root, sourcePath);
+      const result = await importPdfPages(
+        root,
+        new Date().toISOString(),
+        position,
+        sourcePath,
+        geometries,
+        activePageId,
+      );
+      pageEntries = [];
+      applySnapshot(result.snapshot);
+      recordStructureAction();
+      const index = result.snapshot.manifest.pages.findIndex(
+        (page) => page.id === result.snapshot.page.id,
+      );
+      const above = index > 0 ? result.snapshot.manifest.pages[index - 1] : undefined;
+      if (above) await ensurePageLoaded(above.id);
+      await tick();
+      scrollToPage(result.snapshot.page.id);
+      status = `Imported ${geometries.length} PDF ${geometries.length === 1 ? "page" : "pages"}`;
+    } catch (error) {
+      status = `Could not import PDF: ${message(error)}`;
+    } finally {
+      busy = false;
+    }
+  }
+
   /**
    * What a new page can be made from, on the shelves the picker shows. One entry per source,
    * which is the extension point: an image and PDF import arrive here rather than in the menu's
@@ -1442,6 +1481,19 @@
         void addPage(position, { kind: "template", template: source }, geometry),
     });
     return [
+      {
+        id: "import",
+        title: "Import",
+        sources: [
+          {
+            id: "pdf",
+            label: "PDF document",
+            detail: "One notebook page per PDF page",
+            disabled: !tauriAvailable,
+            onSelect: (position) => void importPdf(position),
+          },
+        ],
+      },
       {
         id: "current",
         title: "This page",

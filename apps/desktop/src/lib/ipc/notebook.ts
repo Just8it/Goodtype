@@ -68,6 +68,30 @@ export function createPage(
   });
 }
 
+/** Choose a PDF and preserve its original bytes under `references/`. */
+export function pickPdfReference(root: string): Promise<string | null> {
+  return invoke<string | null>("pick_pdf_reference", { root });
+}
+
+/** Read a contained PDF through Tauri's raw binary response path. */
+export function readPdfReference(root: string, sourcePath: string): Promise<ArrayBuffer> {
+  return invoke<ArrayBuffer>("read_pdf_reference", { root, sourcePath });
+}
+
+export function importPdfPages(
+  root: string,
+  modifiedAt: string,
+  position: PagePosition,
+  sourcePath: string,
+  geometries: PageGeometry[],
+  activePageId: string,
+): Promise<StructureHistoryResult> {
+  return invoke<StructureHistoryResult>("import_pdf_pages", {
+    root,
+    request: { modifiedAt, position, sourcePath, geometries, activePageId },
+  });
+}
+
 export function duplicatePage(
   root: string,
   pageId: string,

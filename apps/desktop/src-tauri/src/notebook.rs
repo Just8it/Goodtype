@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    fs,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
@@ -10,6 +11,7 @@ use goodtype_core::storage::{
 };
 
 use goodtype_core::{PageBackground, PageGeometry};
+use tauri_plugin_dialog::DialogExt;
 
 use crate::workspace::{AllowedRoots, ensure_allowed};
 
@@ -234,6 +236,124 @@ pub async fn create_page(
                 &request.position,
                 request.background.as_ref(),
                 request.geometry.as_ref(),
+            )
+            .map_err(message)?;
+            advance_structure_result(history_map, &root, snapshot)
+        })
+    })
+    .await
+    .map_err(message)?
+}
+
+fn safe_pdf_filename(path: &Path) -> String {
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("document");
+    let mut safe = stem
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    safe.truncate(90);
+    let safe = safe.trim_matches('-');
+    format!("{}.pdf", if safe.is_empty() { "document" } else { safe })
+}
+
+/// Pick and preserve a PDF under the notebook's `references/` directory. The frontend receives
+/// only the notebook-relative path, never general filesystem access.
+#[tauri::command]
+pub async fn pick_pdf_reference(
+    app: tauri::AppHandle,
+    roots: tauri::State<'_, AllowedRoots>,
+    root: String,
+) -> Result<Option<String>, String> {
+    let root = ensure_allowed(&roots, &root)?;
+    let Some(picked) = app
+        .dialog()
+        .file()
+        .add_filter("PDF document", &["pdf"])
+        .blocking_pick_file()
+    else {
+        return Ok(None);
+    };
+    let picked = picked.into_path().map_err(message)?;
+    let length = fs::metadata(&picked).map_err(message)?.len();
+    if length > storage::MAX_PDF_BYTES as u64 {
+        return Err(format!(
+            "PDF is {length} bytes; maximum is {}",
+            storage::MAX_PDF_BYTES
+        ));
+    }
+    let bytes = fs::read(&picked).map_err(message)?;
+    let filename = safe_pdf_filename(&picked);
+    let stem = filename.trim_end_matches(".pdf");
+    for suffix in 0..1_000 {
+        let candidate = if suffix == 0 {
+            filename.clone()
+        } else {
+            format!("{stem}-{suffix}.pdf")
+        };
+        match storage::store_pdf_reference(&root, &candidate, &bytes) {
+            Ok(relative) => return Ok(Some(relative)),
+            Err(storage::StorageError::AlreadyExists(_)) => {}
+            Err(error) => return Err(message(error)),
+        }
+    }
+    Err("could not allocate a PDF reference name".to_owned())
+}
+
+/// Read one already-contained reference as a raw IPC response. This avoids serialising a lecture
+/// deck into a JSON number array before PDF.js can consume it.
+#[tauri::command]
+pub async fn read_pdf_reference(
+    roots: tauri::State<'_, AllowedRoots>,
+    root: String,
+    source_path: String,
+) -> Result<tauri::ipc::Response, String> {
+    let root = ensure_allowed(&roots, &root)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        storage::read_pdf_reference(&root, &source_path)
+            .map(tauri::ipc::Response::new)
+            .map_err(message)
+    })
+    .await
+    .map_err(message)?
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportPdfPagesRequest {
+    modified_at: String,
+    position: PagePosition,
+    source_path: String,
+    geometries: Vec<PageGeometry>,
+    active_page_id: String,
+}
+
+#[tauri::command]
+pub async fn import_pdf_pages(
+    roots: tauri::State<'_, AllowedRoots>,
+    histories: tauri::State<'_, NotebookHistories>,
+    root: String,
+    request: ImportPdfPagesRequest,
+) -> Result<StructureHistoryResult, String> {
+    let root = ensure_allowed(&roots, &root)?;
+    let histories = NotebookHistories(histories.0.clone());
+    tauri::async_runtime::spawn_blocking(move || {
+        with_notebook_lock(&histories, |history_map| {
+            observe_structure(history_map, &root, &request.active_page_id)?;
+            let snapshot = storage::import_pdf_pages(
+                &root,
+                &request.modified_at,
+                &request.position,
+                &request.source_path,
+                &request.geometries,
             )
             .map_err(message)?;
             advance_structure_result(history_map, &root, snapshot)

@@ -59,6 +59,10 @@ pub fn asset_path(filename: &str) -> String {
     format!("{}/{filename}", SourceRole::Asset.directory())
 }
 
+pub fn reference_path(filename: &str) -> String {
+    format!("{}/{filename}", SourceRole::Reference.directory())
+}
+
 pub fn recovery_path(file_name: &str) -> String {
     format!("{RECOVERY_DIR}/{file_name}")
 }

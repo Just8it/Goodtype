@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { PageBackground } from "../model";
+  import PdfBackground from "../pdf/PdfBackground.svelte";
   import { templateSvg } from "./template";
 
   /**
@@ -13,10 +14,14 @@
     background,
     widthPt,
     heightPt,
+    root = null,
+    zoom = 1,
   }: {
     background: PageBackground;
     widthPt: number;
     heightPt: number;
+    root?: string | null;
+    zoom?: number;
   } = $props();
 
   // Recomputed only when the paper or the page size changes, not on every zoom step: the SVG is
@@ -36,6 +41,14 @@
   {#if markup}
     <!-- Built from the page's own definition by `templateSvg`, never read from a file. -->
     {@html markup}
+  {:else if background.kind === "pdf" && root}
+    <PdfBackground
+      {root}
+      sourcePath={background.sourcePath}
+      page={background.page}
+      {widthPt}
+      {zoom}
+    />
   {/if}
 </div>
 

@@ -127,7 +127,7 @@
   let editingBlockId = $state<string | null>(null);
 </script>
 
-<PaperLayer {background} widthPt={pageWidthPt} heightPt={pageHeightPt} />
+<PaperLayer {background} widthPt={pageWidthPt} heightPt={pageHeightPt} {root} {zoom} />
 <div class:interactive class:editing={editingBlockId !== null} class="objects">
   {#each blocks as block (block.id)}
     <TypstBlock
