@@ -1487,9 +1487,12 @@
         sources: [
           {
             id: "pdf",
-            label: "PDF document",
-            detail: "One notebook page per PDF page",
+            label: "Import PDF",
+            detail: "Add every PDF page to the notebook",
             disabled: !tauriAvailable,
+            compact: true,
+            preview:
+              '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48"><rect x="8" y="5" width="29" height="38" rx="3" fill="#fff" stroke="#9aa3ad"/><path d="M29 5v10h8" fill="none" stroke="#9aa3ad"/><rect x="12" y="25" width="29" height="13" rx="3" fill="#d85b55"/><text x="26.5" y="34.5" fill="#fff" font-size="8" font-family="sans-serif" font-weight="700" text-anchor="middle">PDF</text></svg>',
             onSelect: (position) => void importPdf(position),
           },
         ],

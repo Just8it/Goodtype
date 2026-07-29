@@ -21,6 +21,8 @@ export type AddPageSource = {
   /** Second line: what the source is, or why it cannot be used yet. */
   detail?: string;
   disabled?: boolean;
+  /** A short full-width row for external document sources rather than a paper swatch. */
+  compact?: boolean;
   /**
    * Optional inline SVG markup drawn as a preview tile. Templates render their own definition
    * here, so a preview never has to be a stored bitmap that can go stale.

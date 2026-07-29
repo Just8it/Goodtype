@@ -150,12 +150,13 @@
           <button
             type="button"
             class="source"
+            class:compact={source.compact}
             disabled={source.disabled}
             onclick={() => choose(source)}
           >
             <span class="preview" style:aspect-ratio={previewAspect} aria-hidden="true">
               {#if source.preview}
-                <!-- Built from a template definition in this app, never read from a file. -->
+                <!-- Built into this app, never read from an imported file. -->
                 {@html source.preview}
               {/if}
             </span>
@@ -371,6 +372,32 @@
   .source:disabled {
     opacity: 0.45;
     cursor: default;
+  }
+
+  .source.compact {
+    display: grid;
+    padding: 8px;
+    grid-column: 1 / -1;
+    grid-template-columns: 48px 1fr;
+    grid-template-rows: 1fr 1fr;
+    column-gap: 10px;
+  }
+
+  .source.compact .preview {
+    width: 48px;
+    height: 48px;
+    margin: 0;
+    grid-row: 1 / 3;
+  }
+
+  .source.compact .label {
+    align-self: end;
+    font-size: 11.5px;
+    font-weight: 600;
+  }
+
+  .source.compact .detail {
+    align-self: start;
   }
 
   /* Proportions come from the selected size, so a swatch is read at the shape it will be. */
