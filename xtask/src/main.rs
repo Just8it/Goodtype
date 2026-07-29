@@ -22,7 +22,6 @@ fn doctor() -> Result<(), String> {
     let pnpm = read_json_string(&root.join("package.json"), "packageManager")
         .and_then(|value| value.strip_prefix("pnpm@").map(str::to_owned));
     let typst = read_toml_value(&root.join("tools/versions.toml"), "typst");
-    let tinymist = read_toml_value(&root.join("tools/versions.toml"), "tinymist");
 
     println!("Goodtype toolchain doctor");
     let mut required_ok = true;
@@ -31,7 +30,6 @@ fn doctor() -> Result<(), String> {
     required_ok &= check_tool("Node", "node", node.as_deref(), true);
     required_ok &= check_tool("pnpm", pnpm_command(), pnpm.as_deref(), true);
     check_tool("Typst (Phase 0B)", "typst", typst.as_deref(), false);
-    check_tool("Tinymist (Phase 2)", "tinymist", tinymist.as_deref(), false);
 
     if node.is_none() {
         println!("WARN Node: no .node-version or .nvmrc project pin found");
