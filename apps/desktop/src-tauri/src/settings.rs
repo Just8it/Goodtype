@@ -266,6 +266,9 @@ fn sanitize(mut settings: AppSettings) -> AppSettings {
 #[serde(rename_all = "camelCase", default)]
 pub struct RecentNotebooks {
     pub entries: Vec<RecentNotebook>,
+    /// The notebook that was still open when the webview or application last stopped.
+    /// App-local view state only; an explicit Close notebook clears it.
+    pub active_root: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -382,6 +385,19 @@ pub fn is_recent_notebook(app: &tauri::AppHandle, root: &str) -> Result<bool, St
         .any(|entry| entry.root == root))
 }
 
+pub fn active_recent_root(app: &tauri::AppHandle) -> Result<Option<String>, String> {
+    Ok(read_config::<RecentNotebooks>(app, "recents.json")?.active_root)
+}
+
+pub fn clear_active_recent(app: &tauri::AppHandle, root: &str) -> Result<(), String> {
+    let mut recents = read_config::<RecentNotebooks>(app, "recents.json")?;
+    if recents.active_root.as_deref() != Some(root) {
+        return Ok(());
+    }
+    recents.active_root = None;
+    write_config(app, "recents.json", &recents)
+}
+
 pub fn record_recent(
     app: &tauri::AppHandle,
     root: &str,
@@ -410,6 +426,7 @@ pub fn record_recent(
             last_page_id,
         },
     );
+    recents.active_root = Some(root.to_owned());
     while recents.entries.len() > MAX_RECENTS {
         // Drop the oldest unpinned entry; pinned entries survive the cap.
         let Some(index) = recents.entries.iter().rposition(|entry| !entry.pinned) else {
@@ -457,6 +474,9 @@ pub fn remove_recent_notebook(
 ) -> Result<Vec<RecentNotebook>, String> {
     let mut recents = read_config::<RecentNotebooks>(&app, "recents.json")?;
     recents.entries.retain(|entry| entry.root != root);
+    if recents.active_root.as_deref() == Some(root.as_str()) {
+        recents.active_root = None;
+    }
     write_config(&app, "recents.json", &recents)?;
     list_recent_notebooks(app)
 }
@@ -489,5 +509,17 @@ impl RemotePackages {
 pub fn seed_remote_packages(app: &tauri::AppHandle, policy: &RemotePackages) {
     if let Ok(settings) = read_config::<AppSettings>(app, "settings.json") {
         policy.set(sanitize(settings).remote_packages);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RecentNotebooks;
+
+    #[test]
+    fn old_recents_files_default_to_no_active_notebook() {
+        let recents: RecentNotebooks =
+            serde_json::from_str(r#"{"entries":[]}"#).expect("legacy recents should still load");
+        assert!(recents.active_root.is_none());
     }
 }

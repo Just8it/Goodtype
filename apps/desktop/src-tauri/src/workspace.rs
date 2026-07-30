@@ -10,7 +10,9 @@ use serde_json::Value;
 use tauri::Manager;
 use tauri_plugin_dialog::DialogExt;
 
-use crate::settings::{is_recent_notebook, record_recent, record_recent_page};
+use crate::settings::{
+    active_recent_root, clear_active_recent, is_recent_notebook, record_recent, record_recent_page,
+};
 
 /// Notebook roots the user has explicitly selected in this process, plus the default local
 /// notebook. Commands only operate on member roots, so the frontend can never point Rust at an
@@ -77,20 +79,47 @@ pub async fn pick_notebook_root(
 
 /// Re-admit a notebook chosen in an earlier session (from the recents list). The path must
 /// still contain a manifest; missing notebooks stay visible in the list but cannot open.
-#[tauri::command]
-pub fn open_recent_root(
-    app: tauri::AppHandle,
-    roots: tauri::State<'_, AllowedRoots>,
-    root: String,
+fn admit_recent_root(
+    app: &tauri::AppHandle,
+    roots: &AllowedRoots,
+    root: &str,
 ) -> Result<String, String> {
-    if !is_recent_notebook(&app, &root)? {
+    if !is_recent_notebook(app, root)? {
         return Err("this notebook was not opened by Goodtype before".to_owned());
     }
     let path = Path::new(&root);
     if !path.join("goodtype.json").is_file() {
         return Err("this notebook is missing or was moved".to_owned());
     }
-    path_string(allow_root(&roots, path)?)
+    path_string(allow_root(roots, path)?)
+}
+
+#[tauri::command]
+pub fn open_recent_root(
+    app: tauri::AppHandle,
+    roots: tauri::State<'_, AllowedRoots>,
+    root: String,
+) -> Result<String, String> {
+    admit_recent_root(&app, &roots, &root)
+}
+
+/// Re-admit the notebook that was still open before a reload or application exit.
+/// A stale marker is cleared so a missing notebook cannot fail every future launch.
+#[tauri::command]
+pub fn resume_notebook_root(
+    app: tauri::AppHandle,
+    roots: tauri::State<'_, AllowedRoots>,
+) -> Result<Option<String>, String> {
+    let Some(root) = active_recent_root(&app)? else {
+        return Ok(None);
+    };
+    match admit_recent_root(&app, &roots, &root) {
+        Ok(root) => Ok(Some(root)),
+        Err(error) => {
+            clear_active_recent(&app, &root)?;
+            Err(error)
+        }
+    }
 }
 
 /// Record a successful open in the recents list.
@@ -116,6 +145,18 @@ pub fn record_notebook_page(
 ) -> Result<(), String> {
     let canonical = ensure_allowed(&roots, &root)?;
     record_recent_page(&app, &path_string(canonical)?, &page_id)
+}
+
+/// Mark an explicit return to the library. Application exit deliberately does not call this:
+/// leaving a notebook open is what makes it eligible for startup restoration.
+#[tauri::command]
+pub fn close_notebook_session(
+    app: tauri::AppHandle,
+    roots: tauri::State<'_, AllowedRoots>,
+    root: String,
+) -> Result<(), String> {
+    let canonical = ensure_allowed(&roots, &root)?;
+    clear_active_recent(&app, &path_string(canonical)?)
 }
 
 #[tauri::command]

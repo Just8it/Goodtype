@@ -18,6 +18,11 @@ export function listRecentNotebooks(): Promise<RecentNotebook[]> {
   return invoke<RecentNotebook[]>("list_recent_notebooks");
 }
 
+/** The notebook left open before a reload or application exit, admitted for this process. */
+export function resumeNotebookRoot(): Promise<string | null> {
+  return invoke<string | null>("resume_notebook_root");
+}
+
 export function recordNotebookPage(root: string, pageId: string): Promise<void> {
   return invoke("record_notebook_page", { root, pageId });
 }
@@ -28,6 +33,11 @@ export function recordNotebookOpened(
   openedAt: string,
 ): Promise<void> {
   return invoke("record_notebook_opened", { root, title, openedAt });
+}
+
+/** Explicitly return to the library; ordinary application exit keeps the session resumable. */
+export function closeNotebookSession(root: string): Promise<void> {
+  return invoke("close_notebook_session", { root });
 }
 
 export function exportNotebookPdf(root: string, outputName: string): Promise<string> {

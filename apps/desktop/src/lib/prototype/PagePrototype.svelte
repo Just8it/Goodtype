@@ -27,11 +27,13 @@
   import { compileTypst as requestTypstCompile } from "../ipc/typst";
   import type { HistoryResult, NotebookSnapshot } from "../ipc/types";
   import {
+    closeNotebookSession,
     defaultNotebookRoot,
     exportNotebookPdf,
     listRecentNotebooks,
     recordNotebookOpened,
     recordNotebookPage,
+    resumeNotebookRoot,
     writeMetrics,
     writeNotebookCover,
   } from "../ipc/workspace";
@@ -517,6 +519,9 @@
           if (closeConfirmed) return;
           event.preventDefault();
           if (!(await persist())) return;
+          if (notebookChosen && root) {
+            await recordNotebookPage(root, activePageId).catch(() => {});
+          }
           closeConfirmed = true;
           await getCurrentWindow().close();
         })
@@ -556,8 +561,18 @@
       return;
     }
 
+    try {
+      const resumeRoot = await resumeNotebookRoot();
+      if (resumeRoot) {
+        await openNotebookAt(resumeRoot);
+        return;
+      }
+    } catch (error) {
+      status = `The last notebook could not be reopened: ${message(error)}`;
+    }
+
     // First launch continuity: with no notebook history, open the local default directly so
-    // pen-first startup stays instant. Otherwise the start surface offers recents/open/create.
+    // pen-first startup stays instant. Otherwise the library remains the deliberate start view.
     try {
       const recents = await listRecentNotebooks();
       if (recents.length === 0) {
@@ -641,16 +656,24 @@
       notebookRedoOrder = [];
       pageEntries = [];
       applySnapshot(snapshot);
+      let sessionRemembered = true;
+      try {
+        await recordNotebookOpened(
+          root,
+          snapshot.manifest.title || "Goodtype notebook",
+          new Date().toISOString(),
+        );
+        await recordNotebookPage(root, snapshot.page.id);
+      } catch {
+        sessionRemembered = false;
+      }
       notebookChosen = true;
       pageOpen = true;
-      status = "Notebook ready";
-      void recordNotebookOpened(
-        root,
-        snapshot.manifest.title || "Goodtype notebook",
-        new Date().toISOString(),
-      )
-        .then(() => recordNotebookPage(root, snapshot.page.id))
-        .catch(() => {});
+      await tick();
+      scrollToPage(snapshot.page.id, "auto");
+      status = sessionRemembered
+        ? "Notebook ready"
+        : "Notebook ready, but its reopening position could not be remembered";
       await refreshRecoveryCandidates();
     } catch (error) {
       status = `Could not open the notebook: ${message(error)}`;
@@ -2556,11 +2579,11 @@
       });
   }
 
-  function scrollToPage(pageId: string) {
+  function scrollToPage(pageId: string, behavior?: ScrollBehavior) {
     document
       .querySelector<HTMLElement>(`[data-page-id="${pageId}"]`)
       ?.scrollIntoView({
-        behavior: settings.reducedMotion ? "auto" : "smooth",
+        behavior: behavior ?? (settings.reducedMotion ? "auto" : "smooth"),
         block: "center",
       });
   }
@@ -2693,6 +2716,15 @@
 
   async function closePage() {
     if (!(await persist())) return;
+    if (tauriAvailable && root) {
+      await recordNotebookPage(root, activePageId).catch(() => {});
+      try {
+        await closeNotebookSession(root);
+      } catch (error) {
+        status = `The notebook was saved but could not be closed: ${message(error)}`;
+        return;
+      }
+    }
     // After the save, so the cover shows what was just written rather than what preceded it.
     await writeCover();
     pageOpen = false;
