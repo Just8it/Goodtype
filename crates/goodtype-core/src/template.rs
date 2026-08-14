@@ -183,8 +183,14 @@ pub enum TemplateShape<'a> {
     },
 }
 
-/// Resolve a template against a page. Silently truncates at `MAX_SHAPES`; validation is what
-/// rejects definitions that would get there, and a renderer is the wrong place to raise it.
+/// Resolve a template against a page, silently truncating at [`MAX_SHAPES`].
+///
+/// The truncation is the real ceiling, not a backstop behind validation. [`validate`] never sees
+/// a [`PageGeometry`], and shape count is a function of the page as much as the definition, so it
+/// could not enforce this even in principle — it bounds spacing and insets, which is what it can
+/// see. Silent rather than an error because a renderer is the wrong place to raise one: by the
+/// time a page is being drawn the notebook is already open, and refusing to draw the paper would
+/// take the writing with it.
 pub fn resolve<'a>(template: &'a PageTemplate, geometry: &PageGeometry) -> Vec<TemplateShape<'a>> {
     let mut shapes = Vec::new();
 
@@ -289,8 +295,13 @@ pub fn resolve<'a>(template: &'a PageTemplate, geometry: &PageGeometry) -> Vec<T
                 ..
             } => {
                 let columns = centred(box_.left, box_.right, *spacing_pt);
-                for cy in centred(box_.top, box_.bottom, *spacing_pt) {
+                // The one element whose cost is the product of two axes rather than their sum,
+                // so the ceiling is enforced as it draws instead of once the grid is complete.
+                'rows: for cy in centred(box_.top, box_.bottom, *spacing_pt) {
                     for cx in &columns {
+                        if shapes.len() >= MAX_SHAPES {
+                            break 'rows;
+                        }
                         shapes.push(TemplateShape::Dot {
                             cx: *cx,
                             cy,
@@ -384,12 +395,24 @@ fn centred(start: f64, end: f64, spacing: f64) -> Vec<f64> {
     let centre = (start + end) / 2.0;
     // Whole steps that fit between the centre and either edge.
     let reach = ((end - start) / 2.0 / spacing).floor();
-    let count = (reach * 2.0) as usize + 1;
+    // Capped here rather than trusted from the caller. `count` is allocated up front and
+    // `as usize` saturates on a large float, so without this an extreme page produced either a
+    // multi-gigabyte allocation or — once the cast saturated at `usize::MAX` — an overflow on
+    // the `+ 1`. The cap is far above any real ruling, so it changes nothing a page can ask for.
+    let count = ((reach * 2.0) as usize).saturating_add(1).min(MAX_STEPS);
     let first = centre - reach * spacing;
     (0..count)
         .map(|index| first + index as f64 * spacing)
         .collect()
 }
+
+/// The most steps one axis of one element may contribute.
+///
+/// This bounds the *allocation*, not the drawing: [`MAX_SHAPES`] bounds that. Set well clear of
+/// real paper — the tightest ruling this format allows on the longest page is
+/// `MAX_PAGE_DIMENSION_PT / MIN_SPACING_PT`, and ordinary A4 graph paper is around 150 — so a
+/// template that reaches this was never describing paper.
+const MAX_STEPS: usize = MAX_SHAPES;
 
 /// Whether a definition is safe and sane to store. Called from storage on the way in, so a page
 /// that made it to disk can be resolved without further checking.
@@ -489,11 +512,7 @@ fn valid_spacing(spacing_pt: f64) -> Result<(), &'static str> {
     Ok(())
 }
 
-fn valid_color(color: &str) -> bool {
-    matches!(color.len(), 7 | 9)
-        && color.starts_with('#')
-        && color[1..].bytes().all(|byte| byte.is_ascii_hexdigit())
-}
+use crate::valid_hex_color as valid_color;
 
 #[cfg(test)]
 mod tests {
@@ -779,6 +798,55 @@ mod tests {
             )
             .is_empty()
         );
+    }
+
+    /// The ceiling has to hold while the shapes are being made, not once they all exist.
+    ///
+    /// A dot grid costs the product of its two axes, so the page that used to run out of memory
+    /// was not an enormous one — `MAX_PAGE_DIMENSION_PT` at the tightest legal spacing is about
+    /// 33,000 steps a side, and the square of that is a hundred billion dots nobody can hold.
+    #[test]
+    fn the_largest_legal_page_still_resolves_promptly() {
+        let dotted = template(vec![TemplateElement::Dots {
+            area: area(0.0),
+            spacing_pt: MIN_SPACING_PT,
+            color: "#CCCCCC".into(),
+            radius_pt: 0.6,
+        }]);
+        let resolved = resolve(
+            &dotted,
+            &PageGeometry {
+                width_pt: crate::MAX_PAGE_DIMENSION_PT,
+                height_pt: crate::MAX_PAGE_DIMENSION_PT,
+            },
+        );
+        assert_eq!(resolved.len(), MAX_SHAPES);
+    }
+
+    /// Ordinary paper must be nowhere near the ceiling, or the cap that makes the pathological
+    /// case safe would be quietly truncating real rulings.
+    #[test]
+    fn real_paper_is_far_below_the_ceiling() {
+        let graph = template(vec![TemplateElement::Grid {
+            area: area(36.0),
+            spacing_pt: 5.0,
+            color: "#DDDDDD".into(),
+            weight_pt: 0.3,
+            major: None,
+        }]);
+        let a4 = PageGeometry {
+            width_pt: 595.2756,
+            height_pt: 841.8898,
+        };
+        let resolved = resolve(&graph, &a4);
+        // Both axes present in full: 5pt graph paper on A4 is ~150 rows, which an earlier
+        // per-axis cap would have clipped.
+        let horizontals = resolved
+            .iter()
+            .filter(|shape| matches!(shape, TemplateShape::Line { y1, y2, .. } if y1 == y2))
+            .count();
+        assert!(horizontals > 140, "{horizontals} rows is a truncated page");
+        assert!(resolved.len() < MAX_SHAPES / 2, "{}", resolved.len());
     }
 
     #[test]

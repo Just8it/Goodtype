@@ -12,7 +12,7 @@ use std::{
 
 use crate::{
     NotebookManifest, Page, PageBackground, PageObject, PageReference, SCHEMA_VERSION, SourceRef,
-    SourceRole, layout, nonnegative, positive,
+    SourceRole, layout, nonnegative, positive, valid_page_dimension,
 };
 
 use super::{
@@ -135,7 +135,11 @@ pub(crate) fn validate_snapshot(
 
 fn validate_page_content(snapshot: &NotebookSnapshot) -> Result<(), StorageError> {
     let page = &snapshot.page;
-    if page.id.is_empty() || !positive(page.geometry.width_pt) || !positive(page.geometry.height_pt)
+    // Bounded above as well as below: page size is what decides how many shapes a template
+    // resolves into, so an unbounded page is an unbounded amount of drawing work.
+    if page.id.is_empty()
+        || !valid_page_dimension(page.geometry.width_pt)
+        || !valid_page_dimension(page.geometry.height_pt)
     {
         return invalid("page ID and geometry must be valid");
     }

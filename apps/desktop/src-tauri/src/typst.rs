@@ -9,9 +9,9 @@ use crate::workspace::{AllowedRoots, ensure_allowed};
 const PAGE_TEXT_EDITOR_PRELUDE: &str = "#let goodtype_rhythm = 16pt\n";
 
 fn editor_source(source: String) -> (String, usize) {
-    if source.starts_with("#import \"/styles/")
-        && source.lines().nth(1) == Some("#show: preset.with(rhythm: goodtype_rhythm)")
-    {
+    // The same test the export applies, asked in one place: a source carrying the generated
+    // preset header is the one that needs `goodtype_rhythm` defined before it will analyse.
+    if goodtype_typst::has_managed_preset(&source) {
         (
             format!("{PAGE_TEXT_EDITOR_PRELUDE}{source}"),
             PAGE_TEXT_EDITOR_PRELUDE.len(),

@@ -161,6 +161,9 @@ const MAX_RECENT_COLORS: usize = 8;
 /// Accepts `#rrggbb`. Eight-digit hex is deliberately rejected here *and* never produced by the
 /// UI: highlighter translucency is a separate opacity setting, so alpha never rides along inside
 /// a colour string where a stricter reader would silently drop it.
+///
+/// Narrower than `goodtype_core::valid_hex_color`, which canonical notebook content uses and
+/// which does take alpha. The difference is the point: a swatch is a pen setting, not stored ink.
 fn valid_color(color: &str) -> bool {
     color.len() == 7
         && color.starts_with('#')

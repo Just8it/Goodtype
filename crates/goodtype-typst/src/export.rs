@@ -6,7 +6,10 @@ use goodtype_core::{
     template::{Area, Edge, TemplateElement, TemplateShape, resolve},
 };
 
-const MAX_SOURCE_BYTES: usize = 1024 * 1024;
+/// The crate's one Typst source ceiling. This module had its own copy of the same number, which
+/// shadowed the public one at every call site below and agreed with it only by coincidence.
+use crate::MAX_SOURCE_BYTES;
+
 const MAX_PAGE_ITEMS: usize = 10_000;
 const MAX_STROKE_POINTS: usize = 1_000_000;
 const MAX_DIMENSION_PT: f64 = 100_000.0;
@@ -392,11 +395,7 @@ fn valid_position(x: f64, y: f64) -> Result<(), ExportError> {
     }
 }
 
-fn valid_color(color: &str) -> bool {
-    matches!(color.len(), 7 | 9)
-        && color.starts_with('#')
-        && color[1..].bytes().all(|byte| byte.is_ascii_hexdigit())
-}
+use goodtype_core::valid_hex_color as valid_color;
 
 /// An image path out of the notebook, checked by the same rule the store applied when it wrote
 /// one. These names come from canonical JSON, so the strict notebook rule is the right one — and
@@ -710,10 +709,7 @@ fn page_text_source(page: &ExportPage, source: &str) -> String {
     }
 }
 
-fn has_managed_preset(source: &str) -> bool {
-    source.starts_with("#import \"/styles/")
-        && source.lines().nth(1) == Some("#show: preset.with(rhythm: goodtype_rhythm)")
-}
+use crate::has_managed_preset;
 
 fn page_text_bounds(area: &Area, width_pt: f64, height_pt: f64) -> Option<PageTextBounds> {
     let bounds = PageTextBounds {

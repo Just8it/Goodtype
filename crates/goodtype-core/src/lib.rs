@@ -17,10 +17,42 @@ const fn default_ink_z_index() -> i32 {
     DEFAULT_INK_Z_INDEX
 }
 
+/// The largest a page may be, in points — a little over 35 metres on a side.
+///
+/// Far past any paper, and deliberately so: this is not a taste limit but the bound that makes
+/// everything downstream finite. A template resolves into a shape per spacing step, so page size
+/// is what decides how much work drawing one page is; without a ceiling here a notebook could
+/// name a page of `f64::MAX` points and the renderer would be asked for more shapes than there
+/// is memory to hold. The export already refused anything past this, but only after storage had
+/// accepted it, which is the wrong end to find out.
+pub const MAX_PAGE_DIMENSION_PT: f64 = 100_000.0;
+
 /// Finite and greater than zero. Shared by every measurement the store refuses to guess at:
 /// a zero or NaN width is a corrupt page, not a small one.
 pub(crate) fn positive(value: f64) -> bool {
     value.is_finite() && value > 0.0
+}
+
+/// A page extent: positive, and small enough that resolving a template against it terminates.
+pub(crate) fn valid_page_dimension(value: f64) -> bool {
+    positive(value) && value <= MAX_PAGE_DIMENSION_PT
+}
+
+/// A colour as it appears in canonical notebook content: `#rrggbb`, or `#rrggbbaa` where the
+/// content carries its own alpha.
+///
+/// One rule for everything stored in a notebook and everything drawn from it — the template
+/// validator and the PDF export each had their own byte-identical copy, which is one edit away
+/// from an export accepting a colour the store would have refused.
+///
+/// The desktop app's swatch rule is deliberately *not* this one: it takes `#rrggbb` only, because
+/// highlighter translucency is a separate opacity setting there and alpha riding along inside a
+/// colour string is how it would get silently dropped. That difference is a policy, so it is
+/// stated where it is made rather than hidden behind a shared name.
+pub fn valid_hex_color(color: &str) -> bool {
+    matches!(color.len(), 7 | 9)
+        && color.starts_with('#')
+        && color[1..].bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 /// Finite and not negative. Distinct from [`positive`] because a measured extent of zero is a
