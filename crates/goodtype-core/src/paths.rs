@@ -128,6 +128,30 @@ pub fn validate_library_relative(value: &str) -> Result<&Path, PathError> {
     Ok(path)
 }
 
+/// Whether `stem` names a DOS device Windows reserves, and therefore a name no directory or
+/// file may take.
+///
+/// One predicate rather than two, because there were two: the library refused `com0` while the
+/// store accepted it, and the store accepted a bare `com` the library refused. A library is
+/// synced and shared, so both rules land on the same disks and disagreeing about them is how the
+/// same name becomes creatable through one path and not the other.
+///
+/// Deliberately a superset of what Windows actually reserves: `COM0` and `LPT0` are not device
+/// names, but refusing them costs a name nobody wants and removes the off-by-one entirely.
+pub fn is_windows_reserved(stem: &str) -> bool {
+    const BARE: [&str; 6] = ["con", "prn", "aux", "nul", "com", "lpt"];
+    let lowered = stem.to_ascii_lowercase();
+    if BARE.contains(&lowered.as_str()) {
+        return true;
+    }
+    matches!(
+        lowered
+            .strip_prefix("com")
+            .or_else(|| lowered.strip_prefix("lpt")),
+        Some(rest) if rest.len() == 1 && rest.as_bytes()[0].is_ascii_digit()
+    )
+}
+
 /// Resolve a notebook-relative path that must already exist as a file.
 pub fn resolve_file(root: &Path, relative: &str) -> Result<PathBuf, PathError> {
     let path = validate_relative(relative)?;
@@ -191,6 +215,26 @@ mod tests {
         for value in ["..", "/absolute", "a\\b", ""] {
             assert!(validate_relative(value).is_err());
             assert!(validate_library_relative(value).is_err());
+        }
+    }
+
+    /// The library and the store used to disagree about these, in both directions. Pinned here
+    /// so the one predicate stays the only answer.
+    #[test]
+    fn reserved_device_names_are_refused_the_same_way_everywhere() {
+        for reserved in [
+            "con", "CON", "prn", "aux", "nul", "com", "lpt", "com0", "COM1", "com9", "lpt0", "LPT9",
+        ] {
+            assert!(
+                is_windows_reserved(reserved),
+                "`{reserved}` should be reserved"
+            );
+        }
+        for ordinary in ["console", "com10", "communication", "prnt", "nula", "a", ""] {
+            assert!(
+                !is_windows_reserved(ordinary),
+                "`{ordinary}` should be an ordinary name"
+            );
         }
     }
 

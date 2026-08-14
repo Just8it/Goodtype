@@ -38,10 +38,40 @@ pub struct Diagnostic {
     pub to: usize,
 }
 
-#[derive(Debug, Default, Serialize)]
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Analysis {
     pub highlights: Vec<Highlight>,
     pub diagnostics: Vec<Diagnostic>,
+    /// Whether the analyzer actually answered.
+    ///
+    /// Completion, hover and formatting all fall back to the in-process `typst-ide` path when
+    /// the sidecar is unavailable. Semantic highlighting has no fallback — `typst-ide` has no
+    /// equivalent — so an empty analysis is genuinely ambiguous: it means either "this source
+    /// has no tokens" or "there is no analyzer on this platform". Saying which is what lets the
+    /// editor keep the colours it already has instead of blanking the document.
+    pub available: bool,
+}
+
+impl Analysis {
+    /// No analyzer answered. Distinct from an empty analysis, which is a real answer.
+    pub fn unavailable() -> Self {
+        Self {
+            highlights: Vec::new(),
+            diagnostics: Vec::new(),
+            available: false,
+        }
+    }
+}
+
+impl Default for Analysis {
+    fn default() -> Self {
+        Self {
+            highlights: Vec::new(),
+            diagnostics: Vec::new(),
+            available: true,
+        }
+    }
 }
 
 impl Tinymist {
@@ -116,6 +146,7 @@ impl Tinymist {
                     response,
                 )?,
                 diagnostics: client.diagnostics(source)?,
+                available: true,
             })
         })
     }
@@ -818,10 +849,19 @@ fn completion_kind(kind: Option<u64>) -> &'static str {
     }
 }
 
+/// The bundled sidecar, once its checksum matches.
+///
+/// Only success is cached. Caching the `Result` meant one transient failure — a file lock during
+/// an upgrade, a slow volume at startup — disabled editor intelligence for the rest of the
+/// process, with no way back short of a restart. Re-verifying after a failure costs one hash of
+/// a file that is almost certainly in the page cache.
 fn verified_binary() -> Result<PathBuf, String> {
-    static BINARY: OnceLock<Result<PathBuf, String>> = OnceLock::new();
-    BINARY
-        .get_or_init(|| {
+    static BINARY: OnceLock<PathBuf> = OnceLock::new();
+    if let Some(verified) = BINARY.get() {
+        return Ok(verified.clone());
+    }
+    let verify = || -> Result<PathBuf, String> {
+        {
             let path = if cfg!(debug_assertions) {
                 PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                     .join("binaries/tinymist-x86_64-pc-windows-msvc.exe")
@@ -850,8 +890,10 @@ fn verified_binary() -> Result<PathBuf, String> {
                 ));
             }
             Ok(path)
-        })
-        .clone()
+        }
+    };
+    let verified = verify()?;
+    Ok(BINARY.get_or_init(|| verified).clone())
 }
 
 #[cfg(test)]

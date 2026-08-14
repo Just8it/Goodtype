@@ -1,7 +1,6 @@
 use std::{
     collections::HashSet,
     fs,
-    io::Write,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
@@ -41,10 +40,14 @@ pub fn ensure_allowed(roots: &AllowedRoots, root: &str) -> Result<PathBuf, Strin
     }
 }
 
-fn path_string(path: PathBuf) -> Result<String, String> {
+/// A real path as the string the frontend and the recents file carry.
+///
+/// One conversion rather than the five that had accumulated, each with its own wording for the
+/// same refusal — the message a writer sees should not depend on which command reached it.
+pub(crate) fn path_string(path: PathBuf) -> Result<String, String> {
     path.into_os_string()
         .into_string()
-        .map_err(|_| "the notebook path is not valid Unicode".to_owned())
+        .map_err(|_| "that path is not valid Unicode".to_owned())
 }
 
 #[tauri::command]
@@ -249,26 +252,7 @@ pub fn write_phase0_metrics(
             .map_err(|_| "the metrics directory escapes the notebook root".to_owned())?;
 
     let target = metrics_dir.join("phase0-metrics.json");
-    if target
-        .symlink_metadata()
-        .is_ok_and(|metadata| metadata.file_type().is_symlink())
-    {
-        return Err("the metrics file cannot be a symbolic link".to_owned());
-    }
-    let mut bytes = serde_json::to_vec_pretty(&metrics).map_err(|error| error.to_string())?;
-    if bytes.len() > 64 * 1024 {
-        return Err("the metrics payload is too large".to_owned());
-    }
-    bytes.push(b'\n');
-    let mut temporary =
-        tempfile::NamedTempFile::new_in(&metrics_dir).map_err(|error| error.to_string())?;
-    temporary
-        .write_all(&bytes)
-        .and_then(|_| temporary.flush())
-        .and_then(|_| temporary.as_file().sync_all())
-        .map_err(|error| error.to_string())?;
-    temporary
-        .persist(target)
-        .map_err(|error| error.error.to_string())?;
-    Ok(())
+    crate::store::write_json(&target, &metrics, MAX_METRICS_BYTES)
 }
+
+const MAX_METRICS_BYTES: usize = 64 * 1024;

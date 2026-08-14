@@ -39,13 +39,7 @@ pub async fn export_notebook_pdf(
 
             export_pages(notebook_root, &output_name, &pages, allow_remote_packages)
                 .map_err(|error| error.to_string())
-                .and_then(|result| {
-                    result
-                        .output_path
-                        .into_os_string()
-                        .into_string()
-                        .map_err(|_| "the PDF path is not valid Unicode".to_owned())
-                })
+                .and_then(|result| crate::workspace::path_string(result.output_path))
         })
     })
     .await

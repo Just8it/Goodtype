@@ -183,6 +183,9 @@
           root !== requestedRoot ||
           view?.state.doc.toString() !== source
         ) return;
+        // No analyzer answered — keep whatever is already coloured rather than blanking the
+        // document. An empty result from a working analyzer is a real answer and does clear it.
+        if (!analysis.available) return;
         const diagnostics: Diagnostic[] = analysis.diagnostics.map((diagnostic) => ({
           severity: diagnostic.severity,
           message: diagnostic.message,

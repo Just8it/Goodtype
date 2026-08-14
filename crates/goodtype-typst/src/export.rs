@@ -559,8 +559,16 @@ fn ink_strata(page: &ExportPage) -> Vec<InkStratum<'_>> {
     groups.into_iter().map(|(_, stratum)| stratum).collect()
 }
 
+/// Escape a string being embedded in generated Typst source.
+///
+/// The backslash goes first and must stay first: escaping it after the quote would turn the `\"`
+/// this produces back into a literal backslash followed by an unescaped quote. Nothing reaching
+/// here can currently contain one — colours are hex-validated and paths went through
+/// `validate_relative`, which refuses `\` — but this is the one function standing between
+/// canonical content and generated code, and it should not depend on its callers to be safe.
 fn typst_string(value: &str) -> String {
     value
+        .replace('\\', "\\\\")
         .replace('"', "\\\"")
         .replace('\n', "\\n")
         .replace('\r', "\\r")

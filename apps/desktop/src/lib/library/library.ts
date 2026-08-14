@@ -84,14 +84,24 @@ export function childPath(parent: string, name: string): string {
  * two distinct names into one folder.
  */
 const FORBIDDEN = /[\\/:*?"<>|]/;
-const RESERVED =
-  /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
+/**
+ * The same superset `is_windows_reserved` refuses in `crates/goodtype-core/src/paths.rs`, which
+ * is the rule that actually governs: this copy only makes the message immediate. `com0`/`lpt0`
+ * are not real device names but are refused on both sides so neither can accept a name the
+ * other rejects.
+ */
+const RESERVED = /^(con|prn|aux|nul|com|lpt|com[0-9]|lpt[0-9])$/i;
+
+/** Mirrors `MAX_NAME_CHARS` in `apps/desktop/src-tauri/src/library.rs`. */
+const MAX_NAME_CHARS = 80;
 
 export function nameProblem(name: string): string | null {
   const trimmed = name.trim();
   if (!trimmed) return "A name is needed";
   if (trimmed !== name) return "Names cannot start or end with a space";
-  if (name.length > 80) return "That name is too long";
+  // Counted the way Rust counts it — `length` is UTF-16 units, so an emoji or an accented
+  // character would otherwise be measured differently on each side of the boundary.
+  if ([...name].length > MAX_NAME_CHARS) return "That name is too long";
   if (FORBIDDEN.test(name)) return 'A name cannot contain \\ / : * ? " < > |';
   if (name.startsWith(".")) return "A name starting with a dot would be hidden";
   if (name.endsWith(".")) return "Names cannot end with a dot";

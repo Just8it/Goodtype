@@ -152,19 +152,31 @@ pub async fn analyze_typst(
     let tinymist = tinymist.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let (source, prefix) = editor_source(source);
-        let mut analysis = tinymist.analyze(&root, &source).unwrap_or_default();
-        analysis.highlights.retain_mut(|item| {
-            item.from = item.from.saturating_sub(prefix);
-            item.to = item.to.saturating_sub(prefix);
-            item.to > item.from
-        });
-        analysis.diagnostics.retain_mut(|item| {
-            item.from = item.from.saturating_sub(prefix);
-            item.to = item.to.saturating_sub(prefix);
-            item.to > item.from
-        });
+        // An unavailable analyzer is reported as such rather than as an empty answer. There is
+        // no in-process fallback for semantic tokens, so silently returning nothing left the
+        // editor looking broken on any platform without the sidecar.
+        let Ok(mut analysis) = tinymist.analyze(&root, &source) else {
+            return Ok(crate::tinymist::Analysis::unavailable());
+        };
+        analysis
+            .highlights
+            .retain_mut(|item| shift_range(&mut item.from, &mut item.to, prefix));
+        analysis
+            .diagnostics
+            .retain_mut(|item| shift_range(&mut item.from, &mut item.to, prefix));
         Ok(analysis)
     })
     .await
     .map_err(|error| error.to_string())?
+}
+
+/// Move a range from the analysed source back onto the canonical source the writer sees.
+///
+/// The generated prelude is not part of the document, so anything inside it collapses to an
+/// empty range and is dropped by the caller's `retain`. Written once because the same shift was
+/// applied at four call sites, twice for offsets and twice for ranges.
+fn shift_range(from: &mut usize, to: &mut usize, prefix: usize) -> bool {
+    *from = from.saturating_sub(prefix);
+    *to = to.saturating_sub(prefix);
+    *to > *from
 }

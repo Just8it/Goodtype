@@ -45,23 +45,84 @@ pub(crate) fn with_notebook<T>(
     with_notebook_lock(histories, |_| operation())
 }
 
-/// Observe a page under the shared history map. Every history-bearing command funnels through
-/// here so the (root, page) keying stays in one place.
-fn with_history<T>(
-    histories: &NotebookHistories,
-    root: PathBuf,
-    page_id: String,
-    operation: impl FnOnce(&PathBuf, &mut NotebookHistory) -> Result<T, storage::StorageError>,
+/// The shape every notebook command has: admit the root, take the notebook lock, and do the work
+/// off the UI thread.
+///
+/// Written out by hand at fifteen call sites, it was four lines of ceremony around three lines of
+/// work — and one of those four is `ensure_allowed`, which is the whole reason the frontend
+/// cannot point Rust at an arbitrary directory. A command that forgot it would look exactly like
+/// its neighbours. Now it cannot be forgotten, because there is nowhere to forget it.
+async fn on_notebook<T: Send + 'static>(
+    roots: &tauri::State<'_, AllowedRoots>,
+    histories: &tauri::State<'_, NotebookHistories>,
+    root: String,
+    operation: impl FnOnce(&Path, &mut HistoryStore) -> Result<T, String> + Send + 'static,
 ) -> Result<T, String> {
-    with_notebook_lock(histories, |histories| {
-        let history = histories.pages.entry((root.clone(), page_id)).or_default();
-        operation(&root, history).map_err(message)
+    let root = ensure_allowed(roots, &root)?;
+    let histories = NotebookHistories(histories.0.clone());
+    tauri::async_runtime::spawn_blocking(move || {
+        with_notebook_lock(&histories, |store| operation(&root, store))
     })
+    .await
+    .map_err(message)?
 }
 
-/// A structural manifest change invalidates every page fingerprint because the manifest is part
-/// of each page's canonical file set. Record the structure action, drop those histories, and
-/// observe the page returned by the change.
+/// As [`on_notebook`], for the operations scoped to one page: resolves the `(root, page)` history
+/// entry so that keying stays in one place.
+async fn on_page<T: Send + 'static>(
+    roots: &tauri::State<'_, AllowedRoots>,
+    histories: &tauri::State<'_, NotebookHistories>,
+    root: String,
+    page_id: String,
+    operation: impl FnOnce(&Path, &str, &mut NotebookHistory) -> Result<T, storage::StorageError>
+    + Send
+    + 'static,
+) -> Result<T, String> {
+    on_notebook(roots, histories, root, move |root, store| {
+        let history = store
+            .pages
+            .entry((root.to_path_buf(), page_id.clone()))
+            .or_default();
+        operation(root, &page_id, history).map_err(message)
+    })
+    .await
+}
+
+/// For the read-only operations that touch no history at all, and so need no lock.
+async fn on_root<T: Send + 'static>(
+    roots: &tauri::State<'_, AllowedRoots>,
+    root: String,
+    operation: impl FnOnce(&Path) -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    let root = ensure_allowed(roots, &root)?;
+    tauri::async_runtime::spawn_blocking(move || operation(&root))
+        .await
+        .map_err(message)?
+}
+
+/// A structural manifest change invalidates every page fingerprint, because the manifest is part
+/// of each page's canonical file set. Drop those histories and re-observe the page the change
+/// landed on.
+///
+/// Both the advance and the undo/redo path need exactly this, and each carried its own copy.
+fn reobserve_after_structure(
+    histories: &mut HistoryStore,
+    root: &Path,
+    result: StructureHistoryResult,
+) -> Result<StructureHistoryResult, String> {
+    histories
+        .pages
+        .retain(|(known_root, _), _| known_root != root);
+    let page_id = result.snapshot.page.id.clone();
+    let history = histories
+        .pages
+        .entry((root.to_path_buf(), page_id.clone()))
+        .or_default();
+    let snapshot = storage::observe_page(root, &page_id, history).map_err(message)?;
+    Ok(StructureHistoryResult { snapshot, ..result })
+}
+
+/// Record the structure action, then re-observe the page it produced.
 fn advance_structure_result(
     histories: &mut HistoryStore,
     root: &Path,
@@ -73,16 +134,7 @@ fn advance_structure_result(
         histories.structure.entry(root.to_path_buf()).or_default(),
     )
     .map_err(message)?;
-    histories
-        .pages
-        .retain(|(known_root, _), _| known_root != root);
-    let page_id = result.snapshot.page.id.clone();
-    let history = histories
-        .pages
-        .entry((root.to_path_buf(), page_id.clone()))
-        .or_default();
-    let snapshot = storage::observe_page(root, &page_id, history).map_err(message)?;
-    Ok(StructureHistoryResult { snapshot, ..result })
+    reobserve_after_structure(histories, root, result)
 }
 
 fn observe_structure(
@@ -111,16 +163,7 @@ fn restore_structure_result(
         storage::redo_structure(root, modified_at, structure)
     }
     .map_err(message)?;
-    histories
-        .pages
-        .retain(|(known_root, _), _| known_root != root);
-    let page_id = result.snapshot.page.id.clone();
-    let history = histories
-        .pages
-        .entry((root.to_path_buf(), page_id.clone()))
-        .or_default();
-    let snapshot = storage::observe_page(root, &page_id, history).map_err(message)?;
-    Ok(StructureHistoryResult { snapshot, ..result })
+    reobserve_after_structure(histories, root, result)
 }
 
 #[tauri::command]
@@ -131,35 +174,30 @@ pub async fn create_notebook(
     snapshot: NotebookSnapshot,
     preset_choice: Option<crate::preset::PresetChoice>,
 ) -> Result<(), String> {
-    let root = ensure_allowed(&roots, &root)?;
-    let histories = NotebookHistories(histories.0.clone());
-    tauri::async_runtime::spawn_blocking(move || {
-        with_notebook_lock(&histories, |history_map| {
-            let preset_choice = preset_choice.unwrap_or_default();
-            if !matches!(preset_choice, crate::preset::PresetChoice::None)
-                && root.join("styles/default.typ").exists()
-            {
-                return Err("styles/default.typ already exists".into());
+    on_notebook(&roots, &histories, root, move |root, store| {
+        let preset_choice = preset_choice.unwrap_or_default();
+        if !matches!(preset_choice, crate::preset::PresetChoice::None)
+            && root.join("styles/default.typ").exists()
+        {
+            return Err("styles/default.typ already exists".into());
+        }
+        let installed = crate::preset::install_default(root, &preset_choice)?.is_some();
+        if let Err(error) = storage::create_notebook(root, &snapshot) {
+            if installed {
+                let _ = storage::remove_typst_style(root, "default.typ");
             }
-            let installed = crate::preset::install_default(&root, &preset_choice)?.is_some();
-            if let Err(error) = storage::create_notebook(&root, &snapshot) {
-                if installed {
-                    let _ = storage::remove_typst_style(&root, "default.typ");
-                }
-                return Err(message(error));
-            }
-            observe_structure(history_map, &root, &snapshot.page.id)?;
-            let history = history_map
-                .pages
-                .entry((root.clone(), snapshot.page.id.clone()))
-                .or_default();
-            storage::observe_page(&root, &snapshot.page.id, history)
-                .map(|_| ())
-                .map_err(message)
-        })
+            return Err(message(error));
+        }
+        observe_structure(store, root, &snapshot.page.id)?;
+        let history = store
+            .pages
+            .entry((root.to_path_buf(), snapshot.page.id.clone()))
+            .or_default();
+        storage::observe_page(root, &snapshot.page.id, history)
+            .map(|_| ())
+            .map_err(message)
     })
     .await
-    .map_err(message)?
 }
 
 #[tauri::command]
@@ -168,21 +206,16 @@ pub async fn open_notebook(
     histories: tauri::State<'_, NotebookHistories>,
     root: String,
 ) -> Result<NotebookSnapshot, String> {
-    let root = ensure_allowed(&roots, &root)?;
-    let histories = NotebookHistories(histories.0.clone());
-    tauri::async_runtime::spawn_blocking(move || {
-        with_notebook_lock(&histories, |history_map| {
-            let snapshot = storage::open_notebook(&root).map_err(message)?;
-            observe_structure(history_map, &root, &snapshot.page.id)?;
-            let history = history_map
-                .pages
-                .entry((root.clone(), snapshot.page.id.clone()))
-                .or_default();
-            storage::observe_page(&root, &snapshot.page.id, history).map_err(message)
-        })
+    on_notebook(&roots, &histories, root, |root, store| {
+        let snapshot = storage::open_notebook(root).map_err(message)?;
+        observe_structure(store, root, &snapshot.page.id)?;
+        let history = store
+            .pages
+            .entry((root.to_path_buf(), snapshot.page.id.clone()))
+            .or_default();
+        storage::observe_page(root, &snapshot.page.id, history).map_err(message)
     })
     .await
-    .map_err(message)?
 }
 
 #[tauri::command]
@@ -192,15 +225,7 @@ pub async fn open_page(
     root: String,
     page_id: String,
 ) -> Result<NotebookSnapshot, String> {
-    let root = ensure_allowed(&roots, &root)?;
-    let histories = NotebookHistories(histories.0.clone());
-    tauri::async_runtime::spawn_blocking(move || {
-        with_history(&histories, root, page_id.clone(), |root, history| {
-            storage::observe_page(root, &page_id, history)
-        })
-    })
-    .await
-    .map_err(message)?
+    on_page(&roots, &histories, root, page_id, storage::observe_page).await
 }
 
 #[tauri::command]
@@ -210,15 +235,7 @@ pub async fn focus_page(
     root: String,
     page_id: String,
 ) -> Result<HistoryResult, String> {
-    let root = ensure_allowed(&roots, &root)?;
-    let histories = NotebookHistories(histories.0.clone());
-    tauri::async_runtime::spawn_blocking(move || {
-        with_history(&histories, root, page_id.clone(), |root, history| {
-            storage::focus_page(root, &page_id, history)
-        })
-    })
-    .await
-    .map_err(message)?
+    on_page(&roots, &histories, root, page_id, storage::focus_page).await
 }
 
 #[derive(serde::Deserialize)]
@@ -238,24 +255,19 @@ pub async fn create_page(
     root: String,
     request: CreatePageRequest,
 ) -> Result<StructureHistoryResult, String> {
-    let root = ensure_allowed(&roots, &root)?;
-    let histories = NotebookHistories(histories.0.clone());
-    tauri::async_runtime::spawn_blocking(move || {
-        with_notebook_lock(&histories, |history_map| {
-            observe_structure(history_map, &root, &request.active_page_id)?;
-            let snapshot = storage::create_page(
-                &root,
-                &request.modified_at,
-                &request.position,
-                request.background.as_ref(),
-                request.geometry.as_ref(),
-            )
-            .map_err(message)?;
-            advance_structure_result(history_map, &root, snapshot)
-        })
+    on_notebook(&roots, &histories, root, move |root, store| {
+        observe_structure(store, root, &request.active_page_id)?;
+        let snapshot = storage::create_page(
+            root,
+            &request.modified_at,
+            &request.position,
+            request.background.as_ref(),
+            request.geometry.as_ref(),
+        )
+        .map_err(message)?;
+        advance_structure_result(store, root, snapshot)
     })
     .await
-    .map_err(message)?
 }
 
 fn safe_pdf_filename(path: &Path) -> String {
@@ -329,14 +341,12 @@ pub async fn read_pdf_reference(
     root: String,
     source_path: String,
 ) -> Result<tauri::ipc::Response, String> {
-    let root = ensure_allowed(&roots, &root)?;
-    tauri::async_runtime::spawn_blocking(move || {
-        storage::read_pdf_reference(&root, &source_path)
+    on_root(&roots, root, move |root| {
+        storage::read_pdf_reference(root, &source_path)
             .map(tauri::ipc::Response::new)
             .map_err(message)
     })
     .await
-    .map_err(message)?
 }
 
 #[derive(serde::Deserialize)]
@@ -356,24 +366,19 @@ pub async fn import_pdf_pages(
     root: String,
     request: ImportPdfPagesRequest,
 ) -> Result<StructureHistoryResult, String> {
-    let root = ensure_allowed(&roots, &root)?;
-    let histories = NotebookHistories(histories.0.clone());
-    tauri::async_runtime::spawn_blocking(move || {
-        with_notebook_lock(&histories, |history_map| {
-            observe_structure(history_map, &root, &request.active_page_id)?;
-            let snapshot = storage::import_pdf_pages(
-                &root,
-                &request.modified_at,
-                &request.position,
-                &request.source_path,
-                &request.geometries,
-            )
-            .map_err(message)?;
-            advance_structure_result(history_map, &root, snapshot)
-        })
+    on_notebook(&roots, &histories, root, move |root, store| {
+        observe_structure(store, root, &request.active_page_id)?;
+        let snapshot = storage::import_pdf_pages(
+            root,
+            &request.modified_at,
+            &request.position,
+            &request.source_path,
+            &request.geometries,
+        )
+        .map_err(message)?;
+        advance_structure_result(store, root, snapshot)
     })
     .await
-    .map_err(message)?
 }
 
 #[tauri::command]
@@ -383,17 +388,16 @@ pub async fn commit_notebook(
     root: String,
     snapshot: NotebookSnapshot,
 ) -> Result<HistoryResult, String> {
-    let root = ensure_allowed(&roots, &root)?;
-    let histories = NotebookHistories(histories.0.clone());
-    tauri::async_runtime::spawn_blocking(move || {
-        let page_id = snapshot.page.id.clone();
-        // ponytail: one lock is enough for one open notebook; use per-root locks with multi-window work.
-        with_history(&histories, root, page_id, |root, history| {
-            storage::commit_notebook(root, history, snapshot)
-        })
-    })
+    let page_id = snapshot.page.id.clone();
+    // ponytail: one lock is enough for one open notebook; use per-root locks with multi-window work.
+    on_page(
+        &roots,
+        &histories,
+        root,
+        page_id,
+        move |root, _, history| storage::commit_notebook(root, history, snapshot),
+    )
     .await
-    .map_err(message)?
 }
 
 #[tauri::command]
@@ -403,15 +407,10 @@ pub async fn undo_notebook(
     root: String,
     page_id: String,
 ) -> Result<HistoryResult, String> {
-    let root = ensure_allowed(&roots, &root)?;
-    let histories = NotebookHistories(histories.0.clone());
-    tauri::async_runtime::spawn_blocking(move || {
-        with_history(&histories, root, page_id, |root, history| {
-            storage::undo_notebook(root, history)
-        })
+    on_page(&roots, &histories, root, page_id, |root, _, history| {
+        storage::undo_notebook(root, history)
     })
     .await
-    .map_err(message)?
 }
 
 #[tauri::command]
@@ -421,15 +420,10 @@ pub async fn redo_notebook(
     root: String,
     page_id: String,
 ) -> Result<HistoryResult, String> {
-    let root = ensure_allowed(&roots, &root)?;
-    let histories = NotebookHistories(histories.0.clone());
-    tauri::async_runtime::spawn_blocking(move || {
-        with_history(&histories, root, page_id, |root, history| {
-            storage::redo_notebook(root, history)
-        })
+    on_page(&roots, &histories, root, page_id, |root, _, history| {
+        storage::redo_notebook(root, history)
     })
     .await
-    .map_err(message)?
 }
 
 #[tauri::command]
@@ -440,18 +434,12 @@ pub async fn duplicate_page(
     page_id: String,
     modified_at: String,
 ) -> Result<StructureHistoryResult, String> {
-    let root = ensure_allowed(&roots, &root)?;
-    let histories = NotebookHistories(histories.0.clone());
-    tauri::async_runtime::spawn_blocking(move || {
-        with_notebook_lock(&histories, |history_map| {
-            observe_structure(history_map, &root, &page_id)?;
-            let snapshot =
-                storage::duplicate_page(&root, &page_id, &modified_at).map_err(message)?;
-            advance_structure_result(history_map, &root, snapshot)
-        })
+    on_notebook(&roots, &histories, root, move |root, store| {
+        observe_structure(store, root, &page_id)?;
+        let snapshot = storage::duplicate_page(root, &page_id, &modified_at).map_err(message)?;
+        advance_structure_result(store, root, snapshot)
     })
     .await
-    .map_err(message)?
 }
 
 #[tauri::command]
@@ -462,17 +450,12 @@ pub async fn delete_page(
     page_id: String,
     modified_at: String,
 ) -> Result<StructureHistoryResult, String> {
-    let root = ensure_allowed(&roots, &root)?;
-    let histories = NotebookHistories(histories.0.clone());
-    tauri::async_runtime::spawn_blocking(move || {
-        with_notebook_lock(&histories, |history_map| {
-            observe_structure(history_map, &root, &page_id)?;
-            let snapshot = storage::delete_page(&root, &page_id, &modified_at).map_err(message)?;
-            advance_structure_result(history_map, &root, snapshot)
-        })
+    on_notebook(&roots, &histories, root, move |root, store| {
+        observe_structure(store, root, &page_id)?;
+        let snapshot = storage::delete_page(root, &page_id, &modified_at).map_err(message)?;
+        advance_structure_result(store, root, snapshot)
     })
     .await
-    .map_err(message)?
 }
 
 #[tauri::command]
@@ -484,19 +467,13 @@ pub async fn reorder_pages(
     modified_at: String,
     active_page_id: String,
 ) -> Result<StructureHistoryResult, String> {
-    let root = ensure_allowed(&roots, &root)?;
-    let histories = NotebookHistories(histories.0.clone());
-    tauri::async_runtime::spawn_blocking(move || {
-        with_notebook_lock(&histories, |history_map| {
-            observe_structure(history_map, &root, &active_page_id)?;
-            let snapshot =
-                storage::reorder_pages(&root, &ordered_ids, &modified_at, &active_page_id)
-                    .map_err(message)?;
-            advance_structure_result(history_map, &root, snapshot)
-        })
+    on_notebook(&roots, &histories, root, move |root, store| {
+        observe_structure(store, root, &active_page_id)?;
+        let snapshot = storage::reorder_pages(root, &ordered_ids, &modified_at, &active_page_id)
+            .map_err(message)?;
+        advance_structure_result(store, root, snapshot)
     })
     .await
-    .map_err(message)?
 }
 
 #[tauri::command]
@@ -506,15 +483,10 @@ pub async fn undo_page_structure(
     root: String,
     modified_at: String,
 ) -> Result<StructureHistoryResult, String> {
-    let root = ensure_allowed(&roots, &root)?;
-    let histories = NotebookHistories(histories.0.clone());
-    tauri::async_runtime::spawn_blocking(move || {
-        with_notebook_lock(&histories, |history_map| {
-            restore_structure_result(history_map, &root, &modified_at, true)
-        })
+    on_notebook(&roots, &histories, root, move |root, store| {
+        restore_structure_result(store, root, &modified_at, true)
     })
     .await
-    .map_err(message)?
 }
 
 #[tauri::command]
@@ -524,15 +496,10 @@ pub async fn redo_page_structure(
     root: String,
     modified_at: String,
 ) -> Result<StructureHistoryResult, String> {
-    let root = ensure_allowed(&roots, &root)?;
-    let histories = NotebookHistories(histories.0.clone());
-    tauri::async_runtime::spawn_blocking(move || {
-        with_notebook_lock(&histories, |history_map| {
-            restore_structure_result(history_map, &root, &modified_at, false)
-        })
+    on_notebook(&roots, &histories, root, move |root, store| {
+        restore_structure_result(store, root, &modified_at, false)
     })
     .await
-    .map_err(message)?
 }
 
 #[tauri::command]
@@ -541,12 +508,10 @@ pub async fn search_notebook(
     root: String,
     query: String,
 ) -> Result<Vec<SearchHit>, String> {
-    let root = ensure_allowed(&roots, &root)?;
-    tauri::async_runtime::spawn_blocking(move || {
-        storage::search_notebook(&root, &query).map_err(message)
+    on_root(&roots, root, move |root| {
+        storage::search_notebook(root, &query).map_err(message)
     })
     .await
-    .map_err(message)?
 }
 
 #[tauri::command]
@@ -554,12 +519,10 @@ pub async fn list_recovery_candidates(
     roots: tauri::State<'_, AllowedRoots>,
     root: String,
 ) -> Result<Vec<RecoveryCandidate>, String> {
-    let root = ensure_allowed(&roots, &root)?;
-    tauri::async_runtime::spawn_blocking(move || {
-        storage::list_recovery_candidates(&root).map_err(message)
+    on_root(&roots, root, |root| {
+        storage::list_recovery_candidates(root).map_err(message)
     })
     .await
-    .map_err(message)?
 }
 
 #[tauri::command]
@@ -569,25 +532,20 @@ pub async fn restore_recovery_candidate(
     root: String,
     file_name: String,
 ) -> Result<HistoryResult, String> {
-    let root = ensure_allowed(&roots, &root)?;
-    let histories = NotebookHistories(histories.0.clone());
-    tauri::async_runtime::spawn_blocking(move || {
-        with_notebook_lock(&histories, |history_map| {
-            let candidates = storage::list_recovery_candidates(&root).map_err(message)?;
-            let page_id = candidates
-                .iter()
-                .find(|candidate| candidate.file_name == file_name)
-                .map(|candidate| candidate.page_id.clone())
-                .ok_or_else(|| "unknown recovery candidate".to_owned())?;
-            let history = history_map
-                .pages
-                .entry((root.clone(), page_id))
-                .or_default();
-            storage::restore_recovery_candidate(&root, history, &file_name).map_err(message)
-        })
+    on_notebook(&roots, &histories, root, move |root, store| {
+        let candidates = storage::list_recovery_candidates(root).map_err(message)?;
+        let page_id = candidates
+            .iter()
+            .find(|candidate| candidate.file_name == file_name)
+            .map(|candidate| candidate.page_id.clone())
+            .ok_or_else(|| "unknown recovery candidate".to_owned())?;
+        let history = store
+            .pages
+            .entry((root.to_path_buf(), page_id))
+            .or_default();
+        storage::restore_recovery_candidate(root, history, &file_name).map_err(message)
     })
     .await
-    .map_err(message)?
 }
 
 #[tauri::command]
@@ -597,15 +555,10 @@ pub async fn discard_recovery_candidate(
     root: String,
     file_name: String,
 ) -> Result<(), String> {
-    let root = ensure_allowed(&roots, &root)?;
-    let histories = NotebookHistories(histories.0.clone());
-    tauri::async_runtime::spawn_blocking(move || {
-        with_notebook_lock(&histories, |_| {
-            storage::discard_recovery_candidate(&root, &file_name).map_err(message)
-        })
+    on_notebook(&roots, &histories, root, move |root, _| {
+        storage::discard_recovery_candidate(root, &file_name).map_err(message)
     })
     .await
-    .map_err(message)?
 }
 
 #[tauri::command]
@@ -616,15 +569,10 @@ pub async fn store_pasted_image(
     filename: String,
     bytes: Vec<u8>,
 ) -> Result<String, String> {
-    let root = ensure_allowed(&roots, &root)?;
-    let histories = NotebookHistories(histories.0.clone());
-    tauri::async_runtime::spawn_blocking(move || {
-        with_notebook_lock(&histories, |_| {
-            storage::store_pasted_image(&root, &filename, &bytes).map_err(message)
-        })
+    on_notebook(&roots, &histories, root, move |root, _| {
+        storage::store_pasted_image(root, &filename, &bytes).map_err(message)
     })
     .await
-    .map_err(message)?
 }
 
 #[cfg(test)]

@@ -69,7 +69,16 @@ export type TypstDiagnostic = {
   from: number;
   to: number;
 };
-export type TypstAnalysis = { highlights: TypstHighlight[]; diagnostics: TypstDiagnostic[] };
+export type TypstAnalysis = {
+  highlights: TypstHighlight[];
+  diagnostics: TypstDiagnostic[];
+  /**
+   * Whether an analyzer answered at all. Semantic highlighting has no in-process fallback, so
+   * an empty analysis with `available: false` means "nothing is analysing", not "nothing to
+   * highlight" — and the colours already on screen should stay rather than being cleared.
+   */
+  available: boolean;
+};
 
 export function analyzeTypst(root: string, source: string): Promise<TypstAnalysis> {
   return invoke<TypstAnalysis>("analyze_typst", { root, source });

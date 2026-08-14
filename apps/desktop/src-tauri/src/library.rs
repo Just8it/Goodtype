@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use tauri_plugin_dialog::DialogExt;
 
 use crate::settings::{StoredLibrary, read_library, write_library};
-use crate::workspace::{AllowedRoots, allow_root};
+use crate::workspace::{AllowedRoots, allow_root, path_string};
 
 /// A notebook's manifest can be large; a listing only needs the page count out of it. Reading
 /// more than this means the file is not a manifest we wrote.
@@ -227,9 +227,11 @@ fn sort_key(entry: &LibraryEntry) -> &str {
 /// two names the writer sees as distinct into one directory.
 pub fn validate_name(name: &str) -> Result<(), String> {
     const FORBIDDEN: [char; 9] = ['\\', '/', ':', '*', '?', '"', '<', '>', '|'];
-    const RESERVED: [&str; 6] = ["con", "prn", "aux", "nul", "com", "lpt"];
 
-    if name.is_empty() || name.len() > 80 {
+    // Counted in characters, not bytes. `name.len()` is UTF-8 length, so an ordinary German
+    // folder name of umlauts and en-dashes could be refused here while the frontend, which
+    // counts UTF-16 units, had already accepted it.
+    if name.is_empty() || name.chars().count() > MAX_NAME_CHARS {
         return Err("names are 1 to 80 characters".to_owned());
     }
     if name.trim() != name {
@@ -244,17 +246,14 @@ pub fn validate_name(name: &str) -> Result<(), String> {
     if name.contains(FORBIDDEN) || name.chars().any(|c| c.is_control()) {
         return Err(r#"a name cannot contain \ / : * ? " < > |"#.to_owned());
     }
-    let lowered = name.to_ascii_lowercase();
-    if RESERVED.iter().any(|reserved| {
-        lowered == *reserved
-            || (lowered.len() == 4
-                && lowered.starts_with(reserved)
-                && lowered.ends_with(|c: char| c.is_ascii_digit()))
-    }) {
+    if paths::is_windows_reserved(name) {
         return Err("that name is reserved by Windows".to_owned());
     }
     Ok(())
 }
+
+/// Mirrors `MAX_NAME_CHARS` in `apps/desktop/src/lib/library/library.ts`.
+const MAX_NAME_CHARS: usize = 80;
 
 /// Where a new entry will go, refusing a name already taken.
 ///
@@ -329,10 +328,7 @@ pub fn create_library_notebook(
     let root = current_root(&app, &roots)?;
     let target = free_child(&root, &parent, &name)?;
     fs::create_dir(&target).map_err(|error| error.to_string())?;
-    allow_root(&roots, &target)?
-        .into_os_string()
-        .into_string()
-        .map_err(|_| "that path is not valid Unicode".to_owned())
+    path_string(allow_root(&roots, &target)?)
 }
 
 /// Rename in place. Answers with the new path, since the old one has stopped existing.
@@ -454,12 +450,7 @@ fn internal_file(root: &Path, name: &str, create: bool) -> Result<PathBuf, Strin
     }
     .map_err(|_| "the metadata directory leaves its root".to_owned())?;
     let target = directory.join(name);
-    if target
-        .symlink_metadata()
-        .is_ok_and(|metadata| metadata.file_type().is_symlink())
-    {
-        return Err("the metadata file cannot be a symbolic link".to_owned());
-    }
+    crate::store::reject_symlink(&target)?;
     Ok(target)
 }
 
@@ -489,8 +480,13 @@ fn read_shelf(root: &Path) -> Shelf {
 }
 
 fn write_shelf(root: &Path, shelf: &Shelf) -> Result<(), String> {
-    let bytes = serde_json::to_vec_pretty(shelf).map_err(|error| error.to_string())?;
-    fs::write(internal_file(root, SHELF_FILE, true)?, bytes).map_err(|error| error.to_string())
+    // Atomically, like every other store-owned file: a starred shelf is cheap to lose track of
+    // and annoying to rebuild, and a plain write left a truncated file after a hard power-off.
+    crate::store::write_json(
+        &internal_file(root, SHELF_FILE, true)?,
+        shelf,
+        MAX_SHELF_BYTES as usize,
+    )
 }
 
 /// Drop a favourite whose entry has just moved, been renamed, or been thrown away.
@@ -695,11 +691,7 @@ pub async fn pick_library_root(
         return Ok(None);
     };
     let picked = picked.into_path().map_err(|error| error.to_string())?;
-    let canonical = allow_root(&roots, &picked)?;
-    let root = canonical
-        .into_os_string()
-        .into_string()
-        .map_err(|_| "that path is not valid Unicode".to_owned())?;
+    let root = path_string(allow_root(&roots, &picked)?)?;
     write_library(
         &app,
         &StoredLibrary {
@@ -734,10 +726,7 @@ pub fn open_library_notebook(
     if !is_notebook(&notebook) {
         return Err("that folder is not a notebook".to_owned());
     }
-    allow_root(&roots, &notebook)?
-        .into_os_string()
-        .into_string()
-        .map_err(|_| "that path is not valid Unicode".to_owned())
+    path_string(allow_root(&roots, &notebook)?)
 }
 
 /// The chosen library, verified against the allowlist so a stale settings file cannot widen what
@@ -876,10 +865,19 @@ mod tests {
             "con",
             "COM1",
             "lpt9",
+            // The cases the frontend copy of this rule used to accept.
+            "com",
+            "lpt",
+            "com0",
+            "LPT0",
         ] {
             assert!(validate_name(bad).is_err(), "`{bad}` should be refused");
         }
         assert!(validate_name(&"x".repeat(81)).is_err());
+        // Characters, not bytes. A name of 80 umlauts is 160 bytes and must still be accepted,
+        // because the frontend counts it as 80 and would have offered it.
+        assert!(validate_name(&"Ü".repeat(80)).is_ok());
+        assert!(validate_name(&"Ü".repeat(81)).is_err());
     }
 
     #[test]

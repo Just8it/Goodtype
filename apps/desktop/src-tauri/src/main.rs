@@ -5,6 +5,7 @@ mod library;
 mod notebook;
 mod preset;
 mod settings;
+mod store;
 mod tinymist;
 mod typst;
 mod workspace;

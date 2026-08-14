@@ -3,7 +3,7 @@
 //! Both files live in the app configuration directory, never inside a notebook: they are
 //! device preferences and navigation history, not canonical notebook content.
 
-use std::{fs, io::Write, path::PathBuf};
+use std::{fs, path::PathBuf};
 
 use serde::{Deserialize, Serialize};
 use tauri::Manager;
@@ -168,11 +168,15 @@ fn valid_color(color: &str) -> bool {
 }
 
 fn sanitize_swatches(swatches: Vec<String>, fallback: &[String]) -> Vec<String> {
-    let mut kept: Vec<String> = swatches
-        .into_iter()
-        .filter(|color| valid_color(color))
-        .collect();
-    kept.dedup();
+    // `dedup` only collapses neighbours, so a row of red, blue, red kept both reds while reading
+    // as though it had not. A swatch row is a set of colours the writer curated; the same colour
+    // twice is a wasted slot out of six.
+    let mut kept: Vec<String> = Vec::new();
+    for color in swatches {
+        if valid_color(&color) && !kept.contains(&color) {
+            kept.push(color);
+        }
+    }
     kept.truncate(MAX_SWATCHES);
     if kept.is_empty() {
         fallback.to_vec()
@@ -319,22 +323,8 @@ fn read_config<T: Default + serde::de::DeserializeOwned>(
 
 fn write_config<T: Serialize>(app: &tauri::AppHandle, name: &str, value: &T) -> Result<(), String> {
     let path = config_file(app, name)?;
-    let mut bytes = serde_json::to_vec_pretty(value).map_err(|error| error.to_string())?;
-    bytes.push(b'\n');
-    if bytes.len() > MAX_SETTINGS_BYTES {
-        return Err(format!("{name} exceeds {MAX_SETTINGS_BYTES} bytes"));
-    }
-    let parent = path.parent().ok_or("settings directory missing")?;
-    let mut temporary =
-        tempfile::NamedTempFile::new_in(parent).map_err(|error| error.to_string())?;
-    temporary
-        .write_all(&bytes)
-        .and_then(|_| temporary.flush())
-        .map_err(|error| error.to_string())?;
-    temporary
-        .persist(&path)
-        .map_err(|error| error.error.to_string())?;
-    Ok(())
+    crate::store::write_json(&path, value, MAX_SETTINGS_BYTES)
+        .map_err(|error| format!("{name}: {error}"))
 }
 
 #[tauri::command]

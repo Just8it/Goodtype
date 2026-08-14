@@ -106,36 +106,8 @@ pub(crate) fn validate_safe_filename(filename: &str) -> Result<(), StorageError>
     let safe_characters = filename
         .bytes()
         .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'));
-    let stem = filename
-        .split('.')
-        .next()
-        .unwrap_or("")
-        .to_ascii_uppercase();
-    let reserved = matches!(
-        stem.as_str(),
-        "CON"
-            | "PRN"
-            | "AUX"
-            | "NUL"
-            | "COM1"
-            | "COM2"
-            | "COM3"
-            | "COM4"
-            | "COM5"
-            | "COM6"
-            | "COM7"
-            | "COM8"
-            | "COM9"
-            | "LPT1"
-            | "LPT2"
-            | "LPT3"
-            | "LPT4"
-            | "LPT5"
-            | "LPT6"
-            | "LPT7"
-            | "LPT8"
-            | "LPT9"
-    );
+    let stem = filename.split('.').next().unwrap_or("");
+    let reserved = paths::is_windows_reserved(stem);
     if filename.is_empty()
         || filename.len() > 120
         || filename.starts_with('.')

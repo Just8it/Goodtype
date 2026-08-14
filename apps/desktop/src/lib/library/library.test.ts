@@ -66,6 +66,17 @@ describe("names Goodtype will create", () => {
     expect(nameProblem("con")).not.toBeNull();
     expect(nameProblem(" Semester 1")).not.toBeNull();
   });
+
+  // Both of these used to pass here and then be refused by Rust, which is the worst possible
+  // split: the writer gets a green field and an error from the backend.
+  it("agrees with the Rust rule on the cases they used to disagree about", () => {
+    for (const reserved of ["com", "lpt", "com0", "LPT0"]) {
+      expect(nameProblem(reserved)).not.toBeNull();
+    }
+    // 80 characters, not 80 UTF-8 bytes: Rust counts characters, so this must be accepted.
+    expect(nameProblem("Ü".repeat(80))).toBeNull();
+    expect(nameProblem("Ü".repeat(81))).not.toBeNull();
+  });
 });
 
 describe("shelf order", () => {

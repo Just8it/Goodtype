@@ -263,6 +263,17 @@ fn embedded_fonts() -> &'static EmbeddedFonts {
     })
 }
 
+/// The Typst standard library, built once for the life of the process.
+///
+/// A `World` is constructed for every compile, completion and hover — several a second while
+/// someone is typing — and `Library::default()` builds the whole standard scope each time. The
+/// fonts beside it were already shared for exactly this reason; this is the same fix for the
+/// other half of the world that never changes.
+fn standard_library() -> &'static LazyHash<Library> {
+    static LIBRARY: OnceLock<LazyHash<Library>> = OnceLock::new();
+    LIBRARY.get_or_init(|| LazyHash::new(Library::default()))
+}
+
 /// Identifies Goodtype to the package registry.
 const PACKAGE_USER_AGENT: &str = concat!("goodtype/", env!("CARGO_PKG_VERSION"));
 
@@ -307,7 +318,6 @@ impl Downloader for OfflineDownloader {
 
 /// A Goodtype-owned Typst [`World`] scoped to one notebook root.
 struct BlockWorld {
-    library: LazyHash<Library>,
     root: PathBuf,
     main: FileId,
     /// Whether a package may be downloaded on a cache miss.
@@ -329,7 +339,6 @@ impl BlockWorld {
         let mut overlay = HashMap::new();
         overlay.insert(main, Bytes::from_string(main_source));
         Self {
-            library: LazyHash::new(Library::default()),
             root,
             main,
             allow_remote_packages,
@@ -379,7 +388,7 @@ impl BlockWorld {
 
 impl World for BlockWorld {
     fn library(&self) -> &LazyHash<Library> {
-        &self.library
+        standard_library()
     }
 
     fn book(&self) -> &LazyHash<FontBook> {
