@@ -28,39 +28,60 @@
   import type { HistoryResult, NotebookSnapshot } from "../ipc/types";
   import {
     closeNotebookSession,
-    defaultNotebookRoot,
     exportNotebookPdf,
     listRecentNotebooks,
     recordNotebookOpened,
     recordNotebookPage,
-    resumeNotebookRoot,
+    recordNotebookSession,
+    resumeNotebookSession,
     writeMetrics,
     writeNotebookCover,
   } from "../ipc/workspace";
-  import { clampZoom, type Point } from "../geometry/coordinates";
-  import type {
-    NotebookManifest,
-    PageBackground,
-    PageGeometry,
-    PageObject,
-    PagePosition,
-    PageTemplate,
-    Stroke,
+  import { clampZoom, dampedVelocity, pannedScroll, type Point } from "../geometry/coordinates";
+  import { placeFloatingToolbar, type ViewRect } from "../geometry/placement";
+  import {
+    DEFAULT_INK_Z_INDEX,
+    type NotebookManifest,
+    type PageBackground,
+    type PageGeometry,
+    type PageObject,
+    type PagePosition,
+    type PageTemplate,
+    type Stroke,
   } from "../model";
   import {
     TYPST_IDLE_DEBOUNCE_MS,
     type TypstCompileResult,
   } from "../editor/typst";
-  import { getCachedTypst, setCachedTypst } from "../editor/typstCache";
+  import { clearTypstCache, getCachedTypst, setCachedTypst } from "../editor/typstCache";
+  import {
+    installPageTypstPreset,
+    listTypstPresets,
+    pickTypstPreset,
+    setDefaultTypstPreset,
+  } from "../ipc/presets";
+  import {
+    presetHeader,
+    DEFAULT_PRESET_PATH,
+    withPagePreset,
+    type NotebookSetup,
+    type PresetChoice,
+    type PresetSummary,
+  } from "../page/presets";
   import {
     summarizeMetric,
     type StrokePerformance,
   } from "../ink/metrics";
   import type { InkTool } from "../ink/pipeline";
-  import { keepsSelection, moveSelected, scaleSelected, toolAfterSelection } from "../ink/selection";
+  import {
+    keepsSelection,
+    moveSelected,
+    scaleSelected,
+    selectionBounds,
+    toolAfterSelection,
+  } from "../ink/selection";
   import ColorPanel from "./ColorPanel.svelte";
   import WidthPanel from "./WidthPanel.svelte";
-  import EraserPanel from "./EraserPanel.svelte";
   import ToolPanel from "./ToolPanel.svelte";
   import PageSurface from "./PageSurface.svelte";
   import OverflowMenu from "../workspace/OverflowMenu.svelte";
@@ -78,27 +99,39 @@
     type Orientation,
   } from "../page/sizes";
   import SideEditor from "./SideEditor.svelte";
+  import SelectionActions from "./SelectionActions.svelte";
+  import NotebookTabs from "./NotebookTabs.svelte";
+  import PaletteTools from "./PaletteTools.svelte";
   import {
     AssetUrlCache,
     blockViewsFromSnapshot,
     imageViewsFromSnapshot,
     mimeForPath,
+    pageTypstViewFromSnapshot,
     strokesFromSnapshot,
     type BlockView,
     type ImageView,
+    type PageTypstView,
+    type TypstTransform,
   } from "./pageView";
   import { createCommitTimer } from "./commitTimer";
+  import { blankNotebookSnapshot } from "./newNotebook";
   import { createInkCommitter, type InkCommitter } from "./inkCommitter";
   import {
     projectSnapshot,
     type ManagedMixedGroup,
   } from "./snapshot";
-  import { nearestPaletteDock, type PaletteDock } from "./palette";
+  import {
+    nearestPaletteDock,
+    type PaletteCommand,
+    type PaletteDock,
+  } from "./palette";
   import {
     moveReadingObject,
-    moveVisualObject,
+    moveVisualItems,
     type VisualMove,
   } from "./objectOrder";
+  import { closedTab, cycledTab, openedTab, type NotebookTab } from "./tabs";
   import {
     addWidth as addRowWidth,
     canRemoveWidth,
@@ -136,34 +169,14 @@
     geometry: PageGeometry;
     snapshot: NotebookSnapshot | null;
   };
-  type TypstTransform = {
-    x: number;
-    y: number;
-    layoutWidthPt: number;
-    scale: number;
-  };
-  type TypstState = {
-    id: string;
-    path: string;
-    source: string;
+  type TypstState = Omit<BlockView, keyof TypstTransform> & {
     transform: TypstTransform;
     result: TypstCompileResult | null;
-    zIndex: number;
-    readingOrder: number;
   };
-  type ImageState = {
-    id: string;
-    path: string;
-    url: string;
-    alt: string;
-    x: number;
-    y: number;
-    widthPt: number;
-    heightPt: number;
-    scale: number;
-    zIndex: number;
-    readingOrder: number;
+  type PageTypstState = PageTypstView & {
+    result: TypstCompileResult | null;
   };
+  type ImageState = ImageView;
   type PaletteDrag = {
     pointerId: number;
     clientX: number;
@@ -173,7 +186,15 @@
     width: number;
     height: number;
   };
-  type PinchStart = { distance: number; zoom: number };
+  type PinchStart = { distance: number; zoom: number; center: Point; pagePoint: Point };
+  type TouchPanStart = {
+    pointerId: number;
+    pointer: Point;
+    scroll: Point;
+    lastPointer: Point;
+    lastTime: number;
+    velocity: Point;
+  };
   type TypstScaleEdit = { id: string; transform: TypstTransform };
   type NotebookAction =
     | { kind: "page"; pageId: string }
@@ -188,6 +209,11 @@
   const BLOCK_PATH = "blocks/equation.typ";
   const INK_LAYER_ID = "ink-layer-001";
   const TYPST_SAVE_DEBOUNCE_MS = 250;
+  const ERASER_SIZE_OPTIONS = [
+    { id: "small" as const, label: "Small", diameter: 12 },
+    { id: "medium" as const, label: "Medium", diameter: 18 },
+    { id: "large" as const, label: "Large", diameter: 26 },
+  ];
   const collectMetrics = import.meta.env.DEV;
   const tauriAvailable =
     typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -195,7 +221,13 @@
   let root = $state("");
   let notebookTitle = $state("Goodtype");
   let notebookManifest = $state<NotebookManifest | null>(null);
+  let openTabs = $state<NotebookTab[]>([]);
+  let switchingRoot = $state<string | null>(null);
+  let notebookGeneration = 0;
   let sharedStyleSource = $state("");
+  let presets = $state<PresetSummary[]>([]);
+  let presetBusy = $state(false);
+  let presetRevision = $state(0);
   let activeSnapshot = $state<NotebookSnapshot | null>(null);
   let activePageId = $state("page-001");
   let activeInkLayerId = $state(INK_LAYER_ID);
@@ -226,6 +258,7 @@
       readingOrder: 0,
     },
   ]);
+  let pageTypst = $state<PageTypstState | null>(null);
   let images = $state<ImageState[]>([]);
   let selectedImageId = $state<string | null>(null);
   let mixedGroup = $state<ManagedMixedGroup | null>(null);
@@ -278,8 +311,22 @@
       readingOrder: block.readingOrder,
     })),
   );
+  const activePageTypstView: PageTypstView | null = $derived(
+    pageTypst
+      ? {
+          id: pageTypst.id,
+          path: pageTypst.path,
+          source: pageTypst.source,
+          zIndex: pageTypst.zIndex,
+          readingOrder: pageTypst.readingOrder,
+        }
+      : null,
+  );
   const activeResults: Record<string, TypstCompileResult | null> = $derived(
-    Object.fromEntries(typstBlocks.map((block) => [block.id, block.result])),
+    Object.fromEntries([
+      ...typstBlocks.map((block) => [block.id, block.result] as const),
+      ...(pageTypst ? [[pageTypst.id, pageTypst.result] as const] : []),
+    ]),
   );
   const activeImageViews: ImageView[] = $derived(
     images.map((image) => ({
@@ -303,12 +350,17 @@
   let sideEditorOpen = $state(false);
   let sideEditorStyle = $state(false);
   let sideEditorBlockId = $state<string | null>(null);
+  let sideEditorPageText = $state(false);
   /// The page the target block belongs to, so scrolling elsewhere does not lose it.
   let sideEditorPageId = $state<string | null>(null);
   let sideEditor = $state<{ focus: () => void }>();
 
   const sideEditorBlock = $derived(
-    typstBlocks.find((block) => block.id === sideEditorBlockId) ?? null,
+    typstBlocks.find((block) => block.id === sideEditorBlockId) ??
+      (pageTypst?.id === sideEditorBlockId ? pageTypst : null),
+  );
+  const editingPageText = $derived(
+    sideEditorOpen && sideEditorPageText && pageTypst?.id === sideEditorBlockId,
   );
   /// `edit` when the target is on the page in view, `away` when it is held on another page, and
   /// `none` when nothing has been picked yet. The target only changes when the writer picks one.
@@ -323,19 +375,86 @@
 
   function openSideEditor(blockId?: string) {
     sideEditorStyle = false;
-    // Keeps whatever was last opened; only an explicit pick retargets the panel.
-    const target = blockId ?? sideEditorBlockId ?? selectedTypstId ?? typstBlocks[0]?.id ?? null;
+    // An explicit canvas edit still wins. The generic button/shortcut starts with the sustained
+    // Page text surface, then falls back to the same movable-block choices as before.
+    const remembered = typstBlocks.some((block) => block.id === sideEditorBlockId)
+      ? sideEditorBlockId
+      : null;
+    const target = blockId ?? pageTypst?.id ?? remembered ?? selectedTypstId ?? typstBlocks[0]?.id ?? null;
     sideEditorOpen = true;
     if (target) {
       if (target !== sideEditorBlockId) sideEditorPageId = activePageId;
       sideEditorBlockId = target;
+      sideEditorPageText = pageTypst?.id === target;
       if (typstBlocks.some((block) => block.id === target)) {
         selectedTypstId = target;
         selectedImageId = null;
+      } else if (pageTypst?.id === target) {
+        selectedTypstId = null;
+        selectedImageId = null;
       }
+    } else if (sideEditorPageText) {
+      sideEditorBlockId = null;
+      sideEditorPageId = null;
+      sideEditorPageText = false;
     }
     // The panel mounts this tick; take the caret once it exists.
     void tick().then(() => sideEditor?.focus());
+  }
+
+  function openPageText() {
+    if (!pageTypst) {
+      const hasDefault = presets.some((preset) => preset.kind === "default");
+      pageTypst = {
+        id: `${activePageId}-page-text`,
+        path: `blocks/${activePageId}-page.typ`,
+        source: hasDefault ? presetHeader() : "",
+        result: null,
+        zIndex: 0,
+        readingOrder: 0,
+      };
+      queueCommit("Created page text");
+      status = "Created page text";
+    }
+    openSideEditor(pageTypst.id);
+  }
+
+  async function changePagePreset(action: string) {
+    if (!root || !pageTypst || presetBusy) return;
+    presetBusy = true;
+    try {
+      if (action === "none" || action.startsWith("path:")) {
+        const path = action === "none" ? null : action.slice(5);
+        updateTypstSource(pageTypst.id, withPagePreset(pageTypst.source, path));
+      } else if (action === "page:import" || action.startsWith("page:")) {
+        const choice = action === "page:import"
+          ? await pickTypstPreset()
+          : { kind: "builtin", id: action.slice(5) } as PresetChoice;
+        if (choice) {
+          const installed = await installPageTypstPreset(root, choice);
+          if (installed?.importPath) {
+            updateTypstSource(pageTypst.id, withPagePreset(pageTypst.source, installed.importPath));
+            await refreshPresets();
+          }
+        }
+      } else if (action === "default:import" || action.startsWith("default:")) {
+        const choice = action === "default:import"
+          ? await pickTypstPreset()
+          : { kind: "builtin", id: action.slice(8) } as PresetChoice;
+        if (choice) {
+          await setDefaultTypstPreset(root, choice);
+          clearTypstCache(DEFAULT_PRESET_PATH);
+          presetRevision += 1;
+          await refreshPresets();
+          status = "Updated the notebook Typst preset";
+        }
+      }
+    } catch (error) {
+      status = `Could not change the Typst preset: ${message(error)}`;
+    } finally {
+      presetBusy = false;
+      void tick().then(() => sideEditor?.focus());
+    }
   }
 
   function closeSideEditor() {
@@ -384,9 +503,7 @@
   /// `anchor` is that chip's centre within the palette, so the panel opens where you tapped.
   let colorPanel = $state<{ index: number; anchor: number } | null>(null);
   let widthPanel = $state<{ index: number; anchor: number } | null>(null);
-  /** The eraser has one setting, so its popout needs only somewhere to hang. */
-  let eraserPanel = $state<number | null>(null);
-
+  let paletteContextOpen = $state(false);
   /// Quick settings for a tool slot, opened by double-pressing its tile.
   let toolPanel = $state<{ kind: "pen" | "highlighter"; slot: number; anchor: number } | null>(
     null,
@@ -394,33 +511,56 @@
 
   /// First press selects the tool; pressing the one already selected opens its settings — the
   /// same select-then-edit gesture the colour swatches use.
-  function selectOrOpenTool(kind: "pen" | "highlighter", slot: number, tile: HTMLElement) {
+  function closePaletteContext() {
+    paletteContextOpen = false;
+    colorPanel = null;
+    widthPanel = null;
+    toolPanel = null;
+  }
+
+  function selectOrOpenTool(kind: "pen" | "highlighter", slot: number) {
     const alreadyActive =
       kind === "highlighter" ? tool === "highlighter" : tool === "pen" && penPreset === slot;
-    colorPanel = null;
     if (!alreadyActive) {
-      toolPanel = null;
       if (kind === "pen") activateTool("pen", slot as 1 | 2);
       else activateTool("highlighter");
       return;
     }
-    toolPanel =
-      toolPanel?.kind === kind && toolPanel?.slot === slot
-        ? null
-        : { kind, slot, anchor: swatchAnchor(tile) };
+    if (paletteContextOpen) closePaletteContext();
+    else paletteContextOpen = true;
   }
 
-  /// The eraser follows the same rule as the pens: first press selects, second opens.
-  function selectOrOpenEraser(tile: HTMLElement) {
-    colorPanel = null;
-    widthPanel = null;
-    if (tool !== "eraser") {
-      eraserPanel = null;
-      activateTool("eraser");
-      return;
-    }
-    eraserPanel = eraserPanel === null ? swatchAnchor(tile) : null;
+  function selectOrOpenEraser() {
+    if (tool !== "eraser") activateTool("eraser");
+    else if (paletteContextOpen) closePaletteContext();
+    else paletteContextOpen = true;
   }
+
+  const paletteCommands: Record<PaletteCommand, () => void> = {
+    "pen-1": () => selectOrOpenTool("pen", 1),
+    "pen-2": () => selectOrOpenTool("pen", 2),
+    highlighter: () => selectOrOpenTool("highlighter", 1),
+    eraser: selectOrOpenEraser,
+    lasso: () => activateTool("lasso"),
+    "page-text": openPageText,
+    "typst-block": addTypstBlock,
+  };
+
+  function activePaletteCommand(): PaletteCommand {
+    if (tool === "pen") return penPreset === 1 ? "pen-1" : "pen-2";
+    if (tool === "highlighter" || tool === "eraser") return tool;
+    return "lasso";
+  }
+
+  const activePaletteCommands = $derived<PaletteCommand[]>([
+    activePaletteCommand(),
+    ...(editingPageText ? (["page-text"] as const) : []),
+  ]);
+  const expandedPaletteCommand = $derived<PaletteCommand | null>(
+    paletteContextOpen && (tool === "pen" || tool === "highlighter" || tool === "eraser")
+      ? activePaletteCommand()
+      : null,
+  );
 
   function swatchAnchor(chip: HTMLElement): number {
     const bar = chip.closest(".instrument-palette");
@@ -450,6 +590,9 @@
   let metricsOpen = $state(false);
   const touchPoints = new Map<number, Point>();
   let pinchStart: PinchStart | null = null;
+  let touchPanStart: TouchPanStart | null = null;
+  let automaticPageFocusLocked = false;
+  let touchInertiaFrame: number | undefined;
   let typstScaleEdit: TypstScaleEdit | null = null;
   // Per-page state for the pages that are rendered but not being edited. It lives here rather
   // than inside the renderer so a page keeps its component instance — and its painted Typst
@@ -493,6 +636,7 @@
   let recoveryOpen = $state(false);
   let recoveryBusy = $state(false);
   let notebookChosen = $state(false);
+  let showInitialSetup = $state(false);
 
   /**
    * Where the shelf was when a notebook was opened from it.
@@ -508,11 +652,15 @@
   let notebookRedoOrder: NotebookAction[] = [];
   let metricsTimer: ReturnType<typeof setTimeout> | undefined;
   let removeCloseListener: (() => void) | undefined;
+  let selectionToolbarElement = $state<HTMLElement>();
+  let selectionToolbarFrame: number | undefined;
+  let selectionToolbarPosition = $state({ left: 0, top: 0, ready: false });
   let closeConfirmed = false;
 
   onMount(() => {
     void initialize();
     window.addEventListener("keydown", historyShortcut);
+    window.addEventListener("resize", scheduleSelectionToolbar);
     if (tauriAvailable) {
       void getCurrentWindow()
         .onCloseRequested(async (event) => {
@@ -533,8 +681,11 @@
     if (typstCommitTimer) clearTimeout(typstCommitTimer);
     if (focusTimer) clearTimeout(focusTimer);
     if (metricsTimer) clearTimeout(metricsTimer);
+    if (selectionToolbarFrame) cancelAnimationFrame(selectionToolbarFrame);
+    if (touchInertiaFrame) cancelAnimationFrame(touchInertiaFrame);
     removeCloseListener?.();
     window.removeEventListener("keydown", historyShortcut);
+    window.removeEventListener("resize", scheduleSelectionToolbar);
     revokeImageUrl();
   });
 
@@ -548,12 +699,25 @@
     }, 1000);
   });
 
+  $effect(() => {
+    const selected = selectedObjectId() || selectedStrokeIds.length > 0 || groupedStrokeIds.length > 0;
+    void images;
+    void strokes;
+    void zoom;
+    void activePageId;
+    void sideEditorOpen;
+    void settings.sideEditorWidth;
+    selectionToolbarPosition = { left: 0, top: 0, ready: false };
+    if (selected) void tick().then(scheduleSelectionToolbar);
+  });
+
   async function initialize() {
     settings = await loadSettings(tauriAvailable);
     paletteDock = settings.paletteDock;
     if (!tauriAvailable) {
       root = "Browser preview (persistence and real Typst compilation require Tauri)";
       applySnapshot(buildSnapshot());
+      openTabs = [{ root, title: notebookTitle }];
       notebookChosen = true;
       pageOpen = true;
       busy = false;
@@ -562,100 +726,127 @@
     }
 
     try {
-      const resumeRoot = await resumeNotebookRoot();
-      if (resumeRoot) {
-        await openNotebookAt(resumeRoot);
-        return;
+      const [session, recents] = await Promise.all([
+        resumeNotebookSession(),
+        listRecentNotebooks(),
+      ]);
+      openTabs = session.openRoots.map((knownRoot) => ({
+        root: knownRoot,
+        title: recents.find((entry) => entry.root === knownRoot)?.title ?? titleFromRoot(knownRoot),
+      }));
+      const candidates = [session.activeRoot, ...session.openRoots].filter(
+        (candidate, index, roots): candidate is string =>
+          Boolean(candidate) && roots.indexOf(candidate) === index,
+      );
+      for (const candidate of candidates) {
+        if (await openNotebookAt(candidate, { skipCurrentPersist: true })) return;
+        openTabs = openTabs.filter((tab) => tab.root !== candidate);
       }
+      await recordNotebookSession(openTabs.map((tab) => tab.root), null);
     } catch (error) {
       status = `The last notebook could not be reopened: ${message(error)}`;
     }
 
-    // First launch continuity: with no notebook history, open the local default directly so
-    // pen-first startup stays instant. Otherwise the library remains the deliberate start view.
     try {
       const recents = await listRecentNotebooks();
-      if (recents.length === 0) {
-        const defaultRoot = await defaultNotebookRoot();
-        await openNotebookAt(defaultRoot, { createIfMissing: true });
-        return;
-      }
+      showInitialSetup = recents.length === 0;
     } catch {
       // The recents list is a convenience; failing to read it falls through to the start surface.
     }
     busy = false;
   }
 
-  /// A freshly created notebook must start from a clean model — never from whatever
-  /// manifest, ink, blocks, or image the previously open notebook left in memory.
-  function resetToBlankNotebook(title: string) {
-    revokeImageUrl();
-    notebookTitle = title;
-    notebookManifest = null;
-    sharedStyleSource = "";
-    activeSnapshot = null;
-    pageEntries = [];
-    strokes = [];
-    selectedStrokeIds = [];
-    groupedStrokeIds = [];
-    images = [];
-    selectedImageId = null;
-    mixedGroup = null;
-    selectedTypstId = null;
-    activePageId = "page-001";
-    activeInkLayerId = INK_LAYER_ID;
-    activeInkLayerPath = "ink/page-001-layer-001.json";
-    revision = 1;
-    createdAt = new Date().toISOString();
-    typstBlocks = [
-      {
-        id: MAIN_TYPST_ID,
-        path: BLOCK_PATH,
-        source: "= Notes\n\nType Typst here, or write with the pen.",
-        transform: { x: 96, y: 120, layoutWidthPt: 230, scale: 1 },
-        result: null,
-        zIndex: 1,
-        readingOrder: 0,
-      },
-    ];
-  }
-
   function titleFromRoot(path: string) {
     return path.split(/[\\/]/).filter(Boolean).at(-1) ?? "Goodtype notebook";
   }
 
+  function clearNotebookCaches() {
+    stopTouchInertia();
+    for (const urls of neighborUrls.values()) urls.dispose();
+    neighborUrls.clear();
+    for (const committer of neighborCommitters.values()) committer.dispose();
+    neighborCommitters.clear();
+    neighborStrokes = {};
+    neighborResults = {};
+    pendingNeighborPages = new Set();
+    visibleRatios.clear();
+    sideEditorOpen = false;
+    sideEditorBlockId = null;
+    sideEditorPageText = false;
+    sideEditorPageId = null;
+    searchOpen = false;
+    recoveryCandidates = [];
+    recoveryOpen = false;
+  }
+
+  async function rememberNotebookSession(): Promise<boolean> {
+    if (!tauriAvailable) return true;
+    try {
+      await recordNotebookSession(openTabs.map((tab) => tab.root), root || null);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   async function openNotebookAt(
     nextRoot: string,
-    options: { createIfMissing?: boolean } = {},
-  ) {
+    options: { createIfMissing?: boolean; skipCurrentPersist?: boolean; setup?: NotebookSetup } = {},
+  ): Promise<boolean> {
+    if (nextRoot === root && activeSnapshot) {
+      notebookChosen = true;
+      pageOpen = true;
+      await tick();
+      scrollToPage(activePageId, "auto");
+      status = "Notebook ready";
+      return true;
+    }
     busy = true;
+    switchingRoot = nextRoot;
     try {
-      root = nextRoot;
+      if (activeSnapshot && root && !options.skipCurrentPersist) {
+        if (!(await persist())) return false;
+        await recordNotebookPage(root, activePageId).catch(() => {});
+      }
       let snapshot: NotebookSnapshot;
+      let createdNew = false;
       try {
-        snapshot = await openNotebook(root);
+        snapshot = await openNotebook(nextRoot);
       } catch (error) {
         if (!options.createIfMissing) throw error;
-        resetToBlankNotebook(titleFromRoot(nextRoot));
-        snapshot = buildSnapshot();
-        await createNotebook(root, snapshot);
+        const setup: NotebookSetup = options.setup ?? {
+          name: titleFromRoot(nextRoot),
+          geometry: { widthPt: PAGE_WIDTH_PT, heightPt: PAGE_HEIGHT_PT },
+          background: { kind: "plain", color: "#ffffff" },
+          preset: { kind: "none" },
+        };
+        snapshot = blankNotebookSnapshot(setup);
+        await createNotebook(nextRoot, snapshot, setup.preset);
+        createdNew = true;
       }
       const resume = (await listRecentNotebooks().catch(() => [])).find(
-        (entry) => entry.root === root,
+        (entry) => entry.root === nextRoot,
       )?.lastPageId;
       if (
         resume &&
         resume !== snapshot.page.id &&
         snapshot.manifest.pages.some((page) => page.id === resume)
       ) {
-        snapshot = await openPage(root, resume);
+        snapshot = await openPage(nextRoot, resume);
       }
+      notebookGeneration += 1;
+      clearNotebookCaches();
+      root = nextRoot;
       transactionFailed = false;
       conflictDetail = null;
       notebookUndoOrder = [];
       notebookRedoOrder = [];
       pageEntries = [];
       applySnapshot(snapshot);
+      if (createdNew) tool = "pen";
+      await refreshPresets();
+      notebookTitle = snapshot.manifest.title || titleFromRoot(nextRoot);
+      openTabs = openedTab(openTabs, { root: nextRoot, title: notebookTitle });
       let sessionRemembered = true;
       try {
         await recordNotebookOpened(
@@ -664,6 +855,7 @@
           new Date().toISOString(),
         );
         await recordNotebookPage(root, snapshot.page.id);
+        if (!(await rememberNotebookSession())) sessionRemembered = false;
       } catch {
         sessionRemembered = false;
       }
@@ -675,11 +867,26 @@
         ? "Notebook ready"
         : "Notebook ready, but its reopening position could not be remembered";
       await refreshRecoveryCandidates();
+      return true;
     } catch (error) {
       status = `Could not open the notebook: ${message(error)}`;
-      notebookChosen = false;
+      return false;
     } finally {
       busy = false;
+      switchingRoot = null;
+    }
+  }
+
+  async function refreshPresets() {
+    if (!root || !tauriAvailable) {
+      presets = [];
+      return;
+    }
+    try {
+      presets = await listTypstPresets(root);
+    } catch {
+      // An externally damaged optional style must not prevent the canonical notebook opening.
+      presets = [];
     }
   }
 
@@ -732,6 +939,15 @@
         zIndex: block.zIndex,
         readingOrder: block.readingOrder,
       })),
+      pageTypst: pageTypst
+        ? {
+            id: pageTypst.id,
+            path: pageTypst.path,
+            source: pageTypst.source,
+            zIndex: pageTypst.zIndex,
+            readingOrder: pageTypst.readingOrder,
+          }
+        : null,
       images,
       sharedStyle: manifest.sharedStylePath
         ? { path: manifest.sharedStylePath, source: sharedStyleSource }
@@ -752,6 +968,7 @@
     typstDirty = false;
     revokeImageUrl();
     notebookManifest = snapshot.manifest;
+    notebookTitle = snapshot.manifest.title || notebookTitle;
     const style = snapshot.manifest.sharedStylePath
       ? snapshot.blocks.find((file) => file.path === snapshot.manifest.sharedStylePath)
       : undefined;
@@ -807,6 +1024,24 @@
           readingOrder: object.readingOrder,
         };
       });
+
+    const storedPageTypst = snapshot.page.objects.find(
+      (object): object is Extract<PageObject, { type: "page_typst" }> =>
+        object.type === "page_typst",
+    );
+    if (storedPageTypst) {
+      const block = snapshot.blocks.find((file) => file.path === storedPageTypst.sourcePath);
+      pageTypst = {
+        id: storedPageTypst.id,
+        path: storedPageTypst.sourcePath,
+        source: block ? new TextDecoder().decode(new Uint8Array(block.bytes)) : "",
+        result: null,
+        zIndex: storedPageTypst.zIndex,
+        readingOrder: storedPageTypst.readingOrder,
+      };
+    } else {
+      pageTypst = null;
+    }
 
     const inkGroup = snapshot.page.objects.find(
       (object): object is Extract<PageObject, { type: "ink_group" }> =>
@@ -872,11 +1107,15 @@
   async function ensurePageLoaded(pageId: string) {
     const entry = pageEntries.find((page) => page.id === pageId);
     if (!entry || entry.snapshot) return entry?.snapshot ?? null;
+    const requestRoot = root;
+    const requestGeneration = notebookGeneration;
     try {
-      const snapshot = await openPage(root, pageId);
+      const snapshot = await openPage(requestRoot, pageId);
+      if (requestRoot !== root || requestGeneration !== notebookGeneration) return null;
       entry.snapshot = snapshot;
       return snapshot;
     } catch (error) {
+      if (requestRoot !== root || requestGeneration !== notebookGeneration) return null;
       status = `Could not load page: ${message(error)}`;
       return null;
     }
@@ -920,6 +1159,7 @@
   function scheduleFocus() {
     if (focusTimer) clearTimeout(focusTimer);
     focusTimer = setTimeout(() => {
+      if (automaticPageFocusLocked || pinchStart) return;
       let bestId = activePageId;
       let bestRatio = 0;
       for (const [id, ratio] of visibleRatios) {
@@ -1102,6 +1342,8 @@
     blockId: string,
     request: { source: string; sharedStyle?: string | null; widthPt: number; generation: number },
   ) {
+    const requestRoot = root;
+    const requestGeneration = notebookGeneration;
     const cacheSource = `${request.sharedStyle ?? ""}\n${request.source}`;
     const cached = getCachedTypst(cacheSource, request.widthPt);
     if (cached) {
@@ -1113,8 +1355,9 @@
     }
     if (!tauriAvailable) return;
     try {
-      const result = await requestTypstCompile(root, request);
+      const result = await requestTypstCompile(requestRoot, request);
       setCachedTypst(cacheSource, request.widthPt, result);
+      if (requestRoot !== root || requestGeneration !== notebookGeneration) return;
       neighborResults[pageId] = {
         ...neighborResults[pageId],
         [blockId]: result,
@@ -1243,6 +1486,7 @@
         readingOrder: 0,
       },
     ];
+    pageTypst = null;
     strokes = [];
     selectedStrokeIds = [];
     groupedStrokeIds = [];
@@ -1280,6 +1524,7 @@
    */
   function menuSections(): MenuSection[] {
     const many = pageCount > 1;
+    const selected = selectedObjectId();
     if (!pageOpen) {
       return [
         {
@@ -1292,6 +1537,20 @@
       ];
     }
     return populated([
+      ...(selected
+        ? [
+            {
+              title: selectedImageId ? "Selected image" : "Selected Typst",
+              entries: [
+                { kind: "action" as const, id: "object-back", label: "Send behind everything", disabled: !canMoveVisual(-1), onSelect: () => changeVisualOrder("back") },
+                { kind: "action" as const, id: "object-front", label: "Bring in front of everything", disabled: !canMoveVisual(1), onSelect: () => changeVisualOrder("front") },
+                { kind: "action" as const, id: "read-earlier", label: "Read earlier by screen readers", disabled: !canMoveReading(-1), onSelect: () => changeReadingOrder(-1) },
+                { kind: "action" as const, id: "read-later", label: "Read later by screen readers", disabled: !canMoveReading(1), onSelect: () => changeReadingOrder(1) },
+                { kind: "action" as const, id: "remove-object", label: "Remove from page", hint: "Delete", onSelect: () => void deleteSelection() },
+              ],
+            },
+          ]
+        : []),
       {
         entries: [
           // Adding a page is not here: it has its own header button, because choosing where the
@@ -1557,6 +1816,8 @@
     widthPt: number;
     generation: number;
   }) {
+    const requestRoot = root;
+    const requestGeneration = notebookGeneration;
     const startedAt = performance.now();
     let result: TypstCompileResult;
     if (!tauriAvailable) {
@@ -1581,7 +1842,7 @@
         result = { ...cached, generation: request.generation };
       } else {
         try {
-          result = await requestTypstCompile(root, request);
+          result = await requestTypstCompile(requestRoot, request);
           setCachedTypst(cacheSource, request.widthPt, result);
         } catch (error) {
           result = {
@@ -1596,9 +1857,13 @@
       }
       if (collectMetrics) compileMs = performance.now() - startedAt;
     }
-    typstBlocks = typstBlocks.map((block) =>
-      block.id === id ? { ...block, result } : block,
-    );
+    if (requestRoot !== root || requestGeneration !== notebookGeneration) return;
+    if (pageTypst?.id === id) pageTypst = { ...pageTypst, result };
+    else {
+      typstBlocks = typstBlocks.map((block) =>
+        block.id === id ? { ...block, result } : block,
+      );
+    }
   }
 
   function updateTypstTransform(id: string, next: TypstTransform) {
@@ -1631,9 +1896,12 @@
   }
 
   function updateTypstSource(id: string, source: string) {
-    typstBlocks = typstBlocks.map((block) =>
-      block.id === id ? { ...block, source } : block,
-    );
+    if (pageTypst?.id === id) pageTypst = { ...pageTypst, source };
+    else {
+      typstBlocks = typstBlocks.map((block) =>
+        block.id === id ? { ...block, source } : block,
+      );
+    }
     typstDirty = true;
     if (typstCommitTimer) clearTimeout(typstCommitTimer);
     typstCommitTimer = setTimeout(flushTypstCommit, TYPST_SAVE_DEBOUNCE_MS);
@@ -1690,12 +1958,7 @@
           scale: 1,
         },
         result: null,
-        zIndex:
-          Math.max(
-            0,
-            ...typstBlocks.map((block) => block.zIndex),
-            ...images.map((image) => image.zIndex),
-          ) + 1,
+        zIndex: nextVisualZIndex(),
         readingOrder: typstBlocks.length + images.length,
       },
     ];
@@ -1703,6 +1966,24 @@
     selectedImageId = null;
     status = "Created a new Typst block";
     queueCommit("Created Typst block");
+  }
+
+  function nextVisualZIndex(): number {
+    return Math.max(
+      0,
+      ...(activeSnapshot?.page.objects.map((object) => object.zIndex) ?? []),
+      ...typstBlocks.map((block) => block.zIndex),
+      ...images.map((image) => image.zIndex),
+      ...strokes.map((stroke) => stroke.zIndex ?? DEFAULT_INK_Z_INDEX),
+    ) + 1;
+  }
+
+  function nextSnapshotVisualZIndex(snapshot: NotebookSnapshot, pageStrokes: Stroke[]): number {
+    return Math.max(
+      0,
+      ...snapshot.page.objects.map((object) => object.zIndex),
+      ...pageStrokes.map((stroke) => stroke.zIndex ?? DEFAULT_INK_Z_INDEX),
+    ) + 1;
   }
 
   function flushTypstCommit() {
@@ -1715,8 +1996,11 @@
 
   function groupSelectedInk() {
     if (selectedStrokeIds.length === 0) return;
-    const typstId = selectedTypstId ?? typstBlocks[0]?.id;
-    if (!typstId) return;
+    const typstId = selectedTypstId;
+    if (!typstId) {
+      status = "Select a Typst block before grouping it with ink";
+      return;
+    }
     const typstObject = activeSnapshot?.page.objects.find((object) => object.id === typstId);
     if (
       (typstObject?.groupId && typstObject.groupId !== mixedGroup?.groupId) ||
@@ -1778,6 +2062,9 @@
   };
 
   function activateTool(next: InkTool, preset?: 1 | 2) {
+    if (next !== tool || (next === "pen" && preset !== undefined && preset !== penPreset)) {
+      closePaletteContext();
+    }
     if (preset) penPreset = preset;
     tool = next;
     lassoHandedOver = false;
@@ -1952,6 +2239,12 @@
     //
     // Mouse and touch keep reaching objects under any tool: clicking a block to grab it is how
     // this has always worked, and a brush is no reason to take it away.
+    if (
+      event.target instanceof Element &&
+      event.target.closest(".selection-actions")
+    ) {
+      return;
+    }
     if (event.pointerType === "pen" && !keepsSelection(tool)) {
       directObjectInput = false;
       return;
@@ -1978,15 +2271,16 @@
   function closeObjectSelection(event: PointerEvent) {
     // Both palette popovers live inside the bar, so a press anywhere outside it dismisses them.
     if (!(event.target instanceof Element) || !event.target.closest(".instrument-palette")) {
-      colorPanel = null;
-      toolPanel = null;
+      closePaletteContext();
     }
     // A stylus press mid-stroke is writing, not "deselect" — unless a selection tool is active,
     // where a press on empty page means exactly that.
     if (
       (event.pointerType === "pen" && !keepsSelection(tool)) ||
       (event.target instanceof Element &&
-        event.target.closest(".typst-block, .image-object, .typst-size-control"))
+        event.target.closest(
+          ".typst-block, .image-object, .typst-size-control, .selection-actions, .overflow-menu, [data-preserve-selection]",
+        ))
     ) {
       return;
     }
@@ -2009,6 +2303,8 @@
 
   function beginPan(event: PointerEvent): boolean {
     if (event.button !== 1 || !pageViewport) return false;
+    stopTouchInertia();
+    automaticPageFocusLocked = false;
     panFrom = {
       pointerId: event.pointerId,
       x: event.clientX,
@@ -2042,13 +2338,46 @@
   }
 
   function workspacePointerDown(event: PointerEvent) {
+    stopTouchInertia();
     if (beginPan(event)) return;
+    if (event.target instanceof Element && event.target.closest(".selection-actions")) return;
     routeObjectPointer(event);
     if (event.pointerType !== "touch") return;
     touchPoints.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    if (touchPoints.size === 1 && !directObjectInput && pageViewport && workspace) {
+      automaticPageFocusLocked = false;
+      touchPanStart = {
+        pointerId: event.pointerId,
+        pointer: { x: event.clientX, y: event.clientY },
+        scroll: { x: pageViewport.scrollLeft, y: pageViewport.scrollTop },
+        lastPointer: { x: event.clientX, y: event.clientY },
+        lastTime: performance.now(),
+        velocity: { x: 0, y: 0 },
+      };
+      workspace.setPointerCapture(event.pointerId);
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
     if (touchPoints.size !== 2 || !workspace) return;
+    automaticPageFocusLocked = true;
+    touchPanStart = null;
     const points = [...touchPoints.values()];
-    pinchStart = { distance: distance(points[0], points[1]), zoom };
+    const center = {
+      x: (points[0].x + points[1].x) / 2,
+      y: (points[0].y + points[1].y) / 2,
+    };
+    const frame = pageFrame?.getBoundingClientRect();
+    if (!frame) return;
+    pinchStart = {
+      distance: distance(points[0], points[1]),
+      zoom,
+      center,
+      pagePoint: {
+        x: (center.x - frame.left) / zoom,
+        y: (center.y - frame.top) / zoom,
+      },
+    };
     for (const pointerId of touchPoints.keys()) workspace.setPointerCapture(pointerId);
     event.preventDefault();
     event.stopPropagation();
@@ -2057,18 +2386,39 @@
   function workspacePointerMove(event: PointerEvent) {
     if (continuePan(event)) return;
     routeObjectPointer(event);
-    if (!touchPoints.has(event.pointerId) || !pinchStart) return;
+    if (!touchPoints.has(event.pointerId)) return;
     touchPoints.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    if (touchPanStart && event.pointerId === touchPanStart.pointerId && pageViewport) {
+      const now = performance.now();
+      const next = pannedScroll(touchPanStart.scroll, touchPanStart.pointer, {
+        x: event.clientX,
+        y: event.clientY,
+      });
+      const elapsed = Math.max(now - touchPanStart.lastTime, 1);
+      const rawVelocity = {
+        x: -(event.clientX - touchPanStart.lastPointer.x) / elapsed,
+        y: -(event.clientY - touchPanStart.lastPointer.y) / elapsed,
+      };
+      touchPanStart.velocity = {
+        x: touchPanStart.velocity.x * 0.35 + rawVelocity.x * 0.65,
+        y: touchPanStart.velocity.y * 0.35 + rawVelocity.y * 0.65,
+      };
+      touchPanStart.lastPointer = { x: event.clientX, y: event.clientY };
+      touchPanStart.lastTime = now;
+      pageViewport.scrollLeft = next.x;
+      pageViewport.scrollTop = next.y;
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+    if (!pinchStart) return;
     const points = [...touchPoints.values()];
     if (points.length !== 2) return;
-    const center = {
-      x: (points[0].x + points[1].x) / 2,
-      y: (points[0].y + points[1].y) / 2,
-    };
     zoomAt(
       clampZoom(pinchStart.zoom * (distance(points[0], points[1]) / pinchStart.distance)),
-      center.x,
-      center.y,
+      pinchStart.center.x,
+      pinchStart.center.y,
+      pinchStart.pagePoint,
     );
     event.preventDefault();
     event.stopPropagation();
@@ -2078,9 +2428,20 @@
     if (endPan(event)) return;
     if (event.pointerType !== "touch") return;
     touchPoints.delete(event.pointerId);
+    if (touchPanStart?.pointerId === event.pointerId) {
+      const finishedPan = touchPanStart;
+      touchPanStart = null;
+      if (event.type === "pointerup" && performance.now() - finishedPan.lastTime < 80) {
+        startTouchInertia(finishedPan.velocity);
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
     if (pinchStart) {
       touchPoints.clear();
       pinchStart = null;
+      touchPanStart = null;
       event.preventDefault();
       event.stopPropagation();
     }
@@ -2088,6 +2449,41 @@
 
   function distance(a: Point, b: Point) {
     return Math.max(Math.hypot(a.x - b.x, a.y - b.y), 1);
+  }
+
+  const TOUCH_INERTIA_RETENTION = 0.86;
+
+  function stopTouchInertia() {
+    if (touchInertiaFrame) cancelAnimationFrame(touchInertiaFrame);
+    touchInertiaFrame = undefined;
+  }
+
+  function startTouchInertia(initialVelocity: Point) {
+    stopTouchInertia();
+    if (settings.reducedMotion || !pageViewport) return;
+    let velocity = {
+      x: Math.max(-1.5, Math.min(1.5, initialVelocity.x)) * settings.touchGlide,
+      y: Math.max(-1.5, Math.min(1.5, initialVelocity.y)) * settings.touchGlide,
+    };
+    if (Math.hypot(velocity.x, velocity.y) < 0.04) return;
+    let previous = performance.now();
+    const glide = (now: number) => {
+      if (!pageViewport) return;
+      const elapsed = Math.min(now - previous, 32);
+      previous = now;
+      const before = { x: pageViewport.scrollLeft, y: pageViewport.scrollTop };
+      pageViewport.scrollLeft += velocity.x * elapsed;
+      pageViewport.scrollTop += velocity.y * elapsed;
+      if (pageViewport.scrollLeft === before.x) velocity.x = 0;
+      if (pageViewport.scrollTop === before.y) velocity.y = 0;
+      velocity = dampedVelocity(velocity, elapsed, TOUCH_INERTIA_RETENTION);
+      if (Math.hypot(velocity.x, velocity.y) < 0.025) {
+        touchInertiaFrame = undefined;
+        return;
+      }
+      touchInertiaFrame = requestAnimationFrame(glide);
+    };
+    touchInertiaFrame = requestAnimationFrame(glide);
   }
 
   function beginPaletteDrag(event: PointerEvent) {
@@ -2295,12 +2691,7 @@
       widthPt: Math.max(1, dimensions.width * fit),
       heightPt: Math.max(1, dimensions.height * fit),
       scale: 1,
-      zIndex:
-        Math.max(
-          0,
-          ...typstBlocks.map((block) => block.zIndex),
-          ...images.map((image) => image.zIndex),
-        ) + 1,
+      zIndex: nextVisualZIndex(),
       readingOrder: typstBlocks.length + images.length,
     }];
     selectedImageId = id;
@@ -2416,6 +2807,108 @@
     return selectedTypstId ?? selectedImageId;
   }
 
+  function canMoveVisual(direction: -1 | 1): boolean {
+    const id = selectedObjectId();
+    if (!id || !activeSnapshot) return false;
+    return moveVisualItems(
+      activeSnapshot.page,
+      strokes,
+      [id],
+      [],
+      direction < 0 ? "backward" : "forward",
+    ) !== null;
+  }
+
+  function canMoveReading(direction: -1 | 1): boolean {
+    const id = selectedObjectId();
+    if (!id || !activeSnapshot) return false;
+    const index = activeSnapshot.page.readingOrder.indexOf(id);
+    return direction < 0
+      ? index > 0
+      : index >= 0 && index < activeSnapshot.page.readingOrder.length - 1;
+  }
+
+  function inkActionIds(): string[] {
+    return selectedStrokeIds.length > 0 ? selectedStrokeIds : groupedStrokeIds;
+  }
+
+  function canMoveInkVisual(direction: -1 | 1): boolean {
+    return Boolean(
+      activeSnapshot &&
+        moveVisualItems(
+          activeSnapshot.page,
+          strokes,
+          [],
+          inkActionIds(),
+          direction < 0 ? "backward" : "forward",
+        ),
+    );
+  }
+
+  function changeInkVisualOrder(direction: -1 | 1) {
+    if (!activeSnapshot) return;
+    const next = moveVisualItems(
+      activeSnapshot.page,
+      strokes,
+      [],
+      inkActionIds(),
+      direction < 0 ? "backward" : "forward",
+    );
+    if (!next) return;
+    strokes = next.strokes;
+    applyObjectOrder(next.page, "Changed visual order");
+    status = direction < 0 ? "Moved selected ink back" : "Moved selected ink forward";
+  }
+
+  function scheduleSelectionToolbar() {
+    if (selectionToolbarFrame) cancelAnimationFrame(selectionToolbarFrame);
+    selectionToolbarFrame = requestAnimationFrame(() => {
+      selectionToolbarFrame = undefined;
+      positionSelectionToolbar();
+    });
+  }
+
+  function positionSelectionToolbar() {
+    if (!workspace || !selectionToolbarElement) return;
+    let anchor: ViewRect | null = null;
+    const objectId = selectedObjectId();
+    if (objectId) {
+      anchor = workspace
+        .querySelector<HTMLElement>(`.active-page [data-object-id="${CSS.escape(objectId)}"]`)
+        ?.getBoundingClientRect() ?? null;
+    } else {
+      const bounds = selectionBounds(strokes, inkActionIds());
+      const frame = pageFrame?.getBoundingClientRect();
+      if (bounds && frame) {
+        anchor = {
+          left: frame.left + bounds.left * zoom,
+          top: frame.top + bounds.top * zoom,
+          right: frame.left + bounds.right * zoom,
+          bottom: frame.top + bounds.bottom * zoom,
+          width: (bounds.right - bounds.left) * zoom,
+          height: (bounds.bottom - bounds.top) * zoom,
+        };
+      }
+    }
+    if (!anchor) return;
+    const boundary = workspace.getBoundingClientRect();
+    if (
+      anchor.right < boundary.left ||
+      anchor.left > boundary.right ||
+      anchor.bottom < boundary.top ||
+      anchor.top > boundary.bottom
+    ) {
+      selectionToolbarPosition = { left: 0, top: 0, ready: false };
+      return;
+    }
+    const placed = placeFloatingToolbar(
+      anchor,
+      selectionToolbarElement.getBoundingClientRect(),
+      boundary,
+    );
+    selectionToolbarPosition = { left: placed.left, top: placed.top, ready: true };
+  }
+
   function applyObjectOrder(page: NonNullable<typeof activeSnapshot>["page"], label: string) {
     if (!activeSnapshot) return;
     activeSnapshot = { ...activeSnapshot, page };
@@ -2438,13 +2931,10 @@
   function changeVisualOrder(move: VisualMove) {
     const id = selectedObjectId();
     if (!id || !activeSnapshot) return;
-    applyObjectOrder(
-      {
-        ...activeSnapshot.page,
-        objects: moveVisualObject(activeSnapshot.page.objects, id, move),
-      },
-      "Changed visual order",
-    );
+    const next = moveVisualItems(activeSnapshot.page, strokes, [id], [], move);
+    if (!next) return;
+    strokes = next.strokes;
+    applyObjectOrder(next.page, "Changed visual order");
   }
 
   function changeReadingOrder(direction: -1 | 1) {
@@ -2585,12 +3075,26 @@
       ?.scrollIntoView({
         behavior: behavior ?? (settings.reducedMotion ? "auto" : "smooth"),
         block: "center",
+        inline: "center",
       });
   }
 
   function historyShortcut(event: KeyboardEvent) {
     if (event.defaultPrevented) return;
     if (event.ctrlKey || event.metaKey) {
+      if (event.key === "Tab") {
+        const next = cycledTab(openTabs, root, event.shiftKey ? -1 : 1);
+        if (next) {
+          event.preventDefault();
+          void openNotebookAt(next);
+        }
+        return;
+      }
+      if (event.key.toLowerCase() === "w" && openTabs.length > 0) {
+        event.preventDefault();
+        void closeNotebookTab(root);
+        return;
+      }
       const zoomShortcuts: Record<string, () => void> = {
         "+": () => changeZoom(zoom + 0.1),
         "=": () => changeZoom(zoom + 0.1),
@@ -2614,6 +3118,11 @@
     if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === "e") {
       event.preventDefault();
       toggleSideEditor();
+      return;
+    }
+    if (event.key === "Escape" && paletteContextOpen) {
+      event.preventDefault();
+      closePaletteContext();
       return;
     }
     const editingText =
@@ -2704,7 +3213,11 @@
     try {
       // Rust builds the ordered multi-page PDF from the canonical files, so the export
       // matches what is saved, not what this view holds.
-      const path = await exportNotebookPdf(root, "notebook.pdf");
+      const path = await exportNotebookPdf(
+        root,
+        "notebook.pdf",
+        settings.pageTextBaselineGrid,
+      );
       if (collectMetrics) exportMs = performance.now() - startedAt;
       status = `Exported PDF to ${path}`;
     } catch (error) {
@@ -2715,18 +3228,68 @@
   }
 
   async function closePage() {
-    if (!(await persist())) return;
+    await closeNotebookTab(root);
+  }
+
+  async function showLibrary() {
+    if (tauriAvailable && activeSnapshot && !(await persist())) return;
+    if (tauriAvailable && root) await recordNotebookPage(root, activePageId).catch(() => {});
+    moreOpen = false;
+    addPageOpen = false;
+    notebookChosen = false;
+    status = "Choose a notebook, or return to an open tab";
+  }
+
+  function returnToNotebook() {
+    if (!activeSnapshot || !root) return;
+    notebookChosen = true;
+    pageOpen = true;
+    status = "Notebook ready";
+    void tick().then(() => scrollToPage(activePageId, "auto"));
+  }
+
+  async function closeNotebookTab(tabRoot: string) {
+    const closed = closedTab(openTabs, tabRoot);
+    if (closed.tabs === openTabs) return;
+    if (tabRoot !== root) {
+      openTabs = closed.tabs;
+      status = (await rememberNotebookSession())
+        ? "Closed notebook tab"
+        : "Closed notebook tab, but the restored tab list could not be updated";
+      return;
+    }
+    if (tauriAvailable && !(await persist())) return;
+    if (tauriAvailable) await recordNotebookPage(root, activePageId).catch(() => {});
+    await writeCover();
+
+    const previousTabs = openTabs;
+    openTabs = closed.tabs;
+    if (closed.nextRoot) {
+      const opened = await openNotebookAt(closed.nextRoot, { skipCurrentPersist: true });
+      if (!opened) {
+        openTabs = previousTabs;
+        notebookChosen = true;
+        pageOpen = true;
+      }
+      return;
+    }
+
     if (tauriAvailable && root) {
-      await recordNotebookPage(root, activePageId).catch(() => {});
       try {
         await closeNotebookSession(root);
       } catch (error) {
+        openTabs = previousTabs;
         status = `The notebook was saved but could not be closed: ${message(error)}`;
         return;
       }
     }
-    // After the save, so the cover shows what was just written rather than what preceded it.
-    await writeCover();
+    notebookGeneration += 1;
+    clearNotebookCaches();
+    revokeImageUrl();
+    root = "";
+    notebookManifest = null;
+    activeSnapshot = null;
+    pageEntries = [];
     pageOpen = false;
     notebookChosen = false;
     status = "Notebook closed; the confirmed local files are safe";
@@ -2784,13 +3347,14 @@
     zoom = clampZoom(next);
   }
 
-  function zoomAt(next: number, clientX: number, clientY: number) {
+  function zoomAt(next: number, clientX: number, clientY: number, fixedPagePoint?: Point) {
     if (!pageViewport || !pageFrame) return;
+    automaticPageFocusLocked = true;
     const viewport = pageViewport;
     const frame = pageFrame;
     const startedAt = performance.now();
     const before = frame.getBoundingClientRect();
-    const pagePoint = {
+    const pagePoint = fixedPagePoint ?? {
       x: (clientX - before.left) / zoom,
       y: (clientY - before.top) / zoom,
     };
@@ -2804,7 +3368,11 @@
   }
 
   function wheelZoom(event: WheelEvent) {
-    if (!event.ctrlKey) return;
+    stopTouchInertia();
+    if (!event.ctrlKey) {
+      automaticPageFocusLocked = false;
+      return;
+    }
     event.preventDefault();
     zoomAt(zoom * Math.exp(-event.deltaY * 0.01), event.clientX, event.clientY);
   }
@@ -2938,9 +3506,15 @@
     <div class="start-slot">
       <LibrarySurface
         {tauriAvailable}
+        showNotebookSetup={showInitialSetup}
         location={shelfLocation}
         onOpen={(nextRoot) => void openNotebookAt(nextRoot)}
-        onCreate={(nextRoot) => void openNotebookAt(nextRoot, { createIfMissing: true })}
+        onCreate={(nextRoot, setup) => {
+          showInitialSetup = false;
+          void openNotebookAt(nextRoot, { createIfMissing: true, setup });
+        }}
+        returnLabel={openTabs.find((tab) => tab.root === root)?.title}
+        onReturn={openTabs.length > 0 ? returnToNotebook : undefined}
         onLocationChange={(next) => (shelfLocation = next)}
         onStatus={(next) => (status = next)}
       />
@@ -2948,31 +3522,37 @@
   {:else}
   <header class="command-strip">
     <div class="notebook-identity">
-      <!-- Leaving a notebook was two steps into a menu, for the one thing you do at the end of
-           every session. It is the first control in the strip now, where the way out belongs.
-           `closePage` is the same path the menu entry uses: it saves, draws the cover, and only
-           then leaves — so this is never a way to lose work. -->
       <button
         class="home-button"
         type="button"
-        aria-label="Close the notebook and return to the library"
-        title="Back to the library"
+        aria-label="Open the notebook library"
+        title="Notebook library"
         disabled={busy}
-        onclick={() => void closePage()}
+        onclick={() => void showLibrary()}
       >
         <svg viewBox="0 0 24 24" aria-hidden="true">
           <path d="M3.5 11.2 12 4.5l8.5 6.7" />
           <path d="M5.8 10v8.2a1 1 0 0 0 1 1h3.4v-4.9h3.6v4.9h3.4a1 1 0 0 0 1-1V10" />
         </svg>
       </button>
-      <div>
-        <div class="notebook-title">Goodtype notebook</div>
-        <div class="save-state">
-          <span class:warning={transactionFailed} class:saving={savePending} class="state-dot"></span>
-          <span>{transactionFailed ? "Save blocked" : savePending ? "Saving" : "Saved"}</span>
-          <span class="revision">r{revision}</span>
-        </div>
-      </div>
+      <NotebookTabs
+        tabs={openTabs}
+        activeRoot={root}
+        {switchingRoot}
+        {busy}
+        saving={savePending}
+        warning={transactionFailed}
+        onSelect={openNotebookAt}
+        onClose={closeNotebookTab}
+      />
+      <button
+        class="new-tab-button"
+        type="button"
+        aria-label="Open another notebook"
+        title="Open another notebook"
+        disabled={busy}
+        onclick={() => void showLibrary()}
+      >+</button>
     </div>
     <div class="command-actions">
       {#if pageOpen}
@@ -3014,10 +3594,10 @@
       <button class="icon-button" class:active={searchOpen} type="button" aria-label="Search typed content" title="Search (Ctrl+F)" onclick={() => (searchOpen = !searchOpen)}>
         <svg class="stroke-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.6-3.6"></path></svg>
       </button>
-      <button class="icon-button" class:active={sideEditorOpen} type="button" aria-label="Typst source view" aria-pressed={sideEditorOpen} title="Source view (Ctrl+Shift+E)" onclick={toggleSideEditor}>
+      <button class="icon-button" class:active={sideEditorOpen} type="button" aria-label="Page text and Typst source view" aria-pressed={sideEditorOpen} title="Editor view (Ctrl+Shift+E)" onclick={toggleSideEditor}>
         <svg class="stroke-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="4.5" width="17" height="15" rx="2"></rect><path d="M10 4.5v15"></path></svg>
       </button>
-      <button class="icon-button" class:active={moreOpen} type="button" aria-label="More notebook actions" aria-expanded={moreOpen} onclick={() => (moreOpen = !moreOpen)}>
+      <button class="icon-button" class:active={moreOpen} type="button" aria-label="More notebook actions" aria-expanded={moreOpen} data-preserve-selection onclick={() => (moreOpen = !moreOpen)}>
         <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.7"></circle><circle cx="12" cy="12" r="1.7"></circle><circle cx="19" cy="12" r="1.7"></circle></svg>
       </button>
     </div>
@@ -3039,13 +3619,20 @@
         bind:this={sideEditor}
         mode={sideEditorMode}
         source={sideEditorStyle ? sharedStyleSource : (sideEditorBlock?.source ?? "")}
-        blockLabel={sideEditorBlockId ? `Typst block ${sideEditorBlockId}` : ""}
+        blockLabel={sideEditorPageText
+          ? "Page text"
+          : sideEditorBlockId
+            ? `Typst block ${sideEditorBlockId}`
+            : ""}
         awayPageNumber={sideEditorPageNumber}
-        hasAnyBlock={typstBlocks.length > 0}
+        hasAnyBlock={Boolean(pageTypst) || typstBlocks.length > 0}
         {root}
         dock={settings.sideEditorDock}
         width={settings.sideEditorWidth}
         diagnostics={sideEditorBlock?.result?.diagnostics ?? []}
+        pageText={sideEditorPageText}
+        {presets}
+        {presetBusy}
         onChange={(next) =>
           sideEditorStyle
             ? updateSharedStyle(next)
@@ -3057,6 +3644,7 @@
           if (sideEditorMode === "away" && sideEditorPageId) scrollToPage(sideEditorPageId);
           else if (typstBlocks[0]) openSideEditor(typstBlocks[0].id);
         }}
+        onCreatePageText={openPageText}
         onCreateBlock={() => {
           addTypstBlock();
           void tick().then(() => {
@@ -3064,6 +3652,7 @@
             if (added) openSideEditor(added.id);
           });
         }}
+        onPresetAction={(action) => void changePagePreset(action)}
       />
     {/if}
     <section
@@ -3075,7 +3664,8 @@
       onpointerupcapture={workspacePointerEnd}
       onpointercancelcapture={workspacePointerEnd}
     >
-      <div class="page-scroll-content" bind:this={pageViewport}>
+      <div class="page-scroll-content" bind:this={pageViewport} onscroll={scheduleSelectionToolbar}>
+        <div class="page-pan-field">
         {#each pageEntries as entry, index (entry.id)}
           {@const active = entry.id === activePageId}
           <!-- The active page's own state wins; a neighbour that has loaded knows its real size,
@@ -3114,9 +3704,15 @@
                 {#if active || entry.snapshot}
                   <PageSurface
                     blocks={active ? activeBlockViews : blockViewsFromSnapshot(entry.snapshot!)}
+                    pageTypst={active
+                      ? activePageTypstView
+                      : pageTypstViewFromSnapshot(entry.snapshot!)}
                     images={active ? activeImageViews : imageViewsFromSnapshot(entry.snapshot!, assetUrls(entry.id))}
                     results={active ? activeResults : (neighborResults[entry.id] ?? {})}
                     strokes={active ? strokes : neighborStrokesFor(entry)}
+                    newStrokeZIndex={active
+                      ? nextVisualZIndex()
+                      : nextSnapshotVisualZIndex(entry.snapshot!, neighborStrokesFor(entry))}
                     selectedStrokeIds={active ? selectedStrokeIds : []}
                     background={active ? activeBackground : (entry.snapshot?.page.background ?? { kind: "plain", color: "#ffffff" })}
                     pageWidthPt={box.widthPt}
@@ -3125,6 +3721,8 @@
                     interactive={active}
                     {root}
                     sharedStyle={sharedStyleSource}
+                    pageTextBaselineGrid={settings.pageTextBaselineGrid}
+                    {presetRevision}
                     inlineEditing={!sideEditorOpen}
                     onRequestEdit={(id) => openSideEditor(id)}
                     {tool}
@@ -3180,8 +3778,12 @@
             </div>
           </article>
         {/each}
+        </div>
       </div>
 
+      <!-- One grid owns the canvas chrome. Corner controls reserve their intrinsic row/column,
+           so the palette can never be positioned through them by an unrelated fixed offset. -->
+      <div class="workspace-chrome">
       <div class="history-pill" aria-label="Page history">
         <button type="button" aria-label="Undo" title="Undo (Ctrl+Z)" onclick={undo} disabled={busy || pendingTransactions > 0 || !canUndo}>
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 7-5 5 5 5M4 12h10a6 6 0 0 1 0 12" /></svg>
@@ -3193,7 +3795,10 @@
 
       <nav
         class:dragging={paletteDrag !== null}
+        class:expanded={paletteContextOpen && (tool === "pen" || tool === "highlighter" || tool === "eraser")}
         class:horizontal={paletteDock === "top" || paletteDock === "bottom"}
+        class:inward-right={paletteDock === "right"}
+        class:inward-bottom={paletteDock === "bottom"}
         class:dock-top={paletteDock === "top" && paletteDrag === null}
         class:dock-right={paletteDock === "right" && paletteDrag === null}
         class:dock-bottom={paletteDock === "bottom" && paletteDrag === null}
@@ -3203,9 +3808,6 @@
         style:top={paletteDrag ? `${paletteY}px` : null}
         aria-label="Canvas tools"
       >
-        <button class="palette-grip" type="button" aria-label="Move tool bar" title="Drag to move the bar" onpointerdown={beginPaletteDrag} onpointermove={movePalette} onpointerup={finishPaletteDrag} onpointercancel={finishPaletteDrag}>
-          <i></i><i></i><i></i><i></i><i></i><i></i>
-        </button>
         {#if toolPanel && toolPanelPreset}
           <div class="palette-panel-anchor" style:--anchor={`${toolPanel.anchor}px`}>
             <ToolPanel
@@ -3229,37 +3831,21 @@
             />
           </div>
         {/if}
-        <button class:active={tool === "pen" && penPreset === 1} class="tool-tile settings" type="button" aria-label="Pen 1" aria-pressed={tool === "pen" && penPreset === 1} title="Pen 1 (1) — press again for settings" onclick={(event) => selectOrOpenTool("pen", 1, event.currentTarget)}>
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15.5 3.5l5 5-9.5 9.5-5.5 1.5 1.5-5.5 9.5-9.5z"></path><path d="M6.5 19.5l1.3-3.6"></path></svg>
+        <button class="palette-grip" type="button" aria-label="Move tool bar" title="Drag to move the bar" onpointerdown={beginPaletteDrag} onpointermove={movePalette} onpointerup={finishPaletteDrag} onpointercancel={finishPaletteDrag}>
+          <i></i><i></i><i></i><i></i><i></i><i></i>
         </button>
-        <button class:active={tool === "pen" && penPreset === 2} class="tool-tile settings" type="button" aria-label="Pen 2" aria-pressed={tool === "pen" && penPreset === 2} title="Pen 2 (2) — press again for settings" onclick={(event) => selectOrOpenTool("pen", 2, event.currentTarget)}>
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 4l6 6-9 9-5 1 1-5 7-11z"></path><path d="M12.5 6.5l5 5"></path></svg>
-        </button>
-        <button class:active={tool === "highlighter"} class="tool-tile settings" type="button" aria-label="Highlighter" aria-pressed={tool === "highlighter"} title="Highlighter (3) — press again for settings" onclick={(event) => selectOrOpenTool("highlighter", 1, event.currentTarget)}>
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 15l7-9 5 4-6 9-4 1-2-5z"></path><path d="M8 20h8" stroke-width="2.4"></path></svg>
-        </button>
-        <button class:active={tool === "eraser"} class="tool-tile settings" type="button" aria-label="Eraser" aria-pressed={tool === "eraser"} title="Erase whole strokes (4) — press again for settings" onclick={(event) => selectOrOpenEraser(event.currentTarget)}>
-          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="12" width="13" height="7" rx="1.6" transform="rotate(-38 10 15)"></rect><path d="M9 21h11"></path></svg>
-        </button>
-        <span class="palette-divider"></span>
-        <button class:active={tool === "lasso" || tool === "select"} class="tool-tile" type="button" aria-label="Lasso select" aria-pressed={tool === "lasso" || tool === "select"} title="Select ink with lasso (5)" onclick={() => activateTool("lasso")}>
-          <svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="10" rx="8" ry="6" stroke-dasharray="3 2.6"></ellipse><path d="M9 16c0 2 1 4 3 4"></path><circle cx="12" cy="20" r="1.4"></circle></svg>
-        </button>
-        <!-- After the divider, with the actions: every tile above is a mode you are *in*, this
-             one makes something and leaves you where you were. -->
-        <span class="palette-divider"></span>
-        <button class="tool-tile" type="button" aria-label="New Typst block" title="New Typst block (T)" onclick={addTypstBlock}>
-          <!-- A T with a plus, not a sigma. The sigma named the maths a block can hold; the block
-               holds prose as readily, and a writer looking for "add text" was not looking for a
-               summation sign. -->
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M4 7.5V6h11v1.5M9.5 6v13M7 19h5" />
-            <path d="M18.5 4.5v6M15.5 7.5h6" stroke-width="1.9" />
-          </svg>
-        </button>
+        <div class="palette-primary">
+          <PaletteTools
+            {settings}
+            activeCommands={activePaletteCommands}
+            expandedCommand={expandedPaletteCommand}
+            horizontal={paletteDock === "top" || paletteDock === "bottom"}
+            onActivate={(command) => paletteCommands[command]()}
+          />
+        </div>
 
-        {#if tool === "pen" || tool === "highlighter"}
-          <span class="palette-divider"></span>
+        {#if paletteContextOpen && (tool === "pen" || tool === "highlighter")}
+          <div class="palette-context" aria-label={`${tool === "highlighter" ? "Highlighter" : `Pen ${penPreset}`} quick settings`}>
           <div class="inline-group" role="group" aria-label="Stroke size">
             {#each activeWidthChips as chip, index (chip)}
               {@const isActive = nearestChip(activeWidthChips, activeWidth) === chip}
@@ -3412,42 +3998,88 @@
               </div>
             {/if}
           </div>
-        {/if}
-
-        {#if eraserPanel !== null}
-          <div class="palette-panel-anchor" style:--anchor={`${eraserPanel}px`}>
-            <EraserPanel
-              size={settings.eraserSize}
-              onChange={(size) => setEraserSize(size)}
-              onClose={() => (eraserPanel = null)}
-            />
+          <span class="palette-divider"></span>
+          <button
+            type="button"
+            class="size-tile advanced-tool-settings"
+            aria-label={`${tool === "highlighter" ? "Highlighter" : `Pen ${penPreset}`} advanced settings`}
+            aria-expanded={toolPanel !== null}
+            title="Nib and smoothing settings"
+            onclick={(event) => {
+              colorPanel = null;
+              widthPanel = null;
+              const kind = tool === "highlighter" ? "highlighter" : "pen";
+              const slot = tool === "highlighter" ? 1 : penPreset;
+              toolPanel = toolPanel ? null : { kind, slot, anchor: swatchAnchor(event.currentTarget) };
+            }}
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M4 7h10M18 7h2M4 17h2M10 17h10" />
+              <circle cx="16" cy="7" r="2" /><circle cx="8" cy="17" r="2" />
+            </svg>
+          </button>
+          </div>
+        {:else if paletteContextOpen && tool === "eraser"}
+          <div class="palette-context" role="radiogroup" aria-label="Eraser hit-area size">
+            {#each ERASER_SIZE_OPTIONS as option (option.id)}
+              <button
+                type="button"
+                class="size-tile eraser-size"
+                class:active={settings.eraserSize === option.id}
+                role="radio"
+                aria-checked={settings.eraserSize === option.id}
+                aria-label={`${option.label} eraser, ${ERASER_RADIUS_PT[option.id]} point hit radius`}
+                title={`${option.label} — ${ERASER_RADIUS_PT[option.id]} pt`}
+                onclick={() => setEraserSize(option.id)}
+              >
+                <span
+                  class="eraser-ring"
+                  style:width={`${option.diameter}px`}
+                  style:height={`${option.diameter}px`}
+                ></span>
+              </button>
+            {/each}
           </div>
         {/if}
       </nav>
 
       {#if selectedStrokeIds.length > 0 || groupedStrokeIds.length > 0}
-        <div class="context-actions" aria-label="Ink selection actions">
-          <span>{selectedStrokeIds.length || groupedStrokeIds.length} ink selected</span>
-          {#if selectedStrokeIds.length > 0}<button type="button" onclick={groupSelectedInk}>Group with Typst</button>{/if}
-          {#if groupedStrokeIds.length > 0}<button type="button" onclick={ungroupInk}>Ungroup</button>{/if}
-        </div>
-      {:else if selectedTypstId || selectedImageId}
-        <div class="context-actions" aria-label="Selected object order">
-          <span>Layer</span>
-          <button type="button" title="Send to back" aria-label="Send selected object to back" onclick={() => changeVisualOrder("back")}>Back</button>
-          <button type="button" title="Move backward one layer" aria-label="Move selected object backward one layer" onclick={() => changeVisualOrder("backward")}>−1</button>
-          <button type="button" title="Move forward one layer" aria-label="Move selected object forward one layer" onclick={() => changeVisualOrder("forward")}>+1</button>
-          <button type="button" title="Bring to front" aria-label="Bring selected object to front" onclick={() => changeVisualOrder("front")}>Front</button>
-          <span>Reading</span>
-          <button type="button" aria-label="Move selected object earlier in reading order" onclick={() => changeReadingOrder(-1)}>Earlier</button>
-          <button type="button" aria-label="Move selected object later in reading order" onclick={() => changeReadingOrder(1)}>Later</button>
-        </div>
+        <SelectionActions
+          bind:element={selectionToolbarElement}
+          subject="ink"
+          left={selectionToolbarPosition.left}
+          top={selectionToolbarPosition.top}
+          ready={selectionToolbarPosition.ready}
+          canMoveBack={canMoveInkVisual(-1)}
+          canMoveForward={canMoveInkVisual(1)}
+          onMove={changeInkVisualOrder}
+          grouped={groupedStrokeIds.length > 0}
+          onGroup={groupedStrokeIds.length > 0
+            ? ungroupInk
+            : selectedTypstId
+              ? groupSelectedInk
+              : undefined}
+          onDelete={selectedStrokeIds.length > 0 ? () => void deleteSelection() : undefined}
+        />
+      {:else if selectedImageId || selectedTypstId}
+        <SelectionActions
+          bind:element={selectionToolbarElement}
+          subject={selectedImageId ? "image" : "Typst block"}
+          left={selectionToolbarPosition.left}
+          top={selectionToolbarPosition.top}
+          ready={selectionToolbarPosition.ready}
+          canMoveBack={canMoveVisual(-1)}
+          canMoveForward={canMoveVisual(1)}
+          onMove={(direction) => changeVisualOrder(direction < 0 ? "backward" : "forward")}
+          onDelete={() => void deleteSelection()}
+        />
       {/if}
 
       <div class="zoom-pill">
         <button type="button" aria-label="Zoom out" onclick={() => changeZoom(zoom / ZOOM_STEP)}>−</button>
         <output aria-label="Page zoom">{Math.round(zoom * 100)}%</output>
         <button type="button" aria-label="Zoom in" onclick={() => changeZoom(zoom * ZOOM_STEP)}>+</button>
+      </div>
       </div>
     </section>
     </div>
@@ -3600,12 +4232,12 @@
     background: var(--charcoal);
   }
 
-  .notebook-identity, .command-actions, .save-state, .tool-status {
+  .notebook-identity, .command-actions, .tool-status {
     display: flex;
     align-items: center;
   }
 
-  .notebook-identity { min-width: 0; gap: 11px; }
+  .notebook-identity { flex: 1; min-width: 0; gap: 8px; }
 
   /* Sized like the strip's other icon controls so the row reads as one set, and it replaces the
      decorative square that used to sit here — the corner was already the eye's first stop. */
@@ -3633,28 +4265,28 @@
     stroke-linecap: round;
     stroke-linejoin: round;
   }
-  .notebook-title {
-    overflow: hidden;
-    color: var(--text);
-    font-size: 16px;
-    font-weight: 500;
-    line-height: 1.1;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+  .new-tab-button {
+    width: 40px;
+    height: 40px;
+    flex: none;
+    border: 1px solid rgb(255 255 255 / 18%);
+    border-radius: 7px;
+    background: transparent;
+    color: var(--muted);
+    cursor: pointer;
+    font-size: 21px;
   }
+  .new-tab-button:hover:not(:disabled) { background: rgb(255 255 255 / 8%); color: var(--text); }
 
-  .save-state { gap: 7px; margin-top: 2px; color: var(--muted); font-size: 11px; }
-  .state-dot, .blue-dot { width: 6px; height: 6px; flex: none; border-radius: 50%; background: var(--blueprint); }
-  .state-dot.saving { animation: breathe 1s ease-in-out infinite alternate; }
-  .state-dot.warning { background: var(--oxide); }
-  .revision, .page-count, .zoom-pill output {
+  .blue-dot { width: 6px; height: 6px; flex: none; border-radius: 50%; background: var(--blueprint); }
+  .page-count, .zoom-pill output {
     color: var(--quiet);
     font-size: 10px;
     font-variant-numeric: tabular-nums;
     letter-spacing: .02em;
   }
 
-  .command-actions { gap: 8px; }
+  .command-actions { flex: none; gap: 8px; }
   .export-button, .icon-button {
     height: 40px;
     border: 1px solid rgb(255 255 255 / 18%);
@@ -3712,17 +4344,25 @@
   }
 
   .page-scroll-content {
-    display: flex;
     width: 100%;
     height: 100%;
     overflow: auto;
-    padding: 46px 108px 58px;
     scrollbar-width: none;
-    align-items: center;
+    touch-action: none;
+  }
+  .page-scroll-content::-webkit-scrollbar { display: none; }
+  .page-pan-field {
+    --page-pan-gutter: min(40vw, 480px);
+    display: flex;
+    width: calc(100% + var(--page-pan-gutter) + var(--page-pan-gutter));
+    min-height: 100%;
+    padding: 46px var(--page-pan-gutter) 58px;
+    /* Its content box is one viewport wide. Equal outer padding therefore creates real positive
+       scroll range on both sides even when a zoomed-out page would otherwise fit completely. */
+    align-items: safe center;
     flex-direction: column;
     gap: 46px;
   }
-  .page-scroll-content::-webkit-scrollbar { display: none; }
   .page-stack-item { position: relative; flex: none; }
   .page-stack-item.active-page .page-number { color: var(--blueprint-light); }
   .page-number {
@@ -3766,9 +4406,22 @@
 
   /* The object and ink layer rules now live with the renderer, in PageSurface.svelte. */
 
-  .history-pill, .zoom-pill, .context-actions {
+  .workspace-chrome {
     position: absolute;
     z-index: 15;
+    inset: 0;
+    display: grid;
+    min-width: 0;
+    min-height: 0;
+    grid-template-columns: max-content minmax(0, 1fr) max-content;
+    grid-template-rows: max-content minmax(0, 1fr) max-content;
+    gap: 10px;
+    padding: 16px 18px;
+    pointer-events: none;
+  }
+  .workspace-chrome > * { pointer-events: auto; }
+
+  .history-pill, .zoom-pill {
     display: flex;
     align-items: center;
     border: 1px solid rgb(255 255 255 / 10%);
@@ -3776,19 +4429,20 @@
     box-shadow: 0 12px 30px rgb(0 0 0 / 45%);
   }
 
-  .history-pill { top: 16px; left: 18px; gap: 2px; padding: 5px; border-radius: 10px; }
+  .history-pill, .zoom-pill { position: relative; z-index: 15; }
+  .history-pill { grid-area: 1 / 1; justify-self: start; align-self: start; gap: 2px; padding: 5px; border-radius: 10px; }
   .history-pill button, .zoom-pill button { display: grid; border-radius: 7px; background: transparent; color: var(--text); cursor: pointer; place-items: center; }
   .history-pill button { width: 40px; height: 40px; }
   .history-pill button:hover:not(:disabled), .zoom-pill button:hover { background: rgb(255 255 255 / 8%); }
   .history-pill svg { width: 19px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
 
   .instrument-palette {
-    position: absolute;
+    position: relative;
     z-index: 20;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 3px;
+    display: grid;
+    grid-template-columns: 46px;
+    grid-template-rows: auto 1fr;
+    gap: 3px 0;
     padding: 6px;
     border: 1px solid rgb(255 255 255 / 12%);
     border-radius: 13px;
@@ -3797,14 +4451,87 @@
     touch-action: none;
   }
 
-  /* Vertical docks anchor below the top-left history pill so a long column can never cover it. */
-  .instrument-palette.dock-left { top: 84px; left: 20px; }
-  .instrument-palette.dock-right { top: 84px; right: 20px; }
-  .instrument-palette.dock-top { top: 16px; left: 50%; transform: translateX(-50%); }
-  .instrument-palette.dock-bottom { bottom: 16px; left: 50%; transform: translateX(-50%); }
-  .instrument-palette.horizontal { flex-direction: row; }
+  /* Each dock spans every grid track except the occupied corner on its own edge. */
+  .instrument-palette.dock-left { grid-column: 1; grid-row: 2 / 4; justify-self: start; align-self: center; }
+  .instrument-palette.dock-right { grid-column: 3; grid-row: 1 / 3; justify-self: end; align-self: center; }
+  .instrument-palette.dock-top { grid-column: 2 / 4; grid-row: 1; justify-self: center; align-self: start; }
+  .instrument-palette.dock-bottom { grid-column: 1 / 3; grid-row: 3; justify-self: center; align-self: end; }
+  .instrument-palette.expanded:not(.horizontal) { grid-template-columns: repeat(2, 46px); }
+  .instrument-palette.horizontal {
+    grid-template-columns: auto 1fr;
+    grid-template-rows: 46px;
+  }
+  .instrument-palette.horizontal.expanded { grid-template-rows: 46px 32px; }
+  .instrument-palette.horizontal.expanded.inward-bottom { grid-template-rows: 32px 46px; }
 
-  .instrument-palette.dragging { box-shadow: 0 26px 60px rgb(0 0 0 / 68%); }
+  .palette-primary,
+  .palette-context {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 3px;
+  }
+
+  .palette-grip {
+    grid-column: 1 / -1;
+    grid-row: 1;
+    justify-self: center;
+  }
+
+  .palette-primary {
+    grid-column: 1;
+    grid-row: 2;
+    width: 46px;
+  }
+
+  .palette-context {
+    grid-column: 2;
+    grid-row: 2;
+    width: 46px;
+    border-left: 1px solid rgb(255 255 255 / 12%);
+  }
+
+  .instrument-palette.expanded.inward-right .palette-primary { grid-column: 2; }
+  .instrument-palette.expanded.inward-right .palette-context {
+    grid-column: 1;
+    border-right: 1px solid rgb(255 255 255 / 12%);
+    border-left: 0;
+  }
+
+  .horizontal .palette-primary,
+  .horizontal .palette-context {
+    flex-direction: row;
+    width: auto;
+    min-width: 0;
+  }
+
+  .horizontal .palette-grip {
+    grid-column: 1;
+    grid-row: 1 / -1;
+    align-self: center;
+  }
+
+  .horizontal .palette-primary {
+    grid-column: 2;
+    grid-row: 1;
+  }
+
+  .horizontal .palette-context {
+    grid-column: 2;
+    grid-row: 2;
+    border-top: 1px solid rgb(255 255 255 / 12%);
+    border-left: 0;
+  }
+
+  .horizontal.expanded.inward-bottom .palette-primary { grid-row: 2; }
+  .horizontal.expanded.inward-bottom .palette-context {
+    grid-row: 1;
+    border-top: 0;
+    border-bottom: 1px solid rgb(255 255 255 / 12%);
+  }
+
+  .instrument-palette.dragging { position: absolute; box-shadow: 0 26px 60px rgb(0 0 0 / 68%); }
 
   /* Grip: two columns of three dots, drag handle at the leading edge. */
   .palette-grip {
@@ -3821,31 +4548,14 @@
   .dragging .palette-grip { cursor: grabbing; }
   .palette-grip i { width: 3.5px; height: 3.5px; border-radius: 50%; background: rgb(255 255 255 / 28%); }
 
-  /* Tool tiles: uniform icon buttons; active fills blueprint. */
-  .tool-tile {
-    display: grid;
-    width: 40px;
-    height: 40px;
-    flex: none;
-    place-items: center;
-    border-radius: 10px;
-    background: transparent;
-    color: #c4cad2;
-    cursor: pointer;
-  }
-  .tool-tile:hover { background: rgb(255 255 255 / 6%); }
-  .tool-tile.active { background: var(--blueprint); color: #fff; }
-  .tool-tile svg { width: 21px; height: 21px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
-  .tool-tile svg circle { fill: currentColor; stroke: none; }
-
   .palette-divider { width: 26px; height: 1px; margin: 1px 0; background: rgb(255 255 255 / 12%); }
   .horizontal .palette-divider { width: 1px; height: 26px; margin: 0 3px; }
 
   /* Inline stroke sizes and colors carried on the palette bar (contextual to the active tool). */
   .inline-group { display: flex; flex-direction: column; align-items: center; gap: 3px; }
   .horizontal .inline-group { flex-direction: row; }
-  .inline-group.colors { display: grid; grid-template-columns: repeat(2, auto); gap: 5px; }
-  .horizontal .inline-group.colors { grid-template-columns: repeat(4, auto); }
+  .inline-group.colors { display: flex; flex-direction: column; gap: 5px; }
+  .horizontal .inline-group.colors { flex-direction: row; }
 
   .size-tile {
     display: grid;
@@ -3860,6 +4570,7 @@
     place-items: center;
     border-radius: 9px;
     background: transparent;
+    color: var(--text);
     cursor: pointer;
   }
 
@@ -3871,6 +4582,25 @@
   .size-tile.custom { color: var(--quiet); }
   .size-tile.custom:hover { color: var(--text); }
   .size-tile.active .size-line { background: var(--text) !important; }
+  .eraser-ring {
+    box-sizing: border-box;
+    border: 1.5px solid currentColor;
+    border-radius: 50%;
+  }
+  .eraser-size.active .eraser-ring { color: var(--text); }
+  .advanced-tool-settings svg {
+    width: 19px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.6;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+  .advanced-tool-settings[aria-expanded="true"] { background: rgb(255 255 255 / 8%); }
+
+  .horizontal .palette-context .size-tile { width: 28px; height: 28px; border-radius: 7px; }
+  .horizontal .palette-context .color-dot { width: 20px; height: 20px; }
+  .horizontal .palette-context .palette-divider { height: 20px; }
 
   .color-dot {
     position: relative;
@@ -3884,16 +4614,7 @@
 
   .color-dot.active { outline: 1.5px solid var(--blueprint); outline-offset: 2px; }
 
-  /**
-   * "There is more here" — a dot on the tile you are already using.
-   *
-   * Every second-tap on this bar opens a panel, and until now the only thing that said so was a
-   * `title` tooltip. A tooltip needs hover, and a pen has none, so on this app's primary input
-   * the entire mechanism was invisible. This is drawn, so it is there for the pen too, and only
-   * on the active tile — the one where a second tap actually does something — so the bar does
-   * not turn into confetti.
-   */
-  .tool-tile.settings.active::after,
+  /* Active editable chips retain a pen-visible hint that a second press opens their editor. */
   .size-tile.settings.active::after,
   .color-dot.active::after {
     position: absolute;
@@ -3908,11 +4629,9 @@
     pointer-events: none;
   }
 
-  /* The active tool tile fills with blueprint, so its dot is drawn in the ink colour it sits on. */
-  .tool-tile.settings.active::after { background: #fff; }
   .color-dot.active::after { right: 2px; bottom: 2px; background: rgb(255 255 255 / 85%); }
   /* The tiles have to be a containing block for the dot to sit in their corner. */
-  .tool-tile, .size-tile { position: relative; }
+  .size-tile { position: relative; }
   .color-dot.custom {
     display: grid;
     place-items: center;
@@ -3946,12 +4665,7 @@
   .instrument-palette.dock-left .palette-panel-anchor { left: calc(100% + 10px); }
   .instrument-palette.dock-right .palette-panel-anchor { right: calc(100% + 10px); }
 
-  .context-actions { top: 18px; left: 50%; gap: 4px; padding: 5px; border-radius: 9px; transform: translateX(-50%); }
-  .context-actions span { padding: 0 9px; color: var(--muted); font-size: 12px; }
-  .context-actions button { padding: 7px 9px; border-radius: 5px; background: transparent; color: var(--text); font-size: 12px; cursor: pointer; }
-  .context-actions button:hover { background: rgb(255 255 255 / 7%); }
-
-  .zoom-pill { right: 18px; bottom: 16px; gap: 2px; padding: 4px; border-radius: 9px; }
+  .zoom-pill { grid-area: 3 / 3; justify-self: end; align-self: end; gap: 2px; padding: 4px; border-radius: 9px; }
   .zoom-pill button { width: 34px; height: 34px; font-size: 19px; }
   .zoom-pill output { min-width: 48px; padding: 0 7px; color: #c4cad2; text-align: center; }
 
@@ -4019,19 +4733,8 @@
   .diagnostics-panel dd { margin: 0; color: var(--text); font-family: "Cascadia Mono", Consolas, monospace; font-variant-numeric: tabular-nums; }
 
   .screen-reader-status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; }
-  @keyframes breathe { from { opacity: .35; } to { opacity: 1; } }
-
   @media (max-width: 800px) {
-    .page-scroll-content { padding-right: 88px; padding-left: 88px; }
     .operation-status, .page-count { display: none; }
-    .notebook-title { max-width: 42vw; }
-  }
-
-  @media (max-height: 720px) {
-    .instrument-palette.dock-left, .instrument-palette.dock-right { top: 64px; }
-  }
-
-  @media (prefers-reduced-motion: reduce) {
-    .state-dot.saving { animation: none; }
+    .export-button { width: 40px; padding: 0; justify-content: center; font-size: 0; }
   }
 </style>

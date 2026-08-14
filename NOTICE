@@ -91,3 +91,14 @@ Rust libraries — MIT License or Apache License 2.0
 Typst Universe packages are not redistributed. They are resolved at compile
 time from a local cache, and downloaded only on a cache miss and only when the
 writer has left that setting enabled. Each package carries its own licence.
+
+--------------------------------------------------------------------------------
+Tinymist 0.15.2 - Apache License 2.0
+--------------------------------------------------------------------------------
+
+  Copyright the Tinymist contributors
+  https://github.com/Myriad-Dreamin/tinymist
+
+Goodtype bundles the unmodified Windows x64 Tinymist language-service binary.
+It is used only for editor intelligence; Goodtype's embedded Typst compiler
+remains responsible for rendering, package policy, persistence, and export.

@@ -4,6 +4,7 @@
   import type { StrokePerformance } from "../ink/metrics";
   import type { TypstCompileResult } from "../editor/typst";
   import { getCachedTypst } from "../editor/typstCache";
+  import { DEFAULT_PRESET_PATH, pagePresetPath } from "../page/presets";
   import {
     DEFAULT_PRESSURE_CALIBRATION,
     type InkTool,
@@ -11,15 +12,9 @@
   } from "../ink/pipeline";
   import ImageObject from "./ImageObject.svelte";
   import InkSurface from "./InkSurface.svelte";
+  import PageText from "./PageText.svelte";
   import TypstBlock from "./TypstBlock.svelte";
-  import type { BlockView, ImageView } from "./pageView";
-
-  type TypstTransform = {
-    x: number;
-    y: number;
-    layoutWidthPt: number;
-    scale: number;
-  };
+  import type { BlockView, ImageView, PageTypstView, TypstTransform } from "./pageView";
 
   // The one page renderer. `interactive` is the only difference between the page being edited
   // and the pages above and below it, so a page keeps its rendered blocks — and its painted
@@ -27,9 +22,11 @@
   // component.
   let {
     blocks = [],
+    pageTypst = null,
     images = [],
     results = {},
     strokes = [],
+    newStrokeZIndex = 1_000_001,
     selectedStrokeIds = [],
     background = { kind: "plain", color: "#ffffff" },
     pageWidthPt,
@@ -39,6 +36,8 @@
     root = null,
     inlineEditing = true,
     sharedStyle = "",
+    pageTextBaselineGrid = true,
+    presetRevision = 0,
     onRequestEdit,
     tool = "select",
     color = "#16212b",
@@ -66,9 +65,11 @@
     onStrokeMetrics,
   }: {
     blocks?: BlockView[];
+    pageTypst?: PageTypstView | null;
     images?: ImageView[];
     results?: Record<string, TypstCompileResult | null>;
     strokes?: Stroke[];
+    newStrokeZIndex?: number;
     selectedStrokeIds?: string[];
     /** The paper: a flat colour, or a template resolved against this page's geometry. */
     background?: PageBackground;
@@ -81,6 +82,8 @@
     /** False while the side view is open: blocks route editing there instead. */
     inlineEditing?: boolean;
     sharedStyle?: string;
+    pageTextBaselineGrid?: boolean;
+    presetRevision?: number;
     onRequestEdit?: (id: string) => void;
     tool?: InkTool;
     color?: string;
@@ -122,12 +125,27 @@
     y: screenDy / zoom,
   });
 
-  // Ink normally paints over the objects. While a block is being edited its surface has to win,
-  // so the whole object layer is lifted for the duration and drops back afterwards.
+  // Editing temporarily lifts the object input surface; committed content otherwise follows the
+  // page's shared visual order.
   let editingBlockId = $state<string | null>(null);
 </script>
 
 <PaperLayer {background} widthPt={pageWidthPt} heightPt={pageHeightPt} {root} {zoom} />
+<div class="page-text-layer">
+  {#if pageTypst}
+    <PageText
+      source={pageTypst.source}
+      compileResult={results[pageTypst.id] ?? null}
+      compileContext={pagePresetPath(pageTypst.source) ? "" : sharedStyle}
+      {background}
+      geometry={{ widthPt: pageWidthPt, heightPt: pageHeightPt }}
+      snapBlocksToGrid={pageTextBaselineGrid}
+      compileDependency={pagePresetPath(pageTypst.source) === DEFAULT_PRESET_PATH ? presetRevision : 0}
+      readingOrder={pageTypst.readingOrder}
+      onCompile={(request) => onCompile(pageTypst.id, request)}
+    />
+  {/if}
+</div>
 <div class:interactive class:editing={editingBlockId !== null} class="objects">
   {#each blocks as block (block.id)}
     <TypstBlock
@@ -160,6 +178,7 @@
   {/each}
   {#each images as image (image.id)}
     <ImageObject
+      id={image.id}
       src={image.url}
       alt={image.alt}
       x={image.x}
@@ -182,6 +201,8 @@
 <div class:object-input={directObjectInput} class="ink-layer">
   <InkSurface
     {strokes}
+    {newStrokeZIndex}
+    objectZIndices={[...blocks.map((block) => block.zIndex), ...images.map((image) => image.zIndex)]}
     {selectedStrokeIds}
     {pageWidthPt}
     {pageHeightPt}
@@ -203,20 +224,26 @@
 </div>
 
 <style>
+  .page-text-layer,
   .objects,
   .ink-layer {
     position: absolute;
     inset: 0;
   }
 
-  .objects {
+  .page-text-layer {
     z-index: 1;
+    overflow: hidden;
     pointer-events: none;
   }
 
-  /* Lifted above `.ink-layer` for the duration of an edit, then it falls back. */
+  .objects {
+    pointer-events: none;
+  }
+
+  /* Editing must receive input even when this block is normally below committed ink. */
   .objects.editing {
-    z-index: 3;
+    z-index: 2147483647;
   }
 
   /* Only the page being edited hands pointer input to its objects; neighbours stay readable
@@ -225,10 +252,6 @@
   .objects.interactive :global(.typst-block),
   .objects.interactive :global(.image-object) {
     pointer-events: auto;
-  }
-
-  .ink-layer {
-    z-index: 2;
   }
 
   .ink-layer.object-input {

@@ -900,12 +900,28 @@ mod tests {
     fn duplicates_a_page_with_fresh_ids_and_shared_originals() {
         let temporary = tempfile::tempdir().unwrap();
         let notebook_root = temporary.path().join("notebook");
-        create_notebook(&notebook_root, &snapshot()).unwrap();
+        let mut original_snapshot = snapshot();
+        let mut page_fields = fields("page-text", 2);
+        page_fields.x = 0.0;
+        page_fields.y = 0.0;
+        original_snapshot.page.objects.push(PageObject::PageTypst {
+            fields: page_fields,
+            source_path: "blocks/page.typ".into(),
+        });
+        original_snapshot
+            .page
+            .reading_order
+            .push("page-text".into());
+        original_snapshot.blocks.push(StoredFile {
+            path: "blocks/page.typ".into(),
+            bytes: b"Full page prose".to_vec(),
+        });
+        create_notebook(&notebook_root, &original_snapshot).unwrap();
 
         let copy = duplicate_page(&notebook_root, "page-001", "2026-07-23T19:00:00Z").unwrap();
         assert_eq!(copy.page.id, "page-002");
         assert_eq!(copy.page.revision, 1);
-        assert_eq!(copy.page.objects.len(), 2);
+        assert_eq!(copy.page.objects.len(), 3);
         assert_eq!(copy.ink_layers[0].strokes.len(), 1);
         // Fresh identity everywhere the page owns one.
         assert!(
@@ -929,6 +945,14 @@ mod tests {
             panic!("image object missing");
         };
         assert_eq!(source_path, "assets/diagram.png");
+        let PageObject::PageTypst { source_path, .. } = &copy.page.objects[2] else {
+            panic!("page Typst object missing");
+        };
+        assert!(source_path.starts_with("blocks/page-002-block-"));
+        assert_eq!(
+            search_notebook(&notebook_root, "Full page").unwrap().len(),
+            2
+        );
 
         // The source page is untouched and both pages reopen.
         let original = open_page(&notebook_root, "page-001").unwrap();

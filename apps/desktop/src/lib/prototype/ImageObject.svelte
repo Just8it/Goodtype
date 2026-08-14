@@ -20,6 +20,7 @@
       };
 
   type Props = {
+    id: string;
     src: string;
     alt: string;
     x: number;
@@ -40,6 +41,7 @@
   };
 
   let {
+    id,
     src,
     alt,
     x,
@@ -169,6 +171,7 @@
 <div
   class:selected
   class="image-object"
+  data-object-id={id}
   style:left={`${previewX}px`}
   style:top={`${previewY}px`}
   style:width={`${widthPt}px`}
@@ -190,15 +193,17 @@
   >
     <img {src} {alt} draggable="false" />
   </button>
-  <button
-    class="scale-handle"
-    type="button"
-    aria-label={`Scale ${alt}`}
-    onpointerdown={beginScale}
-    onpointermove={update}
-    onpointerup={finish}
-    onpointercancel={cancel}
-  ></button>
+  {#if selected}
+    <button
+      class="scale-handle"
+      type="button"
+      aria-label={`Scale ${alt}`}
+      onpointerdown={beginScale}
+      onpointermove={update}
+      onpointerup={finish}
+      onpointercancel={cancel}
+    ></button>
+  {/if}
 </div>
 
 <style>
@@ -211,7 +216,7 @@
   }
 
   .image-object.selected {
-    outline: 1.5px solid #2f6fdb;
+    outline: 1.5px solid var(--blueprint);
     outline-offset: 0;
   }
 
@@ -246,7 +251,7 @@
     height: 12px;
     padding: 0;
     border: 1.5px solid white;
-    background: #2f6fdb;
+    background: var(--blueprint);
     cursor: nwse-resize;
   }
 </style>

@@ -17,6 +17,16 @@ export type BlockView = {
   readingOrder: number;
 };
 
+export type TypstTransform = Pick<BlockView, "x" | "y" | "layoutWidthPt" | "scale">;
+
+export type PageTypstView = {
+  id: string;
+  path: string;
+  source: string;
+  zIndex: number;
+  readingOrder: number;
+};
+
 export type ImageView = {
   id: string;
   path: string;
@@ -65,6 +75,21 @@ export function blockViewsFromSnapshot(snapshot: SnapshotLike): BlockView[] {
       zIndex: object.zIndex,
       readingOrder: object.readingOrder,
     }));
+}
+
+export function pageTypstViewFromSnapshot(snapshot: SnapshotLike): PageTypstView | null {
+  const object = snapshot.page.objects.find(
+    (candidate): candidate is Extract<PageObject, { type: "page_typst" }> =>
+      candidate.type === "page_typst",
+  );
+  if (!object) return null;
+  return {
+    id: object.id,
+    path: object.sourcePath,
+    source: decode(snapshot.blocks.find((file) => file.path === object.sourcePath)),
+    zIndex: object.zIndex,
+    readingOrder: object.readingOrder,
+  };
 }
 
 export function imageViewsFromSnapshot(

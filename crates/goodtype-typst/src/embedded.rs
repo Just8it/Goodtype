@@ -115,21 +115,20 @@ pub(crate) fn export_pdf(
     }
 
     let compiled = typst::compile::<PagedDocument>(&world);
-    let document = compiled.output.map_err(|errors| {
-        errors
-            .iter()
-            .map(|error| error.message.as_str().to_owned())
-            .collect::<Vec<_>>()
-            .join("; ")
-    })?;
+    let document = compiled
+        .output
+        .map_err(|errors| diagnostic_messages(&errors))?;
 
-    typst_pdf::pdf(&document, &typst_pdf::PdfOptions::default()).map_err(|errors| {
-        errors
-            .iter()
-            .map(|error| error.message.as_str().to_owned())
-            .collect::<Vec<_>>()
-            .join("; ")
-    })
+    typst_pdf::pdf(&document, &typst_pdf::PdfOptions::default())
+        .map_err(|errors| diagnostic_messages(&errors))
+}
+
+fn diagnostic_messages(diagnostics: &[SourceDiagnostic]) -> String {
+    diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.message.as_str())
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 /// Complete at a caret inside a block's source.

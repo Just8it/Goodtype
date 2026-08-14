@@ -10,7 +10,9 @@ mod embedded;
 
 use std::path::{Path, PathBuf};
 
-const MAX_SOURCE_BYTES: usize = 1024 * 1024;
+use serde::Serialize;
+
+pub const MAX_SOURCE_BYTES: usize = 1024 * 1024;
 const MAX_WIDTH_PT: f64 = 10_000.0;
 
 /// Slack compiled around a preview so it is not clipped by its own page frame.
@@ -38,7 +40,8 @@ pub struct CompileRequest {
     pub allow_remote_packages: bool,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CompileResult {
     pub generation: u64,
     pub svg: Option<String>,
@@ -53,7 +56,7 @@ pub struct CompileResult {
 }
 
 /// One completion candidate at a caret.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Completion {
     /// What is being completed: `function`, `parameter`, `symbol`, `package`, …
     pub kind: &'static str,
@@ -67,7 +70,7 @@ pub struct Completion {
     pub offset: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Hover {
     pub value: String,
     pub code: bool,
@@ -132,13 +135,14 @@ fn checked_root_and_source(notebook_root: &Path, source: &str) -> Result<PathBuf
     Ok(root)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Diagnostic {
     pub severity: DiagnosticSeverity,
     pub message: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum DiagnosticSeverity {
     Error,
     Warning,
@@ -149,7 +153,6 @@ pub enum CompileError {
     InvalidRoot(PathBuf),
     InvalidWidth(f64),
     SourceTooLarge(usize),
-    Io(std::io::Error),
     Format(String),
 }
 
@@ -170,7 +173,6 @@ impl std::fmt::Display for CompileError {
                     "Typst source exceeds {MAX_SOURCE_BYTES} bytes: {size}"
                 )
             }
-            Self::Io(error) => error.fmt(formatter),
             Self::Format(error) => write!(formatter, "Typst formatting failed: {error}"),
         }
     }
@@ -178,27 +180,13 @@ impl std::fmt::Display for CompileError {
 
 impl std::error::Error for CompileError {}
 
-impl From<std::io::Error> for CompileError {
-    fn from(error: std::io::Error) -> Self {
-        Self::Io(error)
-    }
-}
-
 pub fn compile_block(
     notebook_root: &Path,
     request: &CompileRequest,
 ) -> Result<CompileResult, CompileError> {
-    let root = notebook_root
-        .canonicalize()
-        .map_err(|_| CompileError::InvalidRoot(notebook_root.to_path_buf()))?;
-    if !root.is_dir() {
-        return Err(CompileError::InvalidRoot(root));
-    }
+    let root = checked_root_and_source(notebook_root, &request.source)?;
     if !request.width_pt.is_finite() || request.width_pt <= 0.0 || request.width_pt > MAX_WIDTH_PT {
         return Err(CompileError::InvalidWidth(request.width_pt));
-    }
-    if request.source.len() > MAX_SOURCE_BYTES {
-        return Err(CompileError::SourceTooLarge(request.source.len()));
     }
 
     // `fill: none` rather than the default white: the padding is meant to be see-through, or
@@ -216,6 +204,36 @@ pub fn compile_block(
         PREVIEW_PAD_PT,
         request.allow_remote_packages,
     ))
+}
+
+/// Validate the single-file preset contract without writing the candidate into a notebook.
+pub fn validate_preset_source(source: &str) -> Result<(), String> {
+    if source.len() > MAX_SOURCE_BYTES {
+        return Err(CompileError::SourceTooLarge(source.len()).to_string());
+    }
+    let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let result = compile_block(
+        root.path(),
+        &CompileRequest {
+            source: format!(
+                "{source}\n#show: preset.with(rhythm: 16pt)\nGoodtype preset validation"
+            ),
+            width_pt: 360.0,
+            generation: 0,
+            allow_remote_packages: false,
+        },
+    )
+    .map_err(|error| error.to_string())?;
+    if result.svg.is_some() {
+        return Ok(());
+    }
+    Err(result
+        .diagnostics
+        .into_iter()
+        .filter(|diagnostic| diagnostic.severity == DiagnosticSeverity::Error)
+        .map(|diagnostic| diagnostic.message)
+        .next()
+        .unwrap_or_else(|| "Preset did not produce valid Typst output".into()))
 }
 
 #[cfg(test)]
@@ -453,5 +471,11 @@ mod tests {
             ),
             Err(CompileError::InvalidWidth(_))
         ));
+    }
+
+    #[test]
+    fn validates_the_preset_contract() {
+        assert!(validate_preset_source("#let preset(body, rhythm: 16pt) = body").is_ok());
+        assert!(validate_preset_source("#let something_else = 1").is_err());
     }
 }

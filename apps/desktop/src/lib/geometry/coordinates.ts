@@ -52,6 +52,25 @@ export function pageToScreen(
   return viewportToScreen(pageToViewport(point, view), viewport);
 }
 
+/** Dragging the viewport moves its content with the finger, so scroll travels the other way. */
+export function pannedScroll(startScroll: Point, startPointer: Point, pointer: Point): Point {
+  return {
+    x: startScroll.x - (pointer.x - startPointer.x),
+    y: startScroll.y - (pointer.y - startPointer.y),
+  };
+}
+
+/** Retain the same fraction of velocity per 60 Hz frame, independent of the actual frame rate. */
+export function dampedVelocity(velocity: Point, elapsedMs: number, retention: number): Point {
+  const factor = retention ** (Math.max(elapsedMs, 0) / (1000 / 60));
+  return { x: velocity.x * factor, y: velocity.y * factor };
+}
+
+/** Keep a page-sized raster under its memory budget without exceeding device resolution. */
+export function boundedRasterScale(size: Size, density: number, maxPixels: number): number {
+  return Math.min(density, Math.sqrt(maxPixels / (Math.max(size.width, 1) * Math.max(size.height, 1))));
+}
+
 export function clampToPage(point: Point, page: Size): Point {
   return {
     x: Math.min(Math.max(point.x, 0), page.width),

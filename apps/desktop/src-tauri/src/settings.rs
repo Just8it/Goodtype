@@ -41,6 +41,10 @@ pub struct AppSettings {
     /// Width of that view in CSS pixels.
     pub side_editor_width: f64,
     pub reduced_motion: bool,
+    /// Release velocity retained by one-finger touch panning. 1.0 is the original glide.
+    pub touch_glide: f64,
+    /// Keep Page text headings and display equations on whole paper rows.
+    pub page_text_baseline_grid: bool,
     /// Allow downloading Typst Universe packages on a cache miss. Cached packages
     /// keep working either way.
     pub remote_packages: bool,
@@ -128,6 +132,8 @@ impl Default for AppSettings {
             side_editor_dock: "left".into(),
             side_editor_width: 420.0,
             reduced_motion: false,
+            touch_glide: 2.0,
+            page_text_baseline_grid: true,
             remote_packages: true,
         }
     }
@@ -259,6 +265,7 @@ fn sanitize(mut settings: AppSettings) -> AppSettings {
     // A generous sanity bound only: the real ceiling is half the window, enforced in the UI,
     // which on a wide display is far more than any fixed pixel cap would allow.
     settings.side_editor_width = clamp(settings.side_editor_width, 280.0, 2400.0, 420.0);
+    settings.touch_glide = clamp(settings.touch_glide, 0.0, 4.0, 2.0);
     settings
 }
 
@@ -266,6 +273,8 @@ fn sanitize(mut settings: AppSettings) -> AppSettings {
 #[serde(rename_all = "camelCase", default)]
 pub struct RecentNotebooks {
     pub entries: Vec<RecentNotebook>,
+    /// Ordered notebook tabs. App-local view state; roots are revalidated before restoration.
+    pub open_roots: Vec<String>,
     /// The notebook that was still open when the webview or application last stopped.
     /// App-local view state only; an explicit Close notebook clears it.
     pub active_root: Option<String>,
@@ -389,12 +398,49 @@ pub fn active_recent_root(app: &tauri::AppHandle) -> Result<Option<String>, Stri
     Ok(read_config::<RecentNotebooks>(app, "recents.json")?.active_root)
 }
 
+fn session_roots(recents: &RecentNotebooks) -> Vec<String> {
+    if recents.open_roots.is_empty() {
+        recents.active_root.clone().into_iter().collect()
+    } else {
+        recents.open_roots.clone()
+    }
+}
+
+pub fn recent_session(app: &tauri::AppHandle) -> Result<(Vec<String>, Option<String>), String> {
+    let recents = read_config::<RecentNotebooks>(app, "recents.json")?;
+    let roots = session_roots(&recents);
+    Ok((roots, recents.active_root))
+}
+
+pub fn record_recent_session(
+    app: &tauri::AppHandle,
+    roots: Vec<String>,
+    active_root: Option<String>,
+) -> Result<(), String> {
+    let mut recents = read_config::<RecentNotebooks>(app, "recents.json")?;
+    let mut open_roots = Vec::new();
+    for root in roots {
+        if recents.entries.iter().any(|entry| entry.root == root) && !open_roots.contains(&root) {
+            open_roots.push(root);
+        }
+    }
+    open_roots.truncate(MAX_RECENTS);
+    recents.active_root = active_root.filter(|root| open_roots.contains(root));
+    recents.open_roots = open_roots;
+    write_config(app, "recents.json", &recents)
+}
+
 pub fn clear_active_recent(app: &tauri::AppHandle, root: &str) -> Result<(), String> {
     let mut recents = read_config::<RecentNotebooks>(app, "recents.json")?;
-    if recents.active_root.as_deref() != Some(root) {
+    let before = recents.open_roots.len();
+    recents.open_roots.retain(|known| known != root);
+    let was_active = recents.active_root.as_deref() == Some(root);
+    if was_active {
+        recents.active_root = None;
+    }
+    if before == recents.open_roots.len() && !was_active {
         return Ok(());
     }
-    recents.active_root = None;
     write_config(app, "recents.json", &recents)
 }
 
@@ -427,6 +473,9 @@ pub fn record_recent(
         },
     );
     recents.active_root = Some(root.to_owned());
+    if !recents.open_roots.iter().any(|known| known == root) {
+        recents.open_roots.push(root.to_owned());
+    }
     while recents.entries.len() > MAX_RECENTS {
         // Drop the oldest unpinned entry; pinned entries survive the cap.
         let Some(index) = recents.entries.iter().rposition(|entry| !entry.pinned) else {
@@ -474,6 +523,7 @@ pub fn remove_recent_notebook(
 ) -> Result<Vec<RecentNotebook>, String> {
     let mut recents = read_config::<RecentNotebooks>(&app, "recents.json")?;
     recents.entries.retain(|entry| entry.root != root);
+    recents.open_roots.retain(|known| known != &root);
     if recents.active_root.as_deref() == Some(root.as_str()) {
         recents.active_root = None;
     }
@@ -514,12 +564,36 @@ pub fn seed_remote_packages(app: &tauri::AppHandle, policy: &RemotePackages) {
 
 #[cfg(test)]
 mod tests {
-    use super::RecentNotebooks;
+    use super::{AppSettings, RecentNotebooks, sanitize, session_roots};
+
+    #[test]
+    fn touch_glide_has_a_bounded_hardware_tuning_range() {
+        let mut settings = AppSettings::default();
+        assert_eq!(settings.touch_glide, 2.0);
+        settings.touch_glide = 5.0;
+        assert_eq!(sanitize(settings).touch_glide, 4.0);
+    }
+
+    #[test]
+    fn old_settings_enable_the_page_text_baseline_grid() {
+        let settings: AppSettings =
+            serde_json::from_str("{}").expect("legacy settings should load");
+        assert!(settings.page_text_baseline_grid);
+    }
 
     #[test]
     fn old_recents_files_default_to_no_active_notebook() {
         let recents: RecentNotebooks =
             serde_json::from_str(r#"{"entries":[]}"#).expect("legacy recents should still load");
         assert!(recents.active_root.is_none());
+        assert!(recents.open_roots.is_empty());
+    }
+
+    #[test]
+    fn old_active_notebook_becomes_the_only_restored_tab() {
+        let recents: RecentNotebooks =
+            serde_json::from_str(r#"{"entries":[],"activeRoot":"C:\\notes\\physics"}"#)
+                .expect("single-root session should still load");
+        assert_eq!(session_roots(&recents), [r"C:\notes\physics"]);
     }
 }

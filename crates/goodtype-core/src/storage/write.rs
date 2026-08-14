@@ -4,13 +4,13 @@
 //! whether the bytes came from disk or from the write that just happened, and the two answers
 //! have to be equal — otherwise every later commit reports a change that never occurred.
 
-use std::{collections::HashMap, path::Path};
+use std::{collections::HashMap, fs, path::Path};
 
 use crate::{SourceRole, layout};
 
 use super::{
-    MAX_IMAGE_BYTES, MAX_INK_BYTES, MAX_JSON_BYTES, NotebookSnapshot, StorageError, files::*,
-    invalid_error, paths::*, recovery::*, validate::*,
+    MAX_IMAGE_BYTES, MAX_INK_BYTES, MAX_JSON_BYTES, NotebookSnapshot, StorageError, StoredFile,
+    files::*, invalid_error, paths::*, recovery::*, validate::*,
 };
 
 /// The canonical files of one page: everything the store rewrites, and therefore everything a
@@ -60,7 +60,10 @@ impl<'a> FileSet<'a> {
             .map(|(relative, maximum)| {
                 Ok((
                     *relative,
-                    read_limited(resolve_existing(root, relative)?, *maximum)?,
+                    fingerprint_file(
+                        relative,
+                        read_limited(resolve_existing(root, relative)?, *maximum)?,
+                    )?,
                 ))
             })
             .collect::<Result<Vec<(&str, Vec<u8>)>, StorageError>>()?;
@@ -76,9 +79,17 @@ impl<'a> FileSet<'a> {
     /// the set must be present in `written`, which is what makes this equal to
     /// [`Self::fingerprint_on_disk`] rather than merely intended to be.
     fn fingerprint_written(&self, written: &HashMap<String, Vec<u8>>) -> Result<u64, StorageError> {
+        let manifest = written
+            .get(layout::MANIFEST)
+            .cloned()
+            .ok_or_else(|| invalid_error("the written manifest is missing"))?;
+        let manifest = fingerprint_file(layout::MANIFEST, manifest)?;
         let entries = self
             .paths()
             .map(|path| {
+                if path == layout::MANIFEST {
+                    return Ok((path, manifest.as_slice()));
+                }
                 written
                     .get(path)
                     .map(|bytes| (path, bytes.as_slice()))
@@ -87,6 +98,17 @@ impl<'a> FileSet<'a> {
             .collect::<Result<Vec<_>, _>>()?;
         Ok(fingerprint_files(&entries))
     }
+}
+
+/// `modifiedAt` records Goodtype's own saves. It is shared by every page, so hashing it would
+/// make saving one page look like an outside edit on every other loaded page.
+fn fingerprint_file(relative: &str, bytes: Vec<u8>) -> Result<Vec<u8>, StorageError> {
+    if relative != layout::MANIFEST {
+        return Ok(bytes);
+    }
+    let mut manifest: crate::NotebookManifest = serde_json::from_slice(&bytes)?;
+    manifest.modified_at.clear();
+    Ok(serde_json::to_vec(&manifest)?)
 }
 
 pub(crate) fn canonical_fingerprint(
@@ -195,6 +217,71 @@ pub fn read_pdf_reference(selected_root: &Path, relative: &str) -> Result<Vec<u8
         resolve_existing(&root, relative)?,
         crate::object::MAX_PDF_BYTES,
     )
+}
+
+const MAX_TYPST_STYLE_BYTES: usize = 1024 * 1024;
+
+/// Write one ordinary UTF-8 Typst source below `styles/`. The caller owns language-level
+/// validation; storage owns the filename, containment, symlink, size, and atomic-write rules.
+pub fn write_typst_style(
+    selected_root: &Path,
+    filename: &str,
+    source: &str,
+) -> Result<String, StorageError> {
+    validate_safe_filename(filename)?;
+    if !filename.to_ascii_lowercase().ends_with(".typ") {
+        return Err(StorageError::InvalidPath(filename.into()));
+    }
+    if source.is_empty() || source.len() > MAX_TYPST_STYLE_BYTES {
+        return Err(StorageError::InvalidNotebook(format!(
+            "Typst style is {} bytes; maximum is {MAX_TYPST_STYLE_BYTES}",
+            source.len()
+        )));
+    }
+    let root = canonical_root(selected_root)?;
+    let relative = format!("styles/{filename}");
+    write_atomic(&root, &relative, source.as_bytes())?;
+    Ok(relative)
+}
+
+pub fn list_typst_styles(selected_root: &Path) -> Result<Vec<StoredFile>, StorageError> {
+    let root = canonical_root(selected_root)?;
+    let directory = root.join("styles");
+    if !directory.exists() {
+        return Ok(Vec::new());
+    }
+    let mut files = fs::read_dir(&directory)?
+        .map(|entry| {
+            let entry = entry?;
+            let filename = entry.file_name().to_string_lossy().into_owned();
+            validate_safe_filename(&filename)?;
+            if !filename.to_ascii_lowercase().ends_with(".typ") || !entry.file_type()?.is_file() {
+                return Err(StorageError::InvalidPath(filename));
+            }
+            let relative = format!("styles/{filename}");
+            Ok(StoredFile {
+                path: relative.clone(),
+                bytes: read_limited(resolve_existing(&root, &relative)?, MAX_TYPST_STYLE_BYTES)?,
+            })
+        })
+        .collect::<Result<Vec<_>, StorageError>>()?;
+    files.sort_unstable_by(|left, right| left.path.cmp(&right.path));
+    Ok(files)
+}
+
+/// Exact cleanup for a failed notebook-creation transaction. Never accepts a general path.
+pub fn remove_typst_style(selected_root: &Path, filename: &str) -> Result<(), StorageError> {
+    validate_safe_filename(filename)?;
+    if !filename.to_ascii_lowercase().ends_with(".typ") {
+        return Err(StorageError::InvalidPath(filename.into()));
+    }
+    let root = canonical_root(selected_root)?;
+    let relative = format!("styles/{filename}");
+    match fs::remove_file(resolve_existing(&root, &relative)?) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// Persists every file in the snapshot and returns the canonical fingerprint of the files

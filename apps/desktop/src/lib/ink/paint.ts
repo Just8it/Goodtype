@@ -5,7 +5,7 @@
 // one DOM node per stroke, which is what the merging here is for — and merging is only possible
 // at all because a stroke is a filled silhouette rather than a stroked centreline.
 
-import type { Stroke } from "../model";
+import { DEFAULT_INK_Z_INDEX, type Stroke } from "../model";
 import { outlinePath, outlinePoints } from "./outline";
 import { transformedPoint } from "./selection";
 
@@ -15,6 +15,12 @@ export type PaintedPath = {
   d: string;
   color: string;
   opacity: number;
+};
+
+export type PaintedStratum = {
+  key: string;
+  zIndex: number;
+  paths: PaintedPath[];
 };
 
 /**
@@ -75,4 +81,47 @@ export function paintOrder(strokes: Stroke[], minimumWidthPt = 0): PaintedPath[]
     painted.push({ key: stroke.id, d, color: stroke.color, opacity: stroke.opacity });
   }
   return painted;
+}
+
+/** Collapse ink into at most one SVG stratum between each pair of movable objects. */
+export function paintStrata(
+  strokes: Stroke[],
+  objectZIndices: number[],
+  minimumWidthPt = 0,
+): PaintedStratum[] {
+  const boundaries = [...objectZIndices].sort((left, right) => left - right);
+  const groups = new Map<number, Stroke[]>();
+  for (const stroke of orderedStrokes(strokes)) {
+    const zIndex = stroke.zIndex ?? DEFAULT_INK_Z_INDEX;
+    let band = 0;
+    while (band < boundaries.length && boundaries[band] <= zIndex) band += 1;
+    const group = groups.get(band);
+    if (group) group.push(stroke);
+    else groups.set(band, [stroke]);
+  }
+  return [...groups.values()].map((group) => ({
+    key: group[0].id,
+    zIndex: group[0].zIndex ?? DEFAULT_INK_Z_INDEX,
+    paths: paintOrder(group, minimumWidthPt),
+  }));
+}
+
+function orderedStrokes(strokes: Stroke[]): Stroke[] {
+  for (let index = 1; index < strokes.length; index += 1) {
+    if (
+      (strokes[index - 1].zIndex ?? DEFAULT_INK_Z_INDEX) >
+      (strokes[index].zIndex ?? DEFAULT_INK_Z_INDEX)
+    ) {
+      return strokes
+        .map((stroke, order) => ({ stroke, order }))
+        .sort(
+          (left, right) =>
+            (left.stroke.zIndex ?? DEFAULT_INK_Z_INDEX) -
+              (right.stroke.zIndex ?? DEFAULT_INK_Z_INDEX) ||
+            left.order - right.order,
+        )
+        .map(({ stroke }) => stroke);
+    }
+  }
+  return strokes;
 }

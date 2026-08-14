@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Stroke } from "../model";
-import { paintOrder } from "./paint";
+import { paintOrder, paintStrata } from "./paint";
 
 function stroke(overrides: Partial<Stroke> = {}): Stroke {
   return {
@@ -80,5 +80,16 @@ describe("paintOrder", () => {
     const [thin] = paintOrder([hairline]);
     const [floored] = paintOrder([hairline], 4);
     expect(floored.d).not.toBe(thin.d);
+  });
+
+  it("batches ink only until a movable object separates its visual order", () => {
+    const strata = paintStrata(
+      [stroke({ id: "below", zIndex: 1 }), stroke({ id: "above", zIndex: 3 })],
+      [2],
+    );
+    expect(strata.map(({ key, zIndex }) => ({ key, zIndex }))).toEqual([
+      { key: "below", zIndex: 1 },
+      { key: "above", zIndex: 3 },
+    ]);
   });
 });

@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use goodtype_core::{
     PageBackground, PageGeometry,
     outline::{OutlineOptions, OutlinePoint, outline_points},
-    template::{TemplateShape, resolve},
+    template::{Area, Edge, TemplateElement, TemplateShape, resolve},
 };
 
 const MAX_SOURCE_BYTES: usize = 1024 * 1024;
@@ -19,6 +19,9 @@ pub struct ExportPage {
     /// The paper. Carried through rather than assumed white, so a page written on ruled paper
     /// exports as ruled paper — the template is part of the page, not a screen decoration.
     pub background: PageBackground,
+    /// App preference used for this export; Page text remains canonical ordinary Typst source.
+    pub page_text_baseline_grid: bool,
+    pub page_typst: Option<String>,
     pub blocks: Vec<ExportTypstBlock>,
     pub strokes: Vec<ExportStroke>,
     pub images: Vec<ExportImage>,
@@ -38,6 +41,7 @@ pub struct ExportTypstBlock {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExportStroke {
+    pub z_index: i32,
     pub color: String,
     pub width_pt: f64,
     /// Whether the nib varied its width with pressure.
@@ -126,20 +130,6 @@ impl From<std::io::Error> for ExportError {
 
 const MAX_EXPORT_PAGES: usize = 500;
 
-pub fn export_page(
-    notebook_root: &Path,
-    output_name: &str,
-    page: &ExportPage,
-    allow_remote_packages: bool,
-) -> Result<ExportResult, ExportError> {
-    export_pages(
-        notebook_root,
-        output_name,
-        std::slice::from_ref(page),
-        allow_remote_packages,
-    )
-}
-
 /// Export ordered pages as one PDF. Each page keeps its own physical geometry, ink stays
 /// vector, and Typst text stays selectable. Page order is the caller's (manifest) order.
 ///
@@ -195,6 +185,16 @@ fn compile_pdf(
 ) -> Result<Vec<u8>, ExportError> {
     let mut overlay: Vec<(String, Vec<u8>)> = Vec::new();
     for (page_index, page) in pages.iter().enumerate() {
+        if let Some(page_text) = &page.page_typst {
+            let source = match page.shared_style.as_deref() {
+                _ if has_managed_preset(page_text) => page_text_source(page, page_text),
+                Some(style) if !style.is_empty() => {
+                    format!("{style}\n{}", page_text_source(page, page_text))
+                }
+                _ => page_text_source(page, page_text),
+            };
+            overlay.push((format!("page-text-{page_index}.typ"), source.into_bytes()));
+        }
         for (index, block) in page.blocks.iter().enumerate() {
             let source = match page.shared_style.as_deref() {
                 Some(style) if !style.is_empty() => format!("{style}\n{}", block.source),
@@ -208,7 +208,12 @@ fn compile_pdf(
         if let Some(paper) = template_svg(page) {
             overlay.push((format!("paper-{page_index}.svg"), paper.into_bytes()));
         }
-        overlay.push((format!("ink-{page_index}.svg"), ink_svg(page).into_bytes()));
+        for (stratum_index, stratum) in ink_strata(page).iter().enumerate() {
+            overlay.push((
+                format!("ink-{page_index}-{stratum_index}.svg"),
+                ink_svg_for(page, stratum.strokes.iter().copied()).into_bytes(),
+            ));
+        }
     }
 
     crate::embedded::export_pdf(
@@ -238,7 +243,12 @@ fn validate_output_name(name: &str) -> Result<(), ExportError> {
 fn validate_page(root: &Path, page: &ExportPage) -> Result<(), ExportError> {
     valid_positive_dimension(page.width_pt, "page width")?;
     valid_positive_dimension(page.height_pt, "page height")?;
-    if page.blocks.len() + page.strokes.len() + page.images.len() > MAX_PAGE_ITEMS {
+    if page.blocks.len()
+        + page.strokes.len()
+        + page.images.len()
+        + usize::from(page.page_typst.is_some())
+        > MAX_PAGE_ITEMS
+    {
         return Err(ExportError::InvalidPage("too many page items".to_owned()));
     }
     if page
@@ -248,6 +258,17 @@ fn validate_page(root: &Path, page: &ExportPage) -> Result<(), ExportError> {
     {
         return Err(ExportError::InvalidPage(
             "shared Typst style is too large".to_owned(),
+        ));
+    }
+    if page.page_typst.as_ref().is_some_and(|source| {
+        source.len() > MAX_SOURCE_BYTES
+            || page
+                .shared_style
+                .as_ref()
+                .is_some_and(|style| style.len() + source.len() > MAX_SOURCE_BYTES)
+    }) {
+        return Err(ExportError::InvalidPage(
+            "page Typst source is too large".to_owned(),
         ));
     }
 
@@ -439,7 +460,15 @@ fn generated_typst_source(page: &ExportPage, page_index: usize) -> String {
             page.height_pt
         ));
     }
-    let mut objects = Vec::with_capacity(page.blocks.len() + page.images.len());
+    if page.page_typst.is_some() {
+        let layout = page_text_layout(page);
+        source.push_str(&format!(
+            "#place(top + left, dx: {}pt, dy: {}pt)[#block(width: {}pt)[#include \"page-text-{page_index}.typ\"]]\n",
+            layout.x, layout.y, layout.width,
+        ));
+    }
+    let strata = ink_strata(page);
+    let mut objects = Vec::with_capacity(page.blocks.len() + page.images.len() + strata.len());
     for (index, block) in page.blocks.iter().enumerate() {
         objects.push((
             block.z_index,
@@ -472,15 +501,62 @@ fn generated_typst_source(page: &ExportPage, page_index: usize) -> String {
             ),
         ));
     }
+    for (index, stratum) in strata.iter().enumerate() {
+        objects.push((
+            stratum.z_index,
+            stratum.order,
+            format!(
+                "#place(top + left)[#image(\"ink-{page_index}-{index}.svg\", width: {}pt, height: {}pt)]\n",
+                page.width_pt, page.height_pt
+            ),
+        ));
+    }
     objects.sort_by_key(|(z_index, order, _)| (*z_index, *order));
     for (_, _, object) in objects {
         source.push_str(&object);
     }
-    source.push_str(&format!(
-        "#place(top + left)[#image(\"ink-{page_index}.svg\", width: {}pt, height: {}pt)]\n",
-        page.width_pt, page.height_pt
-    ));
     source
+}
+
+struct InkStratum<'a> {
+    z_index: i32,
+    order: usize,
+    strokes: Vec<&'a ExportStroke>,
+}
+
+fn ink_strata(page: &ExportPage) -> Vec<InkStratum<'_>> {
+    let mut boundaries: Vec<i32> = page
+        .blocks
+        .iter()
+        .map(|block| block.z_index)
+        .chain(page.images.iter().map(|image| image.z_index))
+        .collect();
+    boundaries.sort_unstable();
+    let mut strokes: Vec<(usize, &ExportStroke)> = page.strokes.iter().enumerate().collect();
+    strokes.sort_by_key(|(order, stroke)| (stroke.z_index, *order));
+
+    let mut groups: Vec<(usize, InkStratum<'_>)> = Vec::new();
+    for (stroke_order, stroke) in strokes {
+        let band = boundaries.partition_point(|boundary| *boundary <= stroke.z_index);
+        if groups
+            .last()
+            .is_some_and(|(last_band, _)| *last_band == band)
+        {
+            groups.last_mut().unwrap().1.strokes.push(stroke);
+        } else {
+            groups.push((
+                band,
+                InkStratum {
+                    z_index: stroke.z_index,
+                    // Object order is always below this offset, so an equal z-index keeps ink
+                    // after the object just as the screen DOM does.
+                    order: MAX_PAGE_ITEMS + stroke_order,
+                    strokes: vec![stroke],
+                },
+            ));
+        }
+    }
+    groups.into_iter().map(|(_, stratum)| stratum).collect()
 }
 
 fn typst_string(value: &str) -> String {
@@ -489,6 +565,171 @@ fn typst_string(value: &str) -> String {
         .replace('\n', "\\n")
         .replace('\r', "\\r")
         .replace('\t', "\\t")
+}
+
+#[derive(Clone, Copy)]
+struct PageTextLayout {
+    x: f64,
+    y: f64,
+    width: f64,
+    line_spacing_pt: f64,
+    columns: u8,
+}
+
+struct PageTextBounds {
+    left: f64,
+    top: f64,
+    right: f64,
+    bottom: f64,
+}
+
+fn page_text_layout(page: &ExportPage) -> PageTextLayout {
+    const MARGIN: f64 = 36.0;
+    let fallback = PageTextLayout {
+        x: MARGIN,
+        y: MARGIN,
+        width: (page.width_pt - 2.0 * MARGIN).max(72.0),
+        line_spacing_pt: 16.0,
+        columns: 1,
+    };
+    let PageBackground::Template { template } = &page.background else {
+        return fallback;
+    };
+    let Some((area, guide_spacing, horizontal_only)) =
+        template.elements.iter().find_map(|element| match element {
+            TemplateElement::HorizontalLines {
+                area, spacing_pt, ..
+            } => Some((area, *spacing_pt, true)),
+            TemplateElement::Grid {
+                area, spacing_pt, ..
+            }
+            | TemplateElement::Dots {
+                area, spacing_pt, ..
+            } => Some((area, *spacing_pt, false)),
+            _ => None,
+        })
+    else {
+        return fallback;
+    };
+    let Some(bounds) = page_text_bounds(area, page.width_pt, page.height_pt) else {
+        return fallback;
+    };
+    let spacing = if guide_spacing < 18.0 {
+        guide_spacing * 2.0
+    } else {
+        guide_spacing
+    };
+    let geometry = PageGeometry {
+        width_pt: page.width_pt,
+        height_pt: page.height_pt,
+    };
+    let shapes = resolve(template, &geometry);
+    let mut rows = shapes
+        .iter()
+        .filter_map(|shape| match shape {
+            TemplateShape::Dot { cy, .. } => Some(*cy),
+            TemplateShape::Line { y1, y2, .. } if y1 == y2 => Some(*y1),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let mut columns = shapes
+        .iter()
+        .filter_map(|shape| match shape {
+            TemplateShape::Dot { cx, .. } => Some(*cx),
+            TemplateShape::Line { x1, x2, .. } if x1 == x2 => Some(*x1),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(f64::total_cmp);
+    rows.dedup();
+    columns.sort_by(f64::total_cmp);
+    columns.dedup();
+    let baseline = rows
+        .into_iter()
+        .find(|row| *row >= bounds.top + if horizontal_only { 0.0 } else { guide_spacing })
+        .unwrap_or(bounds.top + spacing);
+    let column = columns
+        .into_iter()
+        .find(|column| *column >= bounds.left)
+        .unwrap_or(bounds.left);
+    let x = if horizontal_only { bounds.left } else { column } + 2.0;
+    PageTextLayout {
+        x,
+        y: (baseline - 13.0).max(0.0),
+        width: (bounds.right - guide_spacing - x).max(72.0),
+        line_spacing_pt: spacing,
+        columns: u8::from(template.elements.iter().any(|element| {
+            matches!(
+                element,
+                TemplateElement::Rule {
+                    edge: Edge::CenterX,
+                    ..
+                }
+            )
+        })) + 1,
+    }
+}
+
+fn page_text_source(page: &ExportPage, source: &str) -> String {
+    let layout = page_text_layout(page);
+    let color = match &page.background {
+        PageBackground::Plain { color } => color,
+        PageBackground::Template { template } => &template.background_color,
+        PageBackground::Pdf { .. } => "#ffffff",
+    };
+    let text_color = readable_text(color);
+    let leading = (layout.line_spacing_pt - 11.0).max(0.0);
+    let rhythm = if page.page_text_baseline_grid {
+        format!("{}pt", layout.line_spacing_pt)
+    } else {
+        "1em".into()
+    };
+    let mut prelude = format!(
+        "#set text(size: 11pt, fill: rgb(\"{text_color}\"), top-edge: 1em, bottom-edge: 0em)\n#set par(leading: {leading}pt, spacing: {leading}pt)\n#let goodtype_rhythm = {rhythm}"
+    );
+    if page.page_text_baseline_grid {
+        prelude.push_str(&format!(
+            "\n#let goodtype_gap = {leading}pt\n#let goodtype_snap_block(it) = block(\n  above: goodtype_gap,\n  below: goodtype_gap,\n  layout(size => {{\n    let measured = measure(width: size.width, it)\n    let rows = calc.max(1, calc.ceil((measured.height + goodtype_gap) / goodtype_rhythm))\n    block(width: size.width, height: rows * goodtype_rhythm - goodtype_gap, it)\n  }}),\n)\n#show heading: set block(above: 0pt, below: 0pt)\n#show math.equation.where(block: true): set block(above: 0pt, below: 0pt)\n#show heading: goodtype_snap_block\n#show math.equation.where(block: true): goodtype_snap_block",
+        ));
+    }
+    if layout.columns == 2 {
+        format!(
+            "{prelude}\n#columns(2, gutter: {}pt)[\n{source}\n]",
+            layout.line_spacing_pt
+        )
+    } else {
+        format!("{prelude}\n{source}")
+    }
+}
+
+fn has_managed_preset(source: &str) -> bool {
+    source.starts_with("#import \"/styles/")
+        && source.lines().nth(1) == Some("#show: preset.with(rhythm: goodtype_rhythm)")
+}
+
+fn page_text_bounds(area: &Area, width_pt: f64, height_pt: f64) -> Option<PageTextBounds> {
+    let bounds = PageTextBounds {
+        left: area.left_pt,
+        top: area.top_pt,
+        right: width_pt - area.right_pt,
+        bottom: height_pt - area.bottom_pt,
+    };
+    (bounds.right > bounds.left && bounds.bottom > bounds.top).then_some(bounds)
+}
+
+fn readable_text(color: &str) -> &'static str {
+    let Some(hex) = color.strip_prefix('#').filter(|hex| hex.len() == 6) else {
+        return "#16212b";
+    };
+    let Ok(value) = u32::from_str_radix(hex, 16) else {
+        return "#16212b";
+    };
+    let luminance = ((value >> 16) * 299 + ((value >> 8) & 255) * 587 + (value & 255) * 114) / 1000;
+    if luminance < 110 {
+        "#eef1f4"
+    } else {
+        "#16212b"
+    }
 }
 
 /// The page's template as SVG, or `None` when the paper carries no ruling.
@@ -537,7 +778,15 @@ fn template_svg(page: &ExportPage) -> Option<String> {
     Some(svg)
 }
 
+#[cfg(test)]
 fn ink_svg(page: &ExportPage) -> String {
+    ink_svg_for(page, &page.strokes)
+}
+
+fn ink_svg_for<'a>(
+    page: &ExportPage,
+    strokes: impl IntoIterator<Item = &'a ExportStroke>,
+) -> String {
     let mut svg = format!(
         r#"<svg xmlns="http://www.w3.org/2000/svg" width="{}pt" height="{}pt" viewBox="0 0 {} {}">"#,
         page.width_pt, page.height_pt, page.width_pt, page.height_pt
@@ -546,7 +795,7 @@ fn ink_svg(page: &ExportPage) -> String {
     // A constant `stroke-width` cannot vary along a path, which is how pressure used to be
     // visible on screen and flat in the PDF. Filling the same polygon the canvas draws makes the
     // export match what was written.
-    for stroke in &page.strokes {
+    for stroke in strokes {
         if stroke.points.is_empty() {
             continue;
         }
@@ -621,6 +870,8 @@ mod tests {
             background: PageBackground::Plain {
                 color: "#ffffff".to_owned(),
             },
+            page_text_baseline_grid: true,
+            page_typst: None,
             blocks: vec![ExportTypstBlock {
                 x: 72.0,
                 y: 96.0,
@@ -632,6 +883,7 @@ mod tests {
                 source: include_str!("../../../fixtures/pdf/phase0b/block.typ").to_owned(),
             }],
             strokes: vec![ExportStroke {
+                z_index: 3,
                 color: "#111111".to_owned(),
                 width_pt: 2.0,
                 pressure: false,
@@ -686,7 +938,7 @@ mod tests {
             source.find("underlay.svg").unwrap() < source.find("block-0-0.typ").unwrap(),
             "lower z-index must be emitted first: {source}"
         );
-        assert!(source.contains("#image(\"ink-0.svg\""));
+        assert!(source.contains("#image(\"ink-0-0.svg\""));
         // Ink exports as a filled silhouette, not a stroked centreline. The centre
         // line runs (22,43)→(42,63) after the transform, at width 4, so the outline sits half a
         // width either side of it along the normal.
@@ -697,6 +949,91 @@ mod tests {
         assert!(ink.contains(r##"fill="#111111""##), "{ink}");
         // A constant stroke width is exactly what cannot express pressure; it must be gone.
         assert!(!ink.contains("stroke-width"), "{ink}");
+    }
+
+    #[test]
+    fn interleaves_ink_and_objects_by_one_visual_order() {
+        let mut page = page();
+        page.strokes[0].z_index = 1;
+        let below = generated_typst_source(&page, 0);
+        assert!(
+            below.find("ink-0-0.svg").unwrap() < below.find("block-0-0.typ").unwrap(),
+            "lower ink must be emitted before the block: {below}"
+        );
+
+        page.strokes[0].z_index = 3;
+        let above = generated_typst_source(&page, 0);
+        assert!(
+            above.find("block-0-0.typ").unwrap() < above.find("ink-0-0.svg").unwrap(),
+            "higher ink must be emitted after the block: {above}"
+        );
+    }
+
+    #[test]
+    fn page_text_is_fixed_below_objects_and_uses_paper_rhythm() {
+        use goodtype_core::template::{Area, PageTemplate, TemplateElement};
+
+        let mut page = page();
+        page.page_typst = Some("= Page heading\n\nBody".to_owned());
+        page.background = PageBackground::Template {
+            template: PageTemplate {
+                id: "ruled".to_owned(),
+                name: "Ruled".to_owned(),
+                background_color: "#ffffff".to_owned(),
+                elements: vec![TemplateElement::HorizontalLines {
+                    area: Area {
+                        top_pt: 36.0,
+                        right_pt: 36.0,
+                        bottom_pt: 36.0,
+                        left_pt: 36.0,
+                    },
+                    spacing_pt: 24.0,
+                    color: "#dddddd".to_owned(),
+                    weight_pt: 0.5,
+                }],
+            },
+        };
+
+        let source = generated_typst_source(&page, 0);
+        assert!(source.contains("#include \"page-text-0.typ\""), "{source}");
+        assert!(
+            source.find("page-text-0.typ").unwrap() < source.find("block-0-0.typ").unwrap(),
+            "page text must stay below movable objects: {source}"
+        );
+        let layout = page_text_layout(&page);
+        assert_eq!((layout.x, layout.y, layout.width), (38.0, 24.0, 497.0));
+        let snapped = page_text_source(&page, "Body");
+        assert!(snapped.contains("leading: 13pt"));
+        assert!(snapped.contains("#show heading: goodtype_snap_block"));
+        page.page_text_baseline_grid = false;
+        assert!(!page_text_source(&page, "Body").contains("goodtype_snap_block"));
+    }
+
+    #[test]
+    fn page_text_heading_and_math_leave_the_flow_on_a_whole_row() {
+        let root = tempfile::tempdir().unwrap();
+        let page = page();
+        let compile_height = |source| {
+            let result = crate::compile_block(
+                root.path(),
+                &crate::CompileRequest {
+                    source: page_text_source(&page, source),
+                    width_pt: 523.0,
+                    generation: 1,
+                    allow_remote_packages: false,
+                },
+            )
+            .unwrap();
+            assert!(result.svg.is_some(), "{:?}", result.diagnostics);
+            result.height_pt.unwrap()
+        };
+        let prose = compile_height("Body\n\nAfter\n\nEnd");
+        let blocks = compile_height("Body\n\n= Heading\n\nAfter\n\n$ x^2 + y^2 = z^2 $\n\nEnd");
+        let added_rows = (blocks - prose) / 16.0;
+        assert!(
+            (added_rows - added_rows.round()).abs() < 0.001,
+            "blocks added {added_rows} rows"
+        );
     }
 
     /// A template is paper, so it has to be under the ink and reach the page edge — and it has
@@ -729,7 +1066,7 @@ mod tests {
         // The paper colour is the page fill, so it reaches the edge without a shape to size.
         assert!(source.contains(r##"fill: rgb("#FCFCFA")"##), "{source}");
         let paper = source.find("paper-0.svg").expect("paper placed");
-        let ink = source.find("ink-0.svg").expect("ink placed");
+        let ink = source.find("ink-0-0.svg").expect("ink placed");
         assert!(paper < ink, "paper must be placed before the ink: {source}");
 
         // 842pt tall, 36pt margins, 24pt ruling: 32 whole steps span 768pt of the 770pt
@@ -764,7 +1101,7 @@ mod tests {
         let pdf = source
             .find(r#"#image("/references/lecture.pdf", page: 3"#)
             .expect("PDF background placed");
-        let ink = source.find("ink-0.svg").expect("ink placed");
+        let ink = source.find("ink-0-0.svg").expect("ink placed");
         assert!(pdf < ink, "PDF background must be under the ink: {source}");
     }
 
@@ -847,6 +1184,7 @@ mod tests {
         )
         .unwrap();
         let mut page = page();
+        page.page_typst = Some("= Full-page notes\n\nSelectable prose".to_owned());
         page.images.push(ExportImage {
             relative_path: "assets/diagram.svg".to_owned(),
             x: 360.0,
@@ -859,17 +1197,36 @@ mod tests {
             order: 1,
         });
 
-        let result = export_page(root.path(), "phase0b.pdf", &page, false).unwrap();
+        let result = export_pages(
+            root.path(),
+            "phase0b.pdf",
+            std::slice::from_ref(&page),
+            false,
+        )
+        .unwrap();
         let bytes = fs::read(&result.output_path).unwrap();
         assert!(result.output_path.ends_with("exports/phase0b.pdf"));
         assert!(bytes.starts_with(b"%PDF-"));
-        export_page(root.path(), "phase0b.pdf", &page, false).unwrap();
+        export_pages(
+            root.path(),
+            "phase0b.pdf",
+            std::slice::from_ref(&page),
+            false,
+        )
+        .unwrap();
     }
 
     #[test]
     fn compiler_embeds_a_pdf_page_beneath_goodtype_content() {
         let root = tempfile::tempdir().unwrap();
-        let source = export_page(root.path(), "source.pdf", &page(), false).unwrap();
+        let source_page = page();
+        let source = export_pages(
+            root.path(),
+            "source.pdf",
+            std::slice::from_ref(&source_page),
+            false,
+        )
+        .unwrap();
         fs::create_dir(root.path().join("references")).unwrap();
         fs::copy(
             source.output_path,
@@ -882,7 +1239,13 @@ mod tests {
             source_path: "references/lecture.pdf".to_owned(),
             page: 1,
         };
-        let result = export_page(root.path(), "annotated.pdf", &annotated, false).unwrap();
+        let result = export_pages(
+            root.path(),
+            "annotated.pdf",
+            std::slice::from_ref(&annotated),
+            false,
+        )
+        .unwrap();
         assert!(fs::read(result.output_path).unwrap().starts_with(b"%PDF-"));
     }
 
@@ -901,6 +1264,8 @@ mod tests {
             background: PageBackground::Plain {
                 color: "#ffffff".to_owned(),
             },
+            page_text_baseline_grid: true,
+            page_typst: None,
             blocks: vec![],
             strokes: vec![],
             images: vec![],
@@ -915,7 +1280,7 @@ mod tests {
         assert_eq!(source.matches("#set page(").count(), 3);
         assert!(source.contains("width: 400pt, height: 300pt"));
         assert!(source.contains("#include \"block-1-0.typ\""));
-        assert!(source.contains("ink-2.svg"));
+        assert!(source.contains("ink-1-0.svg"));
         let break_at = source.find("#pagebreak()").unwrap();
         assert!(source.find("width: 400pt").unwrap() > break_at);
 
@@ -950,7 +1315,13 @@ mod tests {
         let mut styled = page();
         styled.shared_style = Some("#error(\"shared style reached export\")".to_owned());
 
-        let error = export_page(root.path(), "styled.pdf", &styled, false).unwrap_err();
+        let error = export_pages(
+            root.path(),
+            "styled.pdf",
+            std::slice::from_ref(&styled),
+            false,
+        )
+        .unwrap_err();
         assert!(matches!(error, ExportError::CompilerFailed(_)));
     }
 }

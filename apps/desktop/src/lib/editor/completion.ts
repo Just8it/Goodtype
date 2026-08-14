@@ -4,20 +4,10 @@ import {
   type CompletionContext,
   type CompletionResult,
 } from "@codemirror/autocomplete";
-import { invoke } from "@tauri-apps/api/core";
+import { completeTypst, type TypstCompletionItem } from "../ipc/typst";
 
 // Compiler-derived completion. Candidates come from the same in-process Typst world
 // that renders the block, so they always match the language the block is compiled with.
-
-type TypstCompletionItem = {
-  kind: string;
-  symbol: string | null;
-  label: string;
-  apply: string | null;
-  detail: string | null;
-  /** Byte offset into the UTF-8 source where the replacement starts. */
-  offset: number;
-};
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -38,9 +28,13 @@ export function fromByteOffset(text: string, byteOffset: number): number {
   return decoder.decode(bytes.slice(0, byteOffset)).length;
 }
 
-/** CodeMirror snippet fields are `#{…}`; Typst hands back `${…}`. */
-function toSnippetTemplate(apply: string): string {
-  return apply.replace(/\$\{([^}]*)\}/g, (_match, name: string) => `#{${name}}`);
+/** CodeMirror snippet fields are `#{…}`; Tinymist uses numbered LSP tab stops. */
+export function toSnippetTemplate(apply: string): string {
+  return apply
+    .replace(/\$\{\d+:([^}]*)\}/g, (_match, fallback: string) => `#{${fallback}}`)
+    .replace(/\$\{\d+\}/g, "#{}")
+    .replace(/\$\d+/g, "#{}")
+    .replace(/\$\{([^}]*)\}/g, (_match, name: string) => `#{${name}}`);
 }
 
 function toCompletion(item: TypstCompletionItem): Completion {
@@ -73,12 +67,7 @@ export function createTypstCompletionSource(getRoot: () => string | null) {
 
     let items: TypstCompletionItem[];
     try {
-      items = await invoke<TypstCompletionItem[]>("complete_typst", {
-        root,
-        source,
-        cursor,
-        explicit: context.explicit,
-      });
+      items = await completeTypst(root, source, cursor, context.explicit);
     } catch {
       // Completion is an assist: a failure must never interrupt writing.
       return null;

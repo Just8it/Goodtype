@@ -59,9 +59,9 @@ fn with_history<T>(
     })
 }
 
-/// A manifest change invalidates every page fingerprint because the manifest is part of each
-/// page's canonical file set. Record the structure action, drop those histories, and observe the
-/// page returned by the change.
+/// A structural manifest change invalidates every page fingerprint because the manifest is part
+/// of each page's canonical file set. Record the structure action, drop those histories, and
+/// observe the page returned by the change.
 fn advance_structure_result(
     histories: &mut HistoryStore,
     root: &Path,
@@ -129,12 +129,25 @@ pub async fn create_notebook(
     histories: tauri::State<'_, NotebookHistories>,
     root: String,
     snapshot: NotebookSnapshot,
+    preset_choice: Option<crate::preset::PresetChoice>,
 ) -> Result<(), String> {
     let root = ensure_allowed(&roots, &root)?;
     let histories = NotebookHistories(histories.0.clone());
     tauri::async_runtime::spawn_blocking(move || {
         with_notebook_lock(&histories, |history_map| {
-            storage::create_notebook(&root, &snapshot).map_err(message)?;
+            let preset_choice = preset_choice.unwrap_or_default();
+            if !matches!(preset_choice, crate::preset::PresetChoice::None)
+                && root.join("styles/default.typ").exists()
+            {
+                return Err("styles/default.typ already exists".into());
+            }
+            let installed = crate::preset::install_default(&root, &preset_choice)?.is_some();
+            if let Err(error) = storage::create_notebook(&root, &snapshot) {
+                if installed {
+                    let _ = storage::remove_typst_style(&root, "default.typ");
+                }
+                return Err(message(error));
+            }
             observe_structure(history_map, &root, &snapshot.page.id)?;
             let history = history_map
                 .pages

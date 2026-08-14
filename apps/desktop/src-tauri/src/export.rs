@@ -17,6 +17,7 @@ pub async fn export_notebook_pdf(
     packages: tauri::State<'_, RemotePackages>,
     root: String,
     output_name: String,
+    page_text_baseline_grid: bool,
 ) -> Result<String, String> {
     let root = ensure_allowed(&roots, &root)?;
     let histories = histories.inner().clone();
@@ -33,7 +34,7 @@ pub async fn export_notebook_pdf(
             for reference in &manifest.pages {
                 let bundle = storage::open_page(notebook_root, &reference.id)
                     .map_err(|error| format!("page {}: {error}", reference.id))?;
-                pages.push(export_page_from_bundle(&bundle)?);
+                pages.push(export_page_from_bundle(&bundle, page_text_baseline_grid)?);
             }
 
             export_pages(notebook_root, &output_name, &pages, allow_remote_packages)
@@ -51,7 +52,10 @@ pub async fn export_notebook_pdf(
     .map_err(|error| error.to_string())?
 }
 
-fn export_page_from_bundle(bundle: &storage::NotebookSnapshot) -> Result<ExportPage, String> {
+fn export_page_from_bundle(
+    bundle: &storage::NotebookSnapshot,
+    page_text_baseline_grid: bool,
+) -> Result<ExportPage, String> {
     let source_for = |path: &str| -> Result<String, String> {
         bundle
             .blocks
@@ -62,6 +66,7 @@ fn export_page_from_bundle(bundle: &storage::NotebookSnapshot) -> Result<ExportP
     };
 
     let mut blocks = Vec::new();
+    let mut page_typst = None;
     let mut images = Vec::new();
     for (order, object) in bundle.page.objects.iter().enumerate() {
         match object {
@@ -80,6 +85,9 @@ fn export_page_from_bundle(bundle: &storage::NotebookSnapshot) -> Result<ExportP
                 order,
                 source: source_for(source_path)?,
             }),
+            PageObject::PageTypst { source_path, .. } => {
+                page_typst = Some(source_for(source_path)?);
+            }
             PageObject::Image {
                 fields,
                 source_path,
@@ -106,6 +114,7 @@ fn export_page_from_bundle(bundle: &storage::NotebookSnapshot) -> Result<ExportP
         .iter()
         .flat_map(|layer| &layer.strokes)
         .map(|stroke| ExportStroke {
+            z_index: stroke.z_index,
             color: stroke.color.clone(),
             width_pt: stroke.width_pt,
             // Taken from the stroke, never re-derived from the tool: the nib that drew it already
@@ -142,6 +151,8 @@ fn export_page_from_bundle(bundle: &storage::NotebookSnapshot) -> Result<ExportP
             .map(source_for)
             .transpose()?,
         background: bundle.page.background.clone(),
+        page_text_baseline_grid,
+        page_typst,
         blocks,
         strokes,
         images,

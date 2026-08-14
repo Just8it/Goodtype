@@ -2,6 +2,8 @@
   import { untrack } from "svelte";
   import BrandMark from "../brand/BrandMark.svelte";
   import NamePrompt from "./NamePrompt.svelte";
+  import NotebookSetup from "./NotebookSetup.svelte";
+  import type { NotebookSetup as NotebookSetupValue } from "../page/presets";
   import NotebookCover from "./NotebookCover.svelte";
   import ShelfMenu, { type ShelfMenuItem } from "./ShelfMenu.svelte";
   import type { ShelfLocation, ShelfView } from "./location";
@@ -34,8 +36,11 @@
     location = { view: "library", path: "" },
     onOpen,
     onCreate,
+    returnLabel,
+    onReturn,
     onLocationChange,
     onStatus,
+    showNotebookSetup = false,
   }: {
     tauriAvailable: boolean;
     /**
@@ -50,9 +55,12 @@
     /** Hands back an absolute notebook root, which is what every notebook command takes. */
     onOpen: (root: string) => void;
     /** Same, for a directory that is not a notebook yet and must be filled. */
-    onCreate: (root: string) => void;
+    onCreate: (root: string, setup: NotebookSetupValue) => void;
+    returnLabel?: string;
+    onReturn?: () => void;
     onLocationChange?: (location: ShelfLocation) => void;
     onStatus: (message: string) => void;
+    showNotebookSetup?: boolean;
   } = $props();
 
   const COVER_WIDTH_PX = 152;
@@ -72,6 +80,7 @@
   let order = $state<SortOrder>("name");
   let busy = $state(false);
   let failure = $state<string | null>(null);
+  let setupShown = false;
 
   let menu = $state<"new" | "sort" | null>(null);
   let entryMenu = $state<string | null>(null);
@@ -95,7 +104,13 @@
     if (!tauriAvailable) return;
     try {
       libraryRoot = await readLibraryRoot();
-      if (libraryRoot) await reload();
+      if (libraryRoot) {
+        await reload();
+        if (showNotebookSetup && !setupShown) {
+          setupShown = true;
+          prompt = { kind: "notebook" };
+        }
+      }
     } catch (error) {
       failure = message(error);
     }
@@ -110,6 +125,10 @@
       view = "library";
       path = "";
       await reload();
+      if (showNotebookSetup && !setupShown) {
+        setupShown = true;
+        prompt = { kind: "notebook" };
+      }
       onStatus(`Library set to ${chosen}`);
     } catch (error) {
       failure = message(error);
@@ -198,17 +217,18 @@
         () => renameLibraryEntry(pending.path, name),
         `In „${name}" umbenannt`,
       );
-    } else {
-      busy = true;
-      try {
-        const root = await createLibraryNotebook(path, name);
-        // The directory exists and is empty; the notebook itself is written by the same path
-        // that has always created one, so the store keeps a single author for its own files.
-        onCreate(root);
-      } catch (error) {
-        failure = message(error);
-        busy = false;
-      }
+    }
+  }
+
+  async function createNotebook(setup: NotebookSetupValue) {
+    prompt = null;
+    busy = true;
+    try {
+      const root = await createLibraryNotebook(path, setup.name);
+      onCreate(root, setup);
+    } catch (error) {
+      failure = message(error);
+      busy = false;
     }
   }
 
@@ -343,6 +363,10 @@
       <BrandMark size={20} title="" />
       <span>goodtype</span>
     </div>
+
+    {#if onReturn}
+      <button type="button" class="return-to-notebook" onclick={onReturn}>← {returnLabel ?? "Open notebook"}</button>
+    {/if}
 
     {#if libraryRoot}
       <div class="where">
@@ -600,13 +624,17 @@
   {/if}
 {/snippet}
 
-{#if prompt}
+{#if prompt?.kind === "notebook"}
+  <NotebookSetup
+    {busy}
+    onConfirm={(setup) => void createNotebook(setup)}
+    onCancel={() => (prompt = null)}
+  />
+{:else if prompt}
   <NamePrompt
     heading={prompt.kind === "folder"
       ? "Neuer Ordner"
-      : prompt.kind === "notebook"
-        ? "Neues Notizbuch"
-        : "Umbenennen"}
+      : "Umbenennen"}
     confirmLabel={prompt.kind === "rename" ? "Umbenennen" : "Anlegen"}
     initial={prompt.kind === "rename" ? prompt.initial : ""}
     {busy}
@@ -644,6 +672,20 @@
     font-size: 15px;
     font-weight: 600;
   }
+
+  .return-to-notebook {
+    width: 100%;
+    min-height: 40px;
+    margin-bottom: 12px;
+    padding: 8px 10px;
+    border: 1px solid rgb(255 255 255 / 12%);
+    border-radius: 7px;
+    background: rgb(255 255 255 / 4%);
+    color: var(--text, #e9ebee);
+    cursor: pointer;
+    text-align: left;
+  }
+  .return-to-notebook:hover { background: rgb(255 255 255 / 8%); }
 
   .where {
     display: flex;

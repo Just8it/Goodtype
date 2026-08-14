@@ -11,7 +11,8 @@ use tauri::Manager;
 use tauri_plugin_dialog::DialogExt;
 
 use crate::settings::{
-    active_recent_root, clear_active_recent, is_recent_notebook, record_recent, record_recent_page,
+    active_recent_root, clear_active_recent, is_recent_notebook, recent_session, record_recent,
+    record_recent_page, record_recent_session,
 };
 
 /// Notebook roots the user has explicitly selected in this process, plus the default local
@@ -120,6 +121,78 @@ pub fn resume_notebook_root(
             Err(error)
         }
     }
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NotebookSession {
+    open_roots: Vec<String>,
+    active_root: Option<String>,
+}
+
+/// Re-admit every notebook tab saved by the previous app session. Invalid roots are dropped;
+/// they remain ordinary recents and can still surface in the library as missing entries.
+#[tauri::command]
+pub fn resume_notebook_session(
+    app: tauri::AppHandle,
+    roots: tauri::State<'_, AllowedRoots>,
+) -> Result<NotebookSession, String> {
+    let (stored_roots, stored_active) = recent_session(&app)?;
+    let mut open_roots = Vec::new();
+    let mut active_root = None;
+    for stored in stored_roots {
+        if let Ok(admitted) = admit_recent_root(&app, &roots, &stored) {
+            if stored_active.as_deref() == Some(stored.as_str()) {
+                active_root = Some(admitted.clone());
+            }
+            if !open_roots.contains(&admitted) {
+                open_roots.push(admitted);
+            }
+        }
+    }
+    if active_root.is_none() {
+        active_root = open_roots.first().cloned();
+    }
+    record_recent_session(&app, open_roots.clone(), active_root.clone())?;
+    Ok(NotebookSession {
+        open_roots,
+        active_root,
+    })
+}
+
+/// Persist only tab order and the active root. Every supplied root must already be admitted by
+/// Rust and known to recents, so restoring tabs never widens filesystem authority.
+#[tauri::command]
+pub fn record_notebook_session(
+    app: tauri::AppHandle,
+    roots: tauri::State<'_, AllowedRoots>,
+    open_roots: Vec<String>,
+    active_root: Option<String>,
+) -> Result<(), String> {
+    if open_roots.len() > 30 {
+        return Err("at most 30 notebook tabs can be restored".to_owned());
+    }
+    let mut canonical_roots = Vec::new();
+    for root in open_roots {
+        let canonical = path_string(ensure_allowed(&roots, &root)?)?;
+        if !is_recent_notebook(&app, &canonical)? {
+            return Err("an open notebook is not in recents".to_owned());
+        }
+        if !canonical_roots.contains(&canonical) {
+            canonical_roots.push(canonical);
+        }
+    }
+    let active_root = match active_root {
+        Some(root) => {
+            let canonical = path_string(ensure_allowed(&roots, &root)?)?;
+            if !canonical_roots.contains(&canonical) {
+                return Err("the active notebook must be an open tab".to_owned());
+            }
+            Some(canonical)
+        }
+        None => None,
+    };
+    record_recent_session(&app, canonical_roots, active_root)
 }
 
 /// Record a successful open in the recents list.

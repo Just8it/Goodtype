@@ -92,6 +92,8 @@ export type Page = {
   inkLayers: InkLayerReference[];
 };
 
+export const DEFAULT_INK_Z_INDEX = 1_000_000;
+
 export type InkLayerReference = { id: string; path: string };
 
 export type ObjectFields = {
@@ -114,6 +116,11 @@ export type PageObject =
       layoutWidthPt: number;
       measuredWidthPt: number;
       measuredHeightPt: number;
+    })
+  | (ObjectFields & {
+      /** Fixed page writing surface; deliberately has no canvas transform controls. */
+      type: "page_typst";
+      sourcePath: string;
     })
   | (ObjectFields & {
       type: "image";
@@ -145,6 +152,8 @@ export type InkLayer = {
 
 export type Stroke = {
   id: string;
+  /** Shared visual order with movable objects; absent legacy values paint above them. */
+  zIndex?: number;
   tool: "pen" | "highlighter";
   color: string;
   widthPt: number;

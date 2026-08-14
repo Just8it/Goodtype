@@ -39,7 +39,10 @@ pub use recovery::{
     restore_recovery_candidate,
 };
 pub use search::{SearchHit, search_notebook};
-pub use write::{read_pdf_reference, store_pasted_image, store_pdf_reference};
+pub use write::{
+    list_typst_styles, read_pdf_reference, remove_typst_style, store_pasted_image,
+    store_pdf_reference, write_typst_style,
+};
 
 /// The store's size budget, in one place.
 ///

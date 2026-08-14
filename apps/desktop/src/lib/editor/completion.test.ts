@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { fromByteOffset, toByteOffset } from "./completion";
+import { fromByteOffset, toByteOffset, toSnippetTemplate } from "./completion";
 
 // Rust counts UTF-8 bytes, CodeMirror counts UTF-16 units. Any Typst source with a math symbol
 // makes the two disagree, so the round trip is worth pinning down.
@@ -24,5 +24,11 @@ describe("offset conversion", () => {
   it("clamps an offset past the end to the document length", () => {
     const text = "= Title";
     expect(fromByteOffset(text, 999)).toBe(text.length);
+  });
+});
+
+describe("Tinymist snippets", () => {
+  it("turns numbered LSP tab stops into CodeMirror fields", () => {
+    expect(toSnippetTemplate("align(${1:body})$0")).toBe("align(#{body})#{}");
   });
 });

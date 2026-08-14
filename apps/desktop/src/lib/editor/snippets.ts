@@ -10,7 +10,7 @@ import {
  * source; there is no template system, marketplace, or dynamic execution. `#{}` marks the
  * cursor stops that Tab moves through.
  */
-export const STEM_SNIPPETS: ReadonlyArray<{
+export const TYPST_SNIPPETS: ReadonlyArray<{
   label: string;
   detail: string;
   template: string;
@@ -58,10 +58,14 @@ export const STEM_SNIPPETS: ReadonlyArray<{
     template: "#figure(\n  ${content},\n  caption: [${Caption}],\n)",
   },
   { label: "code", detail: "code block", template: "```${language}\n${code}\n```" },
+  { label: "quote", detail: "block quote", template: "> ${quote}" },
   { label: "heading", detail: "section heading", template: "= ${Title}" },
 ];
 
-const completions: Completion[] = STEM_SNIPPETS.map((snippet) =>
+/** Kept as a public alias for existing callers; completion and the writing bar use one registry. */
+export const STEM_SNIPPETS = TYPST_SNIPPETS;
+
+const completions: Completion[] = TYPST_SNIPPETS.map((snippet) =>
   snippetCompletion(snippet.template, {
     label: snippet.label,
     detail: snippet.detail,

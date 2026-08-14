@@ -1586,6 +1586,7 @@ dependencies = [
  "goodtype-typst",
  "serde",
  "serde_json",
+ "sha2",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
@@ -1597,6 +1598,7 @@ name = "goodtype-typst"
 version = "0.1.0"
 dependencies = [
  "goodtype-core",
+ "serde",
  "tempfile",
  "typst",
  "typst-assets",

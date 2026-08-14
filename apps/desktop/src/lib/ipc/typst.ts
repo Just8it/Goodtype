@@ -29,6 +29,25 @@ export function compileTypst(
   return invoke<TypstCompileResult>("compile_typst", { root, request });
 }
 
+export type TypstCompletionItem = {
+  kind: string;
+  symbol: string | null;
+  label: string;
+  apply: string | null;
+  detail: string | null;
+  /** Byte offset into the UTF-8 source where the replacement starts. */
+  offset: number;
+};
+
+export function completeTypst(
+  root: string,
+  source: string,
+  cursor: number,
+  explicit: boolean,
+): Promise<TypstCompletionItem[]> {
+  return invoke<TypstCompletionItem[]>("complete_typst", { root, source, cursor, explicit });
+}
+
 export type TypstHover = { value: string; code: boolean };
 
 export function hoverTypst(
@@ -41,4 +60,17 @@ export function hoverTypst(
 
 export function formatTypst(root: string, source: string): Promise<string> {
   return invoke<string>("format_typst", { root, source });
+}
+
+export type TypstHighlight = { kind: string; modifiers: string[]; from: number; to: number };
+export type TypstDiagnostic = {
+  severity: "error" | "warning" | "info";
+  message: string;
+  from: number;
+  to: number;
+};
+export type TypstAnalysis = { highlights: TypstHighlight[]; diagnostics: TypstDiagnostic[] };
+
+export function analyzeTypst(root: string, source: string): Promise<TypstAnalysis> {
+  return invoke<TypstAnalysis>("analyze_typst", { root, source });
 }

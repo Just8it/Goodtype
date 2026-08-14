@@ -8,33 +8,16 @@ import type {
   Stroke,
 } from "../model";
 import type { NotebookSnapshot } from "../ipc/types";
+import type { BlockView, ImageView, PageTypstView } from "./pageView";
 
-export type EditableTypst = {
-  id: string;
-  path: string;
-  source: string;
-  x: number;
-  y: number;
-  layoutWidthPt: number;
-  scale: number;
+export type EditableTypst = BlockView & {
   measuredWidthPt: number;
   measuredHeightPt: number;
-  zIndex: number;
-  readingOrder: number;
 };
 
-export type EditableImage = {
-  id: string;
-  path: string;
-  alt: string;
-  x: number;
-  y: number;
-  widthPt: number;
-  heightPt: number;
-  scale: number;
-  zIndex: number;
-  readingOrder: number;
-};
+export type EditablePageTypst = PageTypstView;
+
+export type EditableImage = Omit<ImageView, "url">;
 
 export type ManagedMixedGroup = {
   inkGroupId: string;
@@ -54,6 +37,7 @@ type Projection = {
   inkLayerPath: string;
   strokes: Stroke[];
   typst: EditableTypst[];
+  pageTypst: EditablePageTypst | null;
   images: EditableImage[];
   sharedStyle: { path: string; source: string } | null;
   mixedGroup: ManagedMixedGroup | null;
@@ -89,6 +73,12 @@ export function projectSnapshot(input: Projection): NotebookSnapshot {
       objects.push(patchTypst(object, block, input.mixedGroup, input.now));
       continue;
     }
+    if (object.type === "page_typst") {
+      if (!input.pageTypst || input.pageTypst.id !== object.id) continue;
+      emitted.add(object.id);
+      objects.push(patchPageTypst(object, input.pageTypst, input.now));
+      continue;
+    }
     if (object.type === "image") {
       const image = imageById.get(object.id);
       if (!image) continue;
@@ -108,6 +98,10 @@ export function projectSnapshot(input: Projection): NotebookSnapshot {
     if (emitted.has(block.id)) continue;
     emitted.add(block.id);
     objects.push(newTypst(block, input.mixedGroup, input.now));
+  }
+  if (input.pageTypst && !emitted.has(input.pageTypst.id)) {
+    emitted.add(input.pageTypst.id);
+    objects.push(newPageTypst(input.pageTypst, input.now));
   }
   for (const image of input.images) {
     if (emitted.has(image.id)) continue;
@@ -178,6 +172,9 @@ export function projectSnapshot(input: Projection): NotebookSnapshot {
       readingOrder.push(object.id);
     }
   }
+  if (input.pageTypst) {
+    readingOrder = [input.pageTypst.id, ...readingOrder.filter((id) => id !== input.pageTypst!.id)];
+  }
   const objectById = new Map(objects.map((object) => [object.id, object]));
   readingOrder.sort(
     (left, right) =>
@@ -213,6 +210,9 @@ export function projectSnapshot(input: Projection): NotebookSnapshot {
   const editableBlocks = new Map(
     [
       ...input.typst.map((block) => ({ path: block.path, source: block.source })),
+      ...(input.pageTypst
+        ? [{ path: input.pageTypst.path, source: input.pageTypst.source }]
+        : []),
       ...(input.sharedStyle ? [input.sharedStyle] : []),
     ].map((block) => [
       block.path,
@@ -222,7 +222,7 @@ export function projectSnapshot(input: Projection): NotebookSnapshot {
   const blockPaths = new Set([
     ...(input.manifest.sharedStylePath ? [input.manifest.sharedStylePath] : []),
     ...orderedObjects.flatMap((object) =>
-      object.type === "typst" ? [object.sourcePath] : [],
+      object.type === "typst" || object.type === "page_typst" ? [object.sourcePath] : [],
     ),
   ]);
   const baseBlocks = new Map(input.base?.blocks.map((file) => [file.path, file]) ?? []);
@@ -269,6 +269,25 @@ function patchTypst(
   };
 }
 
+function patchPageTypst(
+  object: Extract<PageObject, { type: "page_typst" }>,
+  pageTypst: EditablePageTypst,
+  now: string,
+): Extract<PageObject, { type: "page_typst" }> {
+  return {
+    ...object,
+    x: 0,
+    y: 0,
+    rotation: 0,
+    scale: 1,
+    zIndex: pageTypst.zIndex,
+    readingOrder: pageTypst.readingOrder,
+    groupId: null,
+    modifiedAt: now,
+    sourcePath: pageTypst.path,
+  };
+}
+
 function patchImage(
   object: Extract<PageObject, { type: "image" }>,
   image: EditableImage,
@@ -310,6 +329,21 @@ function newTypst(
     layoutWidthPt: block.layoutWidthPt,
     measuredWidthPt: block.measuredWidthPt,
     measuredHeightPt: block.measuredHeightPt,
+  };
+}
+
+function newPageTypst(
+  pageTypst: EditablePageTypst,
+  now: string,
+): Extract<PageObject, { type: "page_typst" }> {
+  return {
+    ...newFields(pageTypst.id, pageTypst.readingOrder, pageTypst.zIndex, null, now),
+    type: "page_typst",
+    x: 0,
+    y: 0,
+    rotation: 0,
+    scale: 1,
+    sourcePath: pageTypst.path,
   };
 }
 

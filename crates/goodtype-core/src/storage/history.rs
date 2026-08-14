@@ -125,6 +125,13 @@ pub fn commit_notebook(
     let root = canonical_root(selected_root)?;
     let current = open_page(selected_root, &snapshot.page.id)?;
     ensure_current(&root, history, &current, snapshot.page.revision)?;
+    // A preloaded neighbouring page may carry a timestamp from before another page saved.
+    // Keep the current manifest and only advance its bookkeeping time.
+    let requested_modified_at = snapshot.manifest.modified_at.clone();
+    snapshot.manifest = current.manifest.clone();
+    if requested_modified_at > snapshot.manifest.modified_at {
+        snapshot.manifest.modified_at = requested_modified_at;
+    }
     snapshot.page.revision = current.page.revision + 1;
     let (saved, fingerprint) = save_and_return(&root, &current, &snapshot)?;
     history.advance(current, &saved, fingerprint);
@@ -237,7 +244,7 @@ pub(crate) fn history_result(
 #[cfg(test)]
 mod tests {
     use crate::{
-        PageObject,
+        PageObject, layout,
         storage::{fixtures::*, *},
     };
     use std::fs;
@@ -302,6 +309,71 @@ mod tests {
             external_source
         );
         assert_eq!(open_notebook(&notebook_root).unwrap().page.revision, 1);
+    }
+
+    #[test]
+    fn different_pages_can_commit_after_the_shared_modified_time_changes() {
+        let temporary = tempfile::tempdir().unwrap();
+        let notebook_root = temporary.path().join("notebook");
+        create_notebook(&notebook_root, &snapshot()).unwrap();
+        create_page(
+            &notebook_root,
+            "2026-07-30T10:00:00Z",
+            &PagePosition::Last,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let mut first_history = NotebookHistory::default();
+        let mut second_history = NotebookHistory::default();
+        let mut first = observe_page(&notebook_root, "page-001", &mut first_history).unwrap();
+        let mut second = observe_page(&notebook_root, "page-002", &mut second_history).unwrap();
+
+        first.manifest.modified_at = "2026-07-30T10:01:00Z".into();
+        first.ink_layers[0].strokes[0].points[0].x = 81.0;
+        commit_notebook(&notebook_root, &mut first_history, first).unwrap();
+
+        let mut stroke = snapshot().ink_layers[0].strokes[0].clone();
+        stroke.id = "page-002-stroke-001".into();
+        second.ink_layers[0].strokes.push(stroke);
+        let committed = commit_notebook(&notebook_root, &mut second_history, second).unwrap();
+
+        assert_eq!(committed.snapshot.page.revision, 2);
+        assert_eq!(
+            committed.snapshot.manifest.modified_at,
+            "2026-07-30T10:01:00Z"
+        );
+    }
+
+    #[test]
+    fn changing_manifest_content_is_still_an_external_change() {
+        let temporary = tempfile::tempdir().unwrap();
+        let notebook_root = temporary.path().join("notebook");
+        create_notebook(&notebook_root, &snapshot()).unwrap();
+        let mut history = NotebookHistory::default();
+        let mut changed = observe_notebook(&notebook_root, &mut history).unwrap();
+        changed.ink_layers[0].strokes[0].points[0].x = 81.0;
+
+        let manifest_path = notebook_root.join(layout::MANIFEST);
+        let mut manifest: crate::NotebookManifest =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        manifest.title = "Changed outside Goodtype".into();
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        let error = commit_notebook(&notebook_root, &mut history, changed).unwrap_err();
+        assert!(matches!(
+            error,
+            StorageError::InvalidNotebook(message) if message.contains("external change")
+        ));
+        assert_eq!(
+            open_notebook(&notebook_root).unwrap().manifest.title,
+            "Changed outside Goodtype"
+        );
     }
 
     /// The Phase 1 gate: a page carrying five thousand strokes must commit, reopen, and

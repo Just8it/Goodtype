@@ -10,20 +10,14 @@
   } from "../editor/typst";
   import type { CachedTypst } from "../editor/typstCache";
   import { keepOnPage } from "../geometry/placement";
-
-  type Transform = {
-    x: number;
-    y: number;
-    layoutWidthPt: number;
-    scale: number;
-  };
+  import type { TypstTransform } from "./pageView";
 
   type Gesture = {
     kind: "move" | "reflow";
     pointerId: number;
     clientX: number;
     clientY: number;
-    start: Transform;
+    start: TypstTransform;
   };
 
   let {
@@ -79,7 +73,7 @@
       generation: number;
     }) => void;
     onSourceChange: (source: string) => void;
-    onTransform: (transform: Transform) => void;
+    onTransform: (transform: TypstTransform) => void;
     /** Lets the page lift the whole object layer while this block is being edited. */
     onEditingChange?: (editing: boolean) => void;
     /** False while the side view is open: editing happens there instead of on the page. */

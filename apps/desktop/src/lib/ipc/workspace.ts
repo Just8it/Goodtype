@@ -9,6 +9,11 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { RecentNotebook } from "../settings";
 
+export type NotebookSession = {
+  openRoots: string[];
+  activeRoot: string | null;
+};
+
 /** The default notebook directory, created if absent. Used when there are no recents. */
 export function defaultNotebookRoot(): Promise<string> {
   return invoke<string>("phase0_notebook_root");
@@ -21,6 +26,14 @@ export function listRecentNotebooks(): Promise<RecentNotebook[]> {
 /** The notebook left open before a reload or application exit, admitted for this process. */
 export function resumeNotebookRoot(): Promise<string | null> {
   return invoke<string | null>("resume_notebook_root");
+}
+
+export function resumeNotebookSession(): Promise<NotebookSession> {
+  return invoke<NotebookSession>("resume_notebook_session");
+}
+
+export function recordNotebookSession(openRoots: string[], activeRoot: string | null): Promise<void> {
+  return invoke("record_notebook_session", { openRoots, activeRoot });
 }
 
 export function recordNotebookPage(root: string, pageId: string): Promise<void> {
@@ -40,8 +53,12 @@ export function closeNotebookSession(root: string): Promise<void> {
   return invoke("close_notebook_session", { root });
 }
 
-export function exportNotebookPdf(root: string, outputName: string): Promise<string> {
-  return invoke<string>("export_notebook_pdf", { root, outputName });
+export function exportNotebookPdf(
+  root: string,
+  outputName: string,
+  pageTextBaselineGrid: boolean,
+): Promise<string> {
+  return invoke<string>("export_notebook_pdf", { root, outputName, pageTextBaselineGrid });
 }
 
 /** See the note in `storePastedImage` about why the bytes are converted here. */

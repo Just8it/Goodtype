@@ -16,16 +16,19 @@
   stops reading as type and starts reading as noise. The base keeps its full weight — it is a
   filled slab rather than a stroke, so it is the last part of the mark to suffer from scaling.
 
+  The tile and mark colours match the established dark-background palette in `mark-dark.svg`.
+
   `cargo xtask icons` rasterises this into the PNG and ICO set Tauri needs. Edit the SVG,
   never the bitmaps.
 -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" fill="none" role="img" aria-label="Goodtype">
-  <rect width="1024" height="1024" rx="225.0" fill="#1497A6"/>
+  <rect width="1024" height="1024" rx="225.0" fill="#1B1E24"/>
+  <rect x="8" y="8" width="1008" height="1008" rx="217.0" stroke="#2B2F37" stroke-width="16"/>
   <g transform="translate(24.38 199.12) scale(8.127)">
-    <rect x="14" y="4" width="92" height="58" rx="7" stroke="#FCFCFA" stroke-width="7"/>
-    <rect x="4" y="66" width="112" height="10" rx="5" fill="#FCFCFA"/>
+    <rect x="14" y="4" width="92" height="58" rx="7" stroke="#E9EBEE" stroke-width="7"/>
+    <rect x="4" y="66" width="112" height="10" rx="5" fill="#E9EBEE"/>
     <path d="M26 34 C 32 22, 38 22, 42 32 C 45 39, 49 39, 53 30 C 56 23, 61 23, 65 28 C 68 32, 72 32, 75 27"
-          stroke="#0C4A52" stroke-width="6.4" stroke-linecap="round" stroke-linejoin="round"/>
-    <rect x="26" y="45" width="52" height="6.5" rx="3.25" fill="#FCFCFA"/>
+          stroke="#38B6C6" stroke-width="6.4" stroke-linecap="round" stroke-linejoin="round"/>
+    <rect x="26" y="45" width="52" height="6.5" rx="3.25" fill="#E9EBEE"/>
   </g>
 </svg>

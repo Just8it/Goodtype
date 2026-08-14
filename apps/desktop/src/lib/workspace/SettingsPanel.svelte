@@ -98,6 +98,23 @@
       </div>
     </section>
 
+    <section aria-labelledby="settings-page-text">
+      <h3 id="settings-page-text">Page text</h3>
+      <label class="choice">
+        <input
+          type="checkbox"
+          checked={settings.pageTextBaselineGrid}
+          onchange={(event) =>
+            onChange({ ...settings, pageTextBaselineGrid: event.currentTarget.checked })}
+        />
+        <span
+          ><strong>Snap blocks to paper rhythm</strong><em
+            >Headings and display equations reserve whole paper rows</em
+          ></span
+        >
+      </label>
+    </section>
+
     <section aria-labelledby="settings-packages">
       <h3 id="settings-packages">Typst packages</h3>
       <label class="choice">
@@ -118,6 +135,22 @@
 
     <section aria-labelledby="settings-motion">
       <h3 id="settings-motion">Motion</h3>
+      <div class="row">
+        <label>
+          <span>Touch glide</span>
+          <input
+            type="range"
+            min="0"
+            max="4"
+            step="0.1"
+            value={settings.touchGlide}
+            aria-label="Touch glide after releasing a one-finger pan"
+            oninput={(event) =>
+              onChange({ ...settings, touchGlide: Number(event.currentTarget.value) })}
+          />
+          <output>{Math.round(settings.touchGlide * 50)}%</output>
+        </label>
+      </div>
       <label class="choice">
         <input
           type="checkbox"

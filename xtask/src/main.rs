@@ -39,7 +39,7 @@ fn doctor() -> Result<(), String> {
 }
 
 fn check_tool(name: &str, command: &str, expected: Option<&str>, required: bool) -> bool {
-    match Command::new(command).arg("--version").output() {
+    match platform_command(command).arg("--version").output() {
         Ok(output) if output.status.success() => {
             let version = String::from_utf8_lossy(&output.stdout).trim().to_owned();
             let matches = expected.is_none_or(|expected| version_matches(&version, expected));
@@ -102,7 +102,7 @@ fn verify() -> Result<(), String> {
 
     for (label, program, args) in commands {
         println!("\n==> {label}");
-        let status = Command::new(program)
+        let status = platform_command(program)
             .args(*args)
             .current_dir(&root)
             .status()
@@ -169,7 +169,8 @@ fn icons() -> Result<(), String> {
     // scale a mismatched bitmap itself.
     let mut ico = Vec::new();
     let encoder = image::codecs::ico::IcoEncoder::new(std::io::Cursor::new(&mut ico));
-    let frames = [16u32, 24, 32, 48, 64, 128, 256]
+    // Tauri uses the first ICO layer for the development window, so 32px must come first.
+    let frames = [32u32, 16, 24, 48, 64, 128, 256]
         .into_iter()
         .map(|size| {
             let pixmap = render(&load(size)?, size)?;
@@ -260,6 +261,16 @@ fn version_matches(actual: &str, expected: &str) -> bool {
 
 const fn pnpm_command() -> &'static str {
     if cfg!(windows) { "pnpm.cmd" } else { "pnpm" }
+}
+
+fn platform_command(program: &str) -> Command {
+    if cfg!(windows) && program.ends_with(".cmd") {
+        let mut command = Command::new("cmd");
+        command.args(["/D", "/C", program]);
+        command
+    } else {
+        Command::new(program)
+    }
 }
 
 #[cfg(test)]

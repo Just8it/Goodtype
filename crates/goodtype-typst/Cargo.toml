@@ -8,6 +8,7 @@ license.workspace = true
 # The Typst compiler is embedded in-process; there is no external `typst` binary.
 [dependencies]
 goodtype-core = { path = "../goodtype-core" }
+serde.workspace = true
 tempfile.workspace = true
 typst = "0.15.1"
 typst-assets = { version = "0.15.1", features = ["fonts"] }

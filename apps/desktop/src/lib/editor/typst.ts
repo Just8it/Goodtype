@@ -24,14 +24,9 @@ export type TypstCompileResult = {
   diagnostics: TypstDiagnostic[];
 };
 
-export type TypstPreview = {
+export type TypstPreview = Omit<TypstCompileResult, "generation"> & {
   requestedGeneration: number;
   appliedGeneration: number;
-  svg: string | null;
-  widthPt: number | null;
-  heightPt: number | null;
-  padPt: number;
-  diagnostics: TypstDiagnostic[];
 };
 
 export const emptyTypstPreview = (): TypstPreview => ({

@@ -10,6 +10,12 @@ pub mod template;
 pub use object::{IdRemap, ObjectFields, PageObject, SourceRef, SourceRole};
 
 pub const SCHEMA_VERSION: u32 = 1;
+/// Legacy strokes painted above movable objects. Missing version-1 values keep that look.
+pub const DEFAULT_INK_Z_INDEX: i32 = 1_000_000;
+
+const fn default_ink_z_index() -> i32 {
+    DEFAULT_INK_Z_INDEX
+}
 
 /// Finite and greater than zero. Shared by every measurement the store refuses to guess at:
 /// a zero or NaN width is a corrupt page, not a small one.
@@ -134,6 +140,8 @@ pub struct InkLayer {
 #[serde(rename_all = "camelCase")]
 pub struct Stroke {
     pub id: String,
+    #[serde(default = "default_ink_z_index")]
+    pub z_index: i32,
     pub tool: StrokeTool,
     pub color: String,
     pub width_pt: f64,
@@ -246,6 +254,7 @@ mod tests {
             (SCHEMA_VERSION, "page-001")
         );
         assert_eq!(ink.strokes[0].group_id.as_deref(), Some("ink-group-001"));
+        assert_eq!(ink.strokes[0].z_index, DEFAULT_INK_Z_INDEX);
         assert_eq!(ink.strokes[0].points[1].pressure, 0.75);
         assert_eq!(ink.strokes[0].points[1].time_ms, 8.0);
         assert_eq!(

@@ -12,6 +12,7 @@
 import { invoke } from "@tauri-apps/api/core";
 
 import type { PageBackground, PageGeometry, PagePosition } from "../model";
+import type { PresetChoice } from "../page/presets";
 import type {
   HistoryCommand,
   HistoryResult,
@@ -22,8 +23,9 @@ import type {
 export function createNotebook(
   root: string,
   snapshot: NotebookSnapshot,
+  presetChoice: PresetChoice = { kind: "none" },
 ): Promise<void> {
-  return invoke("create_notebook", { root, snapshot });
+  return invoke("create_notebook", { root, snapshot, presetChoice });
 }
 
 export function openNotebook(root: string): Promise<NotebookSnapshot> {

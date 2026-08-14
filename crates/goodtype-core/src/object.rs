@@ -122,6 +122,12 @@ pub enum PageObject {
         measured_width_pt: f64,
         measured_height_pt: f64,
     },
+    /// One fixed Typst writing surface owned by the page, never a selectable canvas object.
+    PageTypst {
+        #[serde(flatten)]
+        fields: ObjectFields,
+        source_path: String,
+    },
     Image {
         #[serde(flatten)]
         fields: ObjectFields,
@@ -155,6 +161,7 @@ impl PageObject {
     pub fn fields(&self) -> &ObjectFields {
         match self {
             Self::Typst { fields, .. }
+            | Self::PageTypst { fields, .. }
             | Self::Image { fields, .. }
             | Self::PdfMaterial { fields, .. }
             | Self::InkGroup { fields, .. }
@@ -165,6 +172,7 @@ impl PageObject {
     pub fn fields_mut(&mut self) -> &mut ObjectFields {
         match self {
             Self::Typst { fields, .. }
+            | Self::PageTypst { fields, .. }
             | Self::Image { fields, .. }
             | Self::PdfMaterial { fields, .. }
             | Self::InkGroup { fields, .. }
@@ -178,10 +186,12 @@ impl PageObject {
     /// a size ceiling, and deciding what the fingerprint covers all read this one answer.
     pub fn source(&self) -> Option<SourceRef<'_>> {
         match self {
-            Self::Typst { source_path, .. } => Some(SourceRef {
-                role: SourceRole::Block,
-                path: source_path,
-            }),
+            Self::Typst { source_path, .. } | Self::PageTypst { source_path, .. } => {
+                Some(SourceRef {
+                    role: SourceRole::Block,
+                    path: source_path,
+                })
+            }
             Self::Image { source_path, .. } => Some(SourceRef {
                 role: SourceRole::Asset,
                 path: source_path,
@@ -200,7 +210,9 @@ impl PageObject {
     /// reader would search for are different claims, and a new variant has to make both.
     pub fn searchable_source(&self) -> Option<&str> {
         match self {
-            Self::Typst { source_path, .. } => Some(source_path),
+            Self::Typst { source_path, .. } | Self::PageTypst { source_path, .. } => {
+                Some(source_path)
+            }
             Self::Image { .. }
             | Self::PdfMaterial { .. }
             | Self::InkGroup { .. }
@@ -223,6 +235,16 @@ impl PageObject {
                     || !nonnegative(*measured_height_pt)
                 {
                     return Err("Typst dimensions must be finite and non-negative");
+                }
+            }
+            Self::PageTypst { fields, .. } => {
+                if fields.x != 0.0
+                    || fields.y != 0.0
+                    || fields.rotation != 0.0
+                    || fields.scale != 1.0
+                    || fields.group_id.is_some()
+                {
+                    return Err("page Typst must use its fixed page transform");
                 }
             }
             Self::Image {
@@ -272,6 +294,10 @@ impl PageObject {
                 layout_width_pt: *layout_width_pt,
                 measured_width_pt: *measured_width_pt,
                 measured_height_pt: *measured_height_pt,
+            },
+            Self::PageTypst { source_path, .. } => Self::PageTypst {
+                fields,
+                source_path: remap.source(source_path),
             },
             Self::Image {
                 source_path,

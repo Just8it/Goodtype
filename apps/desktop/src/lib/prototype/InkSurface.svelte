@@ -1,7 +1,6 @@
 <script lang="ts">
-  import { untrack } from "svelte";
   import type { Point } from "../geometry/coordinates";
-  import { screenToPage } from "../geometry/coordinates";
+  import { boundedRasterScale, screenToPage } from "../geometry/coordinates";
   import type { Stroke, StrokePoint } from "../model";
   import {
     maximumSampleGap,
@@ -19,7 +18,7 @@
     type PressureCalibration,
   } from "../ink/pipeline";
   import { outlinePoints } from "../ink/outline";
-  import { paintOrder } from "../ink/paint";
+  import { paintStrata } from "../ink/paint";
   import { straightenStroke } from "../ink/straighten";
   import {
     eraseStrokeAt,
@@ -33,6 +32,8 @@
 
   type Props = {
     strokes?: Stroke[];
+    newStrokeZIndex?: number;
+    objectZIndices?: number[];
     selectedStrokeIds?: string[];
     pageWidthPt: number;
     pageHeightPt: number;
@@ -59,6 +60,8 @@
 
   let {
     strokes = [],
+    newStrokeZIndex = 1_000_001,
+    objectZIndices = [],
     selectedStrokeIds = [],
     pageWidthPt,
     pageHeightPt,
@@ -83,10 +86,12 @@
   let immediateCanvas = $state<HTMLCanvasElement>();
   let status = $state("No ink selected");
   let strokeCount = $state(0);
+  let eraserCursor = $state<Point | null>(null);
+  let eraserPressed = $state(false);
   // `$state.raw` rather than `$state`: the array is always replaced, never mutated in place, so
   // deep-proxying five thousand strokes and their samples would be pure cost.
   let localStrokes = $state.raw<Stroke[]>([]);
-  let localSelection: string[] = [];
+  let localSelection = $state.raw<string[]>([]);
 
   type Gesture =
     | {
@@ -119,6 +124,7 @@
       };
 
   let gesture: Gesture | null = null;
+  const MAX_IMMEDIATE_CANVAS_PIXELS = 6_000_000;
 
   $effect(() => {
     // Reads `strokes`, never `localStrokes`: now that the local copy is reactive, reading it here
@@ -129,15 +135,10 @@
     localSelection = selectedStrokeIds.slice();
     pageWidthPt;
     pageHeightPt;
-    zoom;
-    // Drawing the selection box reads `localStrokes` too, so the whole canvas pass is untracked
-    // for the same reason. The canvas element itself is read outside, to stay a dependency.
     const canvas = immediateCanvas;
-    untrack(() => {
-      if (!canvas) return;
-      sizeCanvas(canvas);
-      redrawImmediate();
-    });
+    if (!canvas) return;
+    sizeCanvas(canvas);
+    redrawImmediate();
   });
 
   /**
@@ -145,13 +146,24 @@
    * composites, so it stays crisp without JavaScript re-rasterising every stroke — which is what
    * made zooming lag. Only filled outlines can be merged like this; stroked polylines could not.
    */
-  const committedPaths = $derived(paintOrder(localStrokes, 0.5 / zoom));
+  const committedStrata = $derived(
+    paintStrata(localStrokes, objectZIndices, 0.5 / zoom),
+  );
+  const selectedBounds = $derived(selectionBounds(localStrokes, localSelection));
+  const eraserRadiusOnPage = $derived(eraseRadiusPt / zoom);
 
   function sizeCanvas(canvas: HTMLCanvasElement): void {
     const width = Math.max(pageWidthPt, 1);
     const height = Math.max(pageHeightPt, 1);
     const density = window.devicePixelRatio || 1;
-    const renderScale = density * zoom;
+    // The parent page already applies zoom as a GPU-composited CSS transform. This transient
+    // canvas only needs device resolution; scaling it with zoom caused a large bitmap allocation
+    // on every pinch update, even on empty pages.
+    const renderScale = boundedRasterScale(
+      { width, height },
+      density,
+      MAX_IMMEDIATE_CANVAS_PIXELS,
+    );
     canvas.style.width = `${width}px`;
     canvas.style.height = `${height}px`;
     const pixelWidth = Math.ceil(width * renderScale);
@@ -188,6 +200,7 @@
   }
 
   function pointerDown(event: PointerEvent): void {
+    updateEraserCursor(event);
     const role = pointerRole(event, tool, pointerMapping);
     if (role === "ignore" || gesture) return;
     event.preventDefault();
@@ -195,6 +208,7 @@
     surface?.focus({ preventScroll: true });
     surface?.setPointerCapture(event.pointerId);
     if (role === "erase") {
+      eraserPressed = true;
       gesture = {
         kind: "erase",
         pointerId: event.pointerId,
@@ -271,6 +285,7 @@
   }
 
   function pointerMove(event: PointerEvent): void {
+    updateEraserCursor(event);
     if (!gesture || event.pointerId !== gesture.pointerId) return;
     event.preventDefault();
     if (gesture.kind === "draw") {
@@ -315,6 +330,7 @@
       const points = quantizePoints(straighten ? straightenStroke(smoothed) : smoothed);
       const stroke: Stroke = {
         id: crypto.randomUUID(),
+        zIndex: newStrokeZIndex,
         tool: gesture.strokeTool,
         color,
         widthPt: liveWidthPt(gesture.strokeTool),
@@ -374,14 +390,26 @@
     finishPointer(event.pointerId);
   }
 
+  function pointerLeave(): void {
+    eraserCursor = null;
+  }
+
+  function updateEraserCursor(event: PointerEvent): void {
+    eraserCursor =
+      tool === "eraser" && pointerRole(event, tool, pointerMapping) === "erase"
+        ? pagePoint(event)
+        : null;
+  }
+
   function finishPointer(pointerId: number): void {
     gesture = null;
+    eraserPressed = false;
     if (surface?.hasPointerCapture(pointerId)) surface.releasePointerCapture(pointerId);
     redrawImmediate();
   }
 
   function eraseAt(point: Point): void {
-    const next = eraseStrokeAt(localStrokes, point, eraseRadiusPt / zoom);
+    const next = eraseStrokeAt(localStrokes, point, eraserRadiusOnPage);
     if (next === localStrokes) return;
     localStrokes = next;
     strokeCount = localStrokes.length;
@@ -452,8 +480,7 @@
   function redrawImmediate(): void {
     const context = canvasContext(immediateCanvas);
     if (!context || !immediateCanvas) return;
-    context.clearRect(0, 0, immediateCanvas.width, immediateCanvas.height);
-    drawSelection(context);
+    context.clearRect(0, 0, pageWidthPt, pageHeightPt);
     if (gesture?.kind === "draw") {
       drawPoints(
         context,
@@ -507,28 +534,6 @@
     context.restore();
   }
 
-  function drawSelection(context: CanvasRenderingContext2D): void {
-    const bounds = selectionBounds(localStrokes, localSelection);
-    if (!bounds) return;
-    context.save();
-    context.strokeStyle = "#206acb";
-    context.fillStyle = "#ffffff";
-    context.lineWidth = 1.5;
-    context.setLineDash([4, 3]);
-    context.strokeRect(
-      bounds.left,
-      bounds.top,
-      bounds.right - bounds.left,
-      bounds.bottom - bounds.top,
-    );
-    context.setLineDash([]);
-    context.beginPath();
-    context.arc(bounds.right, bounds.bottom, 6 / zoom, 0, Math.PI * 2);
-    context.fill();
-    context.stroke();
-    context.restore();
-  }
-
   function path(context: CanvasRenderingContext2D, points: Point[]): void {
     if (points.length === 0) return;
     context.beginPath();
@@ -552,9 +557,24 @@
   }
 </script>
 
+{#each committedStrata as stratum (stratum.key)}
+  <svg
+    class="committed"
+    style:z-index={stratum.zIndex}
+    viewBox={`0 0 ${pageWidthPt} ${pageHeightPt}`}
+    width={pageWidthPt}
+    height={pageHeightPt}
+    aria-hidden="true"
+  >
+    {#each stratum.paths as painted (painted.key)}
+      <path d={painted.d} fill={painted.color} fill-opacity={painted.opacity} fill-rule="nonzero" />
+    {/each}
+  </svg>
+{/each}
 <div
   bind:this={surface}
   class="ink-surface"
+  class:eraser-active={tool === "eraser"}
   style:width={`${pageWidthPt}px`}
   style:height={`${pageHeightPt}px`}
   role="button"
@@ -562,29 +582,71 @@
   tabindex="0"
   onpointerdown={pointerDown}
   onpointermove={pointerMove}
+  onpointerleave={pointerLeave}
   onpointerup={pointerUp}
   onpointercancel={pointerCancel}
   onkeydown={keyDown}
 >
-  <svg
-    class="committed"
-    viewBox={`0 0 ${pageWidthPt} ${pageHeightPt}`}
-    width={pageWidthPt}
-    height={pageHeightPt}
-    aria-hidden="true"
-  >
-    {#each committedPaths as painted (painted.key)}
-      <path d={painted.d} fill={painted.color} fill-opacity={painted.opacity} fill-rule="nonzero" />
-    {/each}
-  </svg>
   <canvas bind:this={immediateCanvas} aria-hidden="true"></canvas>
+  {#if selectedBounds}
+    <svg
+      class="selection-overlay"
+      viewBox={`0 0 ${pageWidthPt} ${pageHeightPt}`}
+      width={pageWidthPt}
+      height={pageHeightPt}
+      aria-hidden="true"
+    >
+      <rect
+        x={selectedBounds.left}
+        y={selectedBounds.top}
+        width={selectedBounds.right - selectedBounds.left}
+        height={selectedBounds.bottom - selectedBounds.top}
+        fill="none"
+        stroke-width={1.5 / zoom}
+        stroke-dasharray={`${4 / zoom} ${3 / zoom}`}
+      />
+      <circle
+        cx={selectedBounds.right}
+        cy={selectedBounds.bottom}
+        r={6 / zoom}
+        stroke-width={1.5 / zoom}
+      />
+    </svg>
+  {/if}
+  {#if eraserCursor}
+    <svg
+      class="eraser-cursor"
+      class:pressed={eraserPressed}
+      viewBox={`0 0 ${pageWidthPt} ${pageHeightPt}`}
+      width={pageWidthPt}
+      height={pageHeightPt}
+      aria-hidden="true"
+    >
+      <circle
+        class="eraser-cursor-halo"
+        cx={eraserCursor.x}
+        cy={eraserCursor.y}
+        r={eraserRadiusOnPage}
+        stroke-width={3.5 / zoom}
+      />
+      <circle
+        class="eraser-cursor-ring"
+        cx={eraserCursor.x}
+        cy={eraserCursor.y}
+        r={eraserRadiusOnPage}
+        stroke-width={1.5 / zoom}
+      />
+    </svg>
+  {/if}
 </div>
 
 <p class="status" aria-live="polite">{status}</p>
 
 <style>
   .ink-surface {
-    position: relative;
+    position: absolute;
+    inset: 0;
+    z-index: 2147483646;
     overflow: hidden;
     background: transparent;
     outline: 0;
@@ -597,8 +659,13 @@
     outline-offset: 2px;
   }
 
+  .ink-surface.eraser-active {
+    cursor: none;
+  }
+
   canvas,
-  .committed {
+  .selection-overlay,
+  .eraser-cursor {
     position: absolute;
     inset: 0;
     display: block;
@@ -606,7 +673,39 @@
 
   /* Ink is painted here; input is handled by the surface itself, which sits above it. */
   .committed {
+    position: absolute;
+    inset: 0;
+    display: block;
     pointer-events: none;
+  }
+
+  .selection-overlay {
+    fill: var(--paper, #fcfcfa);
+    stroke: var(--blueprint, #4c8df0);
+    pointer-events: none;
+  }
+
+  .eraser-cursor {
+    pointer-events: none;
+  }
+
+  .eraser-cursor-halo {
+    fill: rgb(125 135 149 / 8%);
+    stroke: rgb(255 255 255 / 80%);
+  }
+
+  .eraser-cursor-ring {
+    fill: none;
+    stroke: #7d8795;
+  }
+
+  .eraser-cursor.pressed .eraser-cursor-halo {
+    fill: rgb(76 141 240 / 12%);
+    stroke: rgb(255 255 255 / 90%);
+  }
+
+  .eraser-cursor.pressed .eraser-cursor-ring {
+    stroke: #206acb;
   }
 
   .status {

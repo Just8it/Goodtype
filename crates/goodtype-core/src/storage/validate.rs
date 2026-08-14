@@ -154,6 +154,15 @@ fn validate_page_content(snapshot: &NotebookSnapshot) -> Result<(), StorageError
         }
         object.validate_dimensions().map_err(invalid_error)?;
     }
+    if page
+        .objects
+        .iter()
+        .filter(|object| matches!(object, PageObject::PageTypst { .. }))
+        .count()
+        > 1
+    {
+        return invalid("a page may contain only one page Typst surface");
+    }
 
     let top_level = page
         .objects
@@ -495,6 +504,32 @@ mod tests {
         bad_ink.ink_layers[0].strokes[0].points[0].pressure = 1.5;
         assert!(matches!(
             save_notebook(&notebook_root, &bad_ink),
+            Err(StorageError::InvalidNotebook(_))
+        ));
+    }
+
+    #[test]
+    fn accepts_one_fixed_page_typst_surface_and_rejects_two() {
+        let mut snapshot = snapshot();
+        let mut page_fields = fields("page-text-1", 2);
+        page_fields.x = 0.0;
+        page_fields.y = 0.0;
+        snapshot.page.objects.push(PageObject::PageTypst {
+            fields: page_fields.clone(),
+            source_path: "blocks/page.typ".into(),
+        });
+        snapshot.page.reading_order.push("page-text-1".into());
+        assert!(super::validate_page_content(&snapshot).is_ok());
+
+        page_fields.id = "page-text-2".into();
+        page_fields.reading_order = 3;
+        snapshot.page.objects.push(PageObject::PageTypst {
+            fields: page_fields,
+            source_path: "blocks/page-2.typ".into(),
+        });
+        snapshot.page.reading_order.push("page-text-2".into());
+        assert!(matches!(
+            super::validate_page_content(&snapshot),
             Err(StorageError::InvalidNotebook(_))
         ));
     }

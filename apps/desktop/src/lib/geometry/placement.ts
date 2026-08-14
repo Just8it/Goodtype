@@ -8,6 +8,14 @@
 export const MIN_VISIBLE_PT = 24;
 
 export type PageBox = { widthPt: number; heightPt: number };
+export type ViewRect = {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+  width: number;
+  height: number;
+};
 
 /**
  * Clamp a top-left position so at least `MIN_VISIBLE_PT` of the object stays over the page on
@@ -37,4 +45,33 @@ function clampAxis(value: number, extent: number, pageExtent: number, minimum: n
   // object's leading edge on the sheet rather than snapping it somewhere arbitrary.
   if (highest < lowest) return lowest;
   return Math.min(Math.max(value, lowest), highest);
+}
+
+/**
+ * Place a floating control above its selected object, or below when the top edge is too close.
+ * Coordinates are relative to `boundary`, ready for an absolutely positioned child.
+ */
+export function placeFloatingToolbar(
+  anchor: ViewRect,
+  toolbar: Pick<ViewRect, "width" | "height">,
+  boundary: ViewRect,
+  gap = 10,
+  margin = 12,
+): { left: number; top: number; side: "above" | "below" } {
+  const above = anchor.top - toolbar.height - gap;
+  const side = above >= boundary.top + margin ? "above" : "below";
+  const wantedTop = side === "above" ? above : anchor.bottom + gap;
+  const left = Math.min(
+    Math.max(anchor.left + (anchor.width - toolbar.width) / 2, boundary.left + margin),
+    boundary.right - toolbar.width - margin,
+  );
+  const top = Math.min(
+    Math.max(wantedTop, boundary.top + margin),
+    boundary.bottom - toolbar.height - margin,
+  );
+  return {
+    left: left - boundary.left,
+    top: top - boundary.top,
+    side,
+  };
 }

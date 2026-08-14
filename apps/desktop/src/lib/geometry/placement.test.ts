@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { MIN_VISIBLE_PT, keepOnPage } from "./placement";
+import { MIN_VISIBLE_PT, keepOnPage, placeFloatingToolbar, type ViewRect } from "./placement";
 
 const page = { widthPt: 595, heightPt: 842 };
 const block = { widthPt: 240, heightPt: 100 };
@@ -50,5 +50,35 @@ describe("keepOnPage", () => {
 
   it("treats a broken coordinate as the origin rather than propagating it", () => {
     expect(keepOnPage({ x: Number.NaN, y: 40 }, block, page)).toEqual({ x: 0, y: 40 });
+  });
+});
+
+describe("placeFloatingToolbar", () => {
+  const boundary: ViewRect = {
+    left: 100,
+    top: 50,
+    right: 900,
+    bottom: 650,
+    width: 800,
+    height: 600,
+  };
+  const toolbar = { width: 132, height: 44 };
+
+  it("prefers above, falls below near the top, and stays inside the sides", () => {
+    expect(
+      placeFloatingToolbar(
+        { left: 400, top: 300, right: 600, bottom: 400, width: 200, height: 100 },
+        toolbar,
+        boundary,
+      ),
+    ).toEqual({ left: 334, top: 196, side: "above" });
+
+    expect(
+      placeFloatingToolbar(
+        { left: 105, top: 60, right: 205, bottom: 140, width: 100, height: 80 },
+        toolbar,
+        boundary,
+      ),
+    ).toEqual({ left: 12, top: 100, side: "below" });
   });
 });

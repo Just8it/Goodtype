@@ -1,5 +1,8 @@
 <script lang="ts">
   import TypstEditor from "../editor/TypstEditor.svelte";
+  import WritingBar from "../editor/WritingBar.svelte";
+  import type { WritingCommand } from "../editor/writingCommands";
+  import type { PresetSummary } from "../page/presets";
 
   // Full-height source view beside the canvas. It exists because the in-canvas editor is capped
   // at ten lines: short edits happen on the page, sustained writing happens here, and the canvas
@@ -17,12 +20,17 @@
     dock = "left",
     width = 420,
     diagnostics = [],
+    pageText = false,
+    presets = [],
+    presetBusy = false,
     onChange,
     onClose,
     onDockChange,
     onWidthChange,
     onGoToBlock,
+    onCreatePageText,
     onCreateBlock,
+    onPresetAction,
   }: {
     /** `edit` — the target is on this page; `away` — it is on another page; `none` — no target. */
     mode?: "edit" | "style" | "away" | "none";
@@ -34,12 +42,17 @@
     dock?: "left" | "right";
     width?: number;
     diagnostics?: { severity: string; message: string }[];
+    pageText?: boolean;
+    presets?: PresetSummary[];
+    presetBusy?: boolean;
     onChange: (value: string) => void;
     onClose: () => void;
     onDockChange: (dock: "left" | "right") => void;
     onWidthChange: (width: number) => void;
     onGoToBlock?: () => void;
+    onCreatePageText?: () => void;
     onCreateBlock?: () => void;
+    onPresetAction?: (action: string) => void;
   } = $props();
 
   const MIN_WIDTH = 280;
@@ -54,6 +67,7 @@
     focus: () => void;
     showHelp: () => Promise<void>;
     formatDocument: () => Promise<void>;
+    applyWritingCommand: (command: WritingCommand) => void;
   }>();
   /// Reported to assistive tech; the real ceiling is half the window (see `clampWidth`).
   let maxWidth = $state(MIN_WIDTH);
@@ -141,6 +155,16 @@
     </button>
   </header>
 
+  {#if mode === "edit" && pageText}
+    <WritingBar
+      {source}
+      {presets}
+      busy={presetBusy}
+      onCommand={(command) => editor?.applyWritingCommand(command)}
+      onPresetAction={(action) => onPresetAction?.(action)}
+    />
+  {/if}
+
   {#if mode === "edit" || mode === "style"}
     <div class="body">
       <TypstEditor
@@ -174,16 +198,19 @@
     </div>
   {:else}
     <div class="notice">
-      <p>No Typst block selected.</p>
+      <p>What would you like to write?</p>
       {#if hasAnyBlock}
         <button type="button" class="action" onclick={() => onGoToBlock?.()}>
           Go to the first block
         </button>
       {/if}
+      <button type="button" class="action" onclick={() => onCreatePageText?.()}>
+        Write Page text
+      </button>
       <button type="button" class="action" onclick={() => onCreateBlock?.()}>
         Add a Typst block
       </button>
-      <p class="quiet">Double-clicking a block on the page opens it here.</p>
+      <p class="quiet">Page text fills the writing area; Typst blocks stay movable.</p>
     </div>
   {/if}
 

@@ -3,7 +3,9 @@
 mod export;
 mod library;
 mod notebook;
+mod preset;
 mod settings;
+mod tinymist;
 mod typst;
 mod workspace;
 
@@ -15,6 +17,7 @@ fn main() {
         .manage(notebook::NotebookHistories::default())
         .manage(workspace::AllowedRoots::default())
         .manage(settings::RemotePackages::default())
+        .manage(tinymist::Tinymist::default())
         .setup(|app| {
             let handle = app.handle().clone();
             let policy = app.state::<settings::RemotePackages>();
@@ -40,8 +43,10 @@ fn main() {
             workspace::pick_notebook_root,
             workspace::open_recent_root,
             workspace::resume_notebook_root,
+            workspace::resume_notebook_session,
             workspace::record_notebook_opened,
             workspace::record_notebook_page,
+            workspace::record_notebook_session,
             workspace::close_notebook_session,
             workspace::write_phase0_metrics,
             settings::load_app_settings,
@@ -70,10 +75,16 @@ fn main() {
             notebook::restore_recovery_candidate,
             notebook::discard_recovery_candidate,
             notebook::store_pasted_image,
+            preset::list_typst_presets,
+            preset::pick_typst_preset,
+            preset::validate_typst_preset,
+            preset::set_default_typst_preset,
+            preset::install_page_typst_preset,
             typst::compile_typst,
             typst::complete_typst,
             typst::hover_typst,
             typst::format_typst,
+            typst::analyze_typst,
             export::export_notebook_pdf,
         ])
         .run(tauri::generate_context!())

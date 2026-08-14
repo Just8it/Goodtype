@@ -120,6 +120,10 @@ export type AppSettings = {
   /** Width of that view in CSS pixels. */
   sideEditorWidth: number;
   reducedMotion: boolean;
+  /** Multiplier applied to one-finger pan velocity after release. */
+  touchGlide: number;
+  /** Keep Page text headings and display equations on whole paper rows. */
+  pageTextBaselineGrid: boolean;
   /** Allow downloading Typst Universe packages on a cache miss. */
   remotePackages: boolean;
 };
@@ -146,6 +150,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   sideEditorDock: "left",
   sideEditorWidth: 420,
   reducedMotion: false,
+  touchGlide: 2,
+  pageTextBaselineGrid: true,
   remotePackages: true,
 };
 

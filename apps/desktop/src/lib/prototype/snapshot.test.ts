@@ -126,6 +126,7 @@ describe("projectSnapshot", () => {
           readingOrder: 0,
         },
       ],
+      pageTypst: null,
       images: [
         {
           id: "image-a",

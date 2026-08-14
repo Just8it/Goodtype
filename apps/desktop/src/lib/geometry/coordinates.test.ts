@@ -1,11 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
+  boundedRasterScale,
   clampToPage,
   clampZoom,
   containToPage,
+  dampedVelocity,
   MAX_ZOOM,
   MIN_ZOOM,
   pageToScreen,
+  pannedScroll,
   screenToPage,
   type PageViewport,
   type ScreenViewport,
@@ -26,6 +29,25 @@ describe("coordinate authority", () => {
       y: 792,
     });
     expect(clampZoom(1.5 * (200 / 100))).toBe(3);
+  });
+
+  it("moves viewport scroll opposite a one-finger drag", () => {
+    expect(pannedScroll({ x: 80, y: 300 }, { x: 100, y: 200 }, { x: 70, y: 260 })).toEqual({
+      x: 110,
+      y: 240,
+    });
+  });
+
+  it("damps touch-scroll velocity consistently across frame lengths", () => {
+    const velocity = dampedVelocity({ x: 1, y: -2 }, 1000 / 30, 0.8);
+    expect(velocity.x).toBeCloseTo(0.64);
+    expect(velocity.y).toBeCloseTo(-1.28);
+  });
+
+  it("bounds page-sized raster memory without reducing normal pages", () => {
+    expect(boundedRasterScale({ width: 595, height: 842 }, 2, 6_000_000)).toBe(2);
+    const a2Scale = boundedRasterScale({ width: 1191, height: 1684 }, 2, 6_000_000);
+    expect(1191 * 1684 * a2Scale ** 2).toBeCloseTo(6_000_000);
   });
 
   // Pen samples must not be pinned to the edge: a hand running off the sheet mid-stroke would

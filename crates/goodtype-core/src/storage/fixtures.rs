@@ -103,6 +103,7 @@ pub(super) fn snapshot() -> NotebookSnapshot {
             page_id: "page-001".into(),
             strokes: vec![Stroke {
                 id: "stroke-001".into(),
+                z_index: crate::DEFAULT_INK_Z_INDEX,
                 tool: StrokeTool::Pen,
                 color: "#111111".into(),
                 width_pt: 2.0,
@@ -141,6 +142,7 @@ pub(super) fn handwriting_layer(strokes: usize, points_per_stroke: usize) -> Ink
         strokes: (0..strokes)
             .map(|stroke| Stroke {
                 id: format!("stroke-{stroke:06}"),
+                z_index: crate::DEFAULT_INK_Z_INDEX,
                 tool: StrokeTool::Pen,
                 color: "#101418".into(),
                 width_pt: 1.6,

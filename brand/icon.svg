@@ -10,11 +10,9 @@
   look like a PC rather than a notebook. It is back by decision: it is what the page stands on,
   it gives the silhouette a foot to sit on, and without it the page floats.
 
-  The tile is solid teal because an app icon has to carry its own silhouette. It used to be the
-  app's own charcoal, which is within a couple of percent of the Windows taskbar, so the icon had
-  no edge: what you saw was a stroke floating in the dark with no tile around it. The colour rule
-  governs the mark's parts, not the ground they sit on — the hand is still the only teal thing on
-  the page, and the page and its set lines are still paper.
+  The tile uses the app's charcoal and the established dark-background palette from
+  `mark-dark.svg`. This keeps the taskbar icon calm while the light page and teal handwritten
+  stroke stay legible.
 
   Clear space on all sides equals the page's corner radius: the artwork is 112 units wide, the
   radius is 7, so 112 + 2×7 = 126 units span the 1024px tile — hence the scale below.
@@ -23,13 +21,14 @@
   never the bitmaps.
 -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" fill="none" role="img" aria-label="Goodtype">
-  <rect width="1024" height="1024" rx="225.0" fill="#1497A6"/>
+  <rect width="1024" height="1024" rx="225.0" fill="#1B1E24"/>
+  <rect x="8" y="8" width="1008" height="1008" rx="217.0" stroke="#2B2F37" stroke-width="16"/>
   <g transform="translate(24.38 199.12) scale(8.127)">
-    <rect x="14" y="4" width="92" height="58" rx="7" stroke="#FCFCFA" stroke-width="6"/>
-    <rect x="4" y="66" width="112" height="10" rx="5" fill="#FCFCFA"/>
+    <rect x="14" y="4" width="92" height="58" rx="7" stroke="#E9EBEE" stroke-width="6"/>
+    <rect x="4" y="66" width="112" height="10" rx="5" fill="#E9EBEE"/>
     <path d="M26 34 C 32 22, 38 22, 42 32 C 45 39, 49 39, 53 30 C 56 23, 61 23, 65 28 C 68 32, 72 32, 75 27"
-          stroke="#0C4A52" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round"/>
-    <rect x="26" y="44" width="52" height="5.5" rx="2.75" fill="#FCFCFA"/>
-    <rect x="26" y="52" width="38" height="5.5" rx="2.75" fill="#BFEAEF"/>
+          stroke="#38B6C6" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round"/>
+    <rect x="26" y="44" width="52" height="5.5" rx="2.75" fill="#E9EBEE"/>
+    <rect x="26" y="52" width="38" height="5.5" rx="2.75" fill="#8A929C"/>
   </g>
 </svg>
