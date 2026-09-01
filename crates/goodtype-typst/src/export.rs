@@ -1179,48 +1179,6 @@ mod tests {
     }
 
     #[test]
-    fn compiler_smoke_creates_pdf() {
-        let root = tempfile::tempdir().unwrap();
-        fs::create_dir(root.path().join("assets")).unwrap();
-        fs::write(
-            root.path().join("assets/diagram.svg"),
-            include_bytes!("../../../fixtures/pdf/phase0b/image.svg"),
-        )
-        .unwrap();
-        let mut page = page();
-        page.page_typst = Some("= Full-page notes\n\nSelectable prose".to_owned());
-        page.images.push(ExportImage {
-            relative_path: "assets/diagram.svg".to_owned(),
-            x: 360.0,
-            y: 96.0,
-            width_pt: 72.0,
-            height_pt: 72.0,
-            scale: 1.0,
-            rotation_degrees: 0.0,
-            z_index: 2,
-            order: 1,
-        });
-
-        let result = export_pages(
-            root.path(),
-            "phase0b.pdf",
-            std::slice::from_ref(&page),
-            false,
-        )
-        .unwrap();
-        let bytes = fs::read(&result.output_path).unwrap();
-        assert!(result.output_path.ends_with("exports/phase0b.pdf"));
-        assert!(bytes.starts_with(b"%PDF-"));
-        export_pages(
-            root.path(),
-            "phase0b.pdf",
-            std::slice::from_ref(&page),
-            false,
-        )
-        .unwrap();
-    }
-
-    #[test]
     fn compiler_embeds_a_pdf_page_beneath_goodtype_content() {
         let root = tempfile::tempdir().unwrap();
         let source_page = page();
@@ -1256,6 +1214,25 @@ mod tests {
     #[test]
     fn multi_page_export_keeps_order_and_geometry() {
         let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("assets")).unwrap();
+        fs::write(
+            root.path().join("assets/diagram.svg"),
+            include_bytes!("../../../fixtures/pdf/phase0b/image.svg"),
+        )
+        .unwrap();
+        let mut first = page();
+        first.page_typst = Some("= Full-page notes\n\nSelectable prose".to_owned());
+        first.images.push(ExportImage {
+            relative_path: "assets/diagram.svg".to_owned(),
+            x: 360.0,
+            y: 96.0,
+            width_pt: 72.0,
+            height_pt: 72.0,
+            scale: 1.0,
+            rotation_degrees: 0.0,
+            z_index: 2,
+            order: 1,
+        });
         let mut second = page();
         second.blocks[0].source = "= Second page marker".to_owned();
         // A distinct geometry on page 2 must survive into the PDF.
@@ -1278,7 +1255,7 @@ mod tests {
         // The combined document keeps manifest order, per-page geometry, explicit breaks, and
         // page-scoped block/ink file names. (PDF-level page-count evidence stays with the
         // count asserted at the source level rather than in the PDF, whose streams are compressed.)
-        let pages = [page(), second, third];
+        let pages = [first, second, third];
         let source = combined_typst_source(&pages);
         assert_eq!(source.matches("#pagebreak()").count(), 2);
         assert_eq!(source.matches("#set page(").count(), 3);
@@ -1290,7 +1267,9 @@ mod tests {
 
         let result = export_pages(root.path(), "notebook.pdf", &pages, false).unwrap();
         let bytes = fs::read(&result.output_path).unwrap();
+        assert!(result.output_path.ends_with("exports/notebook.pdf"));
         assert!(bytes.starts_with(b"%PDF-"));
+        export_pages(root.path(), "notebook.pdf", &pages, false).unwrap();
         assert!(matches!(
             export_pages(root.path(), "empty.pdf", &[], false),
             Err(ExportError::InvalidPage(_))

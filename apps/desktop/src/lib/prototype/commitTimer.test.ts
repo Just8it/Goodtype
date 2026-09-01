@@ -35,7 +35,7 @@ describe("createCommitTimer", () => {
     expect(run).toHaveBeenCalled();
   });
 
-  it("flush runs immediately, and only when armed", () => {
+  it("flushes an armed run immediately and cancel discards the next one", async () => {
     vi.useFakeTimers();
     const run = vi.fn();
     const timer = createCommitTimer(run, { debounceMs: 5000, maximumMs: 10000 });
@@ -48,17 +48,10 @@ describe("createCommitTimer", () => {
     timer.flush();
     expect(run).toHaveBeenCalledTimes(1);
     expect(timer.armed()).toBe(false);
-  });
-
-  it("cancel disarms without running", async () => {
-    vi.useFakeTimers();
-    const run = vi.fn();
-    const timer = createCommitTimer(run, { debounceMs: 100, maximumMs: 1000 });
-
     timer.arm();
     timer.cancel();
-    await vi.advanceTimersByTimeAsync(500);
-    expect(run).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(10000);
+    expect(run).toHaveBeenCalledTimes(1);
     expect(timer.armed()).toBe(false);
   });
 });
