@@ -21,6 +21,7 @@
     width = 420,
     diagnostics = [],
     pageText = false,
+    pageTextLineWrap = true,
     presets = [],
     presetBusy = false,
     onChange,
@@ -31,6 +32,7 @@
     onCreatePageText,
     onCreateBlock,
     onPresetAction,
+    onPageTextLineWrapChange,
   }: {
     /** `edit` — the target is on this page; `away` — it is on another page; `none` — no target. */
     mode?: "edit" | "style" | "away" | "none";
@@ -43,6 +45,7 @@
     width?: number;
     diagnostics?: { severity: string; message: string }[];
     pageText?: boolean;
+    pageTextLineWrap?: boolean;
     presets?: PresetSummary[];
     presetBusy?: boolean;
     onChange: (value: string) => void;
@@ -53,6 +56,7 @@
     onCreatePageText?: () => void;
     onCreateBlock?: () => void;
     onPresetAction?: (action: string) => void;
+    onPageTextLineWrapChange?: (lineWrap: boolean) => void;
   } = $props();
 
   const MIN_WIDTH = 280;
@@ -172,9 +176,13 @@
         value={source}
         {root}
         maxLines={null}
+        lineWrap={pageText && pageTextLineWrap}
         ariaLabel={mode === "style" ? "Shared notebook Typst style" : `Source for ${blockLabel}`}
         onChange={(next) => onChange(next)}
         onExit={onClose}
+        onLineWrapToggle={pageText && onPageTextLineWrapChange
+          ? () => onPageTextLineWrapChange?.(!pageTextLineWrap)
+          : undefined}
       />
     </div>
     {#if diagnostics.length}

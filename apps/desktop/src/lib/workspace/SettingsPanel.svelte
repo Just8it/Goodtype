@@ -103,6 +103,19 @@
       <label class="choice">
         <input
           type="checkbox"
+          checked={settings.pageTextLineWrap}
+          onchange={(event) =>
+            onChange({ ...settings, pageTextLineWrap: event.currentTarget.checked })}
+        />
+        <span
+          ><strong>Wrap long editor lines</strong><em
+            >Keeps prose visible without adding line breaks to the Typst source (Alt+Z)</em
+          ></span
+        >
+      </label>
+      <label class="choice">
+        <input
+          type="checkbox"
           checked={settings.pageTextBaselineGrid}
           onchange={(event) =>
             onChange({ ...settings, pageTextBaselineGrid: event.currentTarget.checked })}

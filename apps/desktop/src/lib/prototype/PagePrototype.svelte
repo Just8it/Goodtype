@@ -3646,6 +3646,7 @@
         width={settings.sideEditorWidth}
         diagnostics={sideEditorBlock?.result?.diagnostics ?? []}
         pageText={sideEditorPageText}
+        pageTextLineWrap={settings.pageTextLineWrap}
         {presets}
         {presetBusy}
         onChange={(next) =>
@@ -3668,6 +3669,8 @@
           });
         }}
         onPresetAction={(action) => void changePagePreset(action)}
+        onPageTextLineWrapChange={(pageTextLineWrap) =>
+          changeSettings({ ...settings, pageTextLineWrap })}
       />
     {/if}
     <section

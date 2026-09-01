@@ -45,6 +45,8 @@ pub struct AppSettings {
     pub touch_glide: f64,
     /// Keep Page text headings and display equations on whole paper rows.
     pub page_text_baseline_grid: bool,
+    /// Visually wrap long Page text source lines without changing the Typst source.
+    pub page_text_line_wrap: bool,
     /// Allow downloading Typst Universe packages on a cache miss. Cached packages
     /// keep working either way.
     pub remote_packages: bool,
@@ -134,6 +136,7 @@ impl Default for AppSettings {
             reduced_motion: false,
             touch_glide: 2.0,
             page_text_baseline_grid: true,
+            page_text_line_wrap: true,
             remote_packages: true,
         }
     }
@@ -568,10 +571,11 @@ mod tests {
     }
 
     #[test]
-    fn old_settings_enable_the_page_text_baseline_grid() {
+    fn old_settings_enable_the_page_text_defaults() {
         let settings: AppSettings =
             serde_json::from_str("{}").expect("legacy settings should load");
         assert!(settings.page_text_baseline_grid);
+        assert!(settings.page_text_line_wrap);
     }
 
     #[test]

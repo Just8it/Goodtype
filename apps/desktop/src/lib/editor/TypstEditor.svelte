@@ -2,7 +2,7 @@
   import { acceptCompletion, autocompletion } from "@codemirror/autocomplete";
   import { setDiagnostics, type Diagnostic } from "@codemirror/lint";
   import { keymap, tooltips } from "@codemirror/view";
-  import { Prec } from "@codemirror/state";
+  import { Compartment, Prec } from "@codemirror/state";
   import { basicSetup, EditorView } from "codemirror";
   import { onMount } from "svelte";
   import { createTypstCompletionSource, fromByteOffset, toByteOffset } from "./completion";
@@ -17,8 +17,10 @@
     root = null,
     ariaLabel = "Typst source",
     maxLines = 10,
+    lineWrap = false,
     onChange,
     onExit,
+    onLineWrapToggle,
   }: {
     value: string;
     /** Notebook root, needed to ask Rust for compiler-derived completions. */
@@ -26,8 +28,11 @@
     ariaLabel?: string;
     /** Height ceiling, in lines. `null` fills the available height (the side view). */
     maxLines?: number | null;
+    /** Soft-wrap long visual lines without changing the source document. */
+    lineWrap?: boolean;
     onChange: (value: string) => void;
     onExit: () => void;
+    onLineWrapToggle?: () => void;
   } = $props();
 
   let host: HTMLDivElement;
@@ -37,6 +42,7 @@
   let highlightGeneration = 0;
   let help = $state<TypstHover | null>(null);
   let helpStatus = $state("");
+  const lineWrapCompartment = new Compartment();
   const lineCount = $derived(value ? value.split("\n").length : 1);
   const hiddenLines = $derived(
     maxLines === null ? 0 : Math.max(0, lineCount - maxLines),
@@ -47,6 +53,7 @@
       doc: value,
       extensions: [
         basicSetup,
+        lineWrapCompartment.of(lineWrap ? EditorView.lineWrapping : []),
         typstPairLanguageData,
         typstHighlighting,
         // Compiler-derived completion alongside the multi-line STEM templates, which
@@ -75,6 +82,14 @@
             { key: "Mod-Alt-1", run: (target) => runWritingCommand(target, "heading-1") },
             { key: "Mod-Alt-2", run: (target) => runWritingCommand(target, "heading-2") },
             { key: "Mod-Alt-3", run: (target) => runWritingCommand(target, "heading-3") },
+            {
+              key: "Alt-z",
+              run: () => {
+                if (!onLineWrapToggle) return false;
+                onLineWrapToggle();
+                return true;
+              },
+            },
             {
               key: "F1",
               run: () => {
@@ -231,6 +246,13 @@
     if (!view) return;
     if (hasRoot) scheduleHighlight(view.state.doc.toString());
     else clearAnalysis();
+  });
+
+  $effect(() => {
+    if (!view) return;
+    view.dispatch({
+      effects: lineWrapCompartment.reconfigure(lineWrap ? EditorView.lineWrapping : []),
+    });
   });
 </script>
 

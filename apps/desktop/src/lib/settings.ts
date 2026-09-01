@@ -124,6 +124,8 @@ export type AppSettings = {
   touchGlide: number;
   /** Keep Page text headings and display equations on whole paper rows. */
   pageTextBaselineGrid: boolean;
+  /** Visually wrap long Page text source lines without inserting line breaks. */
+  pageTextLineWrap: boolean;
   /** Allow downloading Typst Universe packages on a cache miss. */
   remotePackages: boolean;
 };
@@ -152,6 +154,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   reducedMotion: false,
   touchGlide: 2,
   pageTextBaselineGrid: true,
+  pageTextLineWrap: true,
   remotePackages: true,
 };
 
