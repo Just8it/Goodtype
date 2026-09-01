@@ -1556,8 +1556,8 @@
           // Adding a page is not here: it has its own header button, because choosing where the
           // page goes and what it is made of needs more than one row.
           { kind: "action", id: "duplicate", label: "Duplicate Page", onSelect: duplicateActivePage },
-          { kind: "action", id: "up", label: "Move Page Up", disabled: !many || pageNumber === 1, onSelect: () => void moveActivePage(-1) },
-          { kind: "action", id: "down", label: "Move Page Down", disabled: !many || pageNumber === pageCount, onSelect: () => void moveActivePage(1) },
+          { kind: "action", id: "up", label: "Move Page Up", hint: "Ctrl Shift PgUp", disabled: !many || pageNumber === 1, onSelect: () => void moveActivePage(-1) },
+          { kind: "action", id: "down", label: "Move Page Down", hint: "Ctrl Shift PgDn", disabled: !many || pageNumber === pageCount, onSelect: () => void moveActivePage(1) },
           { kind: "number", id: "goto", label: "Go to Page", value: pageNumber, min: 1, max: pageCount, hint: `of ${pageCount}`, disabled: !many, onCommit: (number) => void goToPageNumber(number) },
         ],
       },
@@ -1589,7 +1589,7 @@
   async function moveActivePage(direction: -1 | 1) {
     moreOpen = false;
     const manifest = notebookManifest;
-    if (!tauriAvailable || !manifest || !(await persist())) return;
+    if (busy || !tauriAvailable || !manifest) return;
     const order = manifest.pages.map((page) => page.id);
     const index = order.indexOf(activePageId);
     const target = index + direction;
@@ -1597,6 +1597,7 @@
     [order[index], order[target]] = [order[target], order[index]];
     busy = true;
     try {
+      if (!(await persist())) return;
       const result = await reorderPages(
         root,
         order,
@@ -2340,7 +2341,12 @@
   function workspacePointerDown(event: PointerEvent) {
     stopTouchInertia();
     if (beginPan(event)) return;
-    if (event.target instanceof Element && event.target.closest(".selection-actions")) return;
+    // Fixed controls inside the scroll field own their touch. Without this exception the
+    // one-finger canvas pan captures the pointer before a reorder button can receive its click.
+    if (
+      event.target instanceof Element &&
+      event.target.closest(".selection-actions, .page-number button")
+    ) return;
     routeObjectPointer(event);
     if (event.pointerType !== "touch") return;
     touchPoints.set(event.pointerId, { x: event.clientX, y: event.clientY });
@@ -3145,6 +3151,15 @@
       searchOpen = true;
       return;
     }
+    if (
+      (event.ctrlKey || event.metaKey) &&
+      event.shiftKey &&
+      (event.key === "PageUp" || event.key === "PageDown")
+    ) {
+      event.preventDefault();
+      void moveActivePage(event.key === "PageUp" ? -1 : 1);
+      return;
+    }
     if (!event.ctrlKey && !event.metaKey && !event.altKey) {
       if (event.key === "Delete" || event.key === "Backspace") {
         if (deleteSelection()) event.preventDefault();
@@ -3686,14 +3701,14 @@
                 <button
                   type="button"
                   aria-label={`Move page ${index + 1} up`}
-                  title="Move page up"
+                  title="Move page up (Ctrl+Shift+Page Up)"
                   disabled={index === 0 || busy}
                   onclick={() => void moveActivePage(-1)}
                 >&uarr;</button>
                 <button
                   type="button"
                   aria-label={`Move page ${index + 1} down`}
-                  title="Move page down"
+                  title="Move page down (Ctrl+Shift+Page Down)"
                   disabled={index === pageCount - 1 || busy}
                   onclick={() => void moveActivePage(1)}
                 >&darr;</button>
@@ -4394,6 +4409,9 @@
     outline-offset: 1px;
   }
   .page-number button:disabled { opacity: 0.35; cursor: default; }
+  @media (pointer: coarse) {
+    .page-number button { width: 40px; height: 40px; touch-action: manipulation; }
+  }
   .page-frame { position: relative; flex: none; }
   .page {
     position: relative;

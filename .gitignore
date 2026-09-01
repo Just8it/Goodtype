@@ -15,3 +15,6 @@ node_modules/
 # Local scratch output.
 /scratch-*.html
 /apps/desktop/gate-results.txt
+
+# Machine-local assistant permissions; never part of the product configuration.
+/.claude/settings.local.json
