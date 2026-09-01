@@ -153,6 +153,7 @@
     ERASER_RADIUS_PT,
     MAX_SWATCHES,
     MAX_WIDTHS,
+    MM_PER_PT,
     colorName,
     penType,
     withRecentColor,
@@ -3407,9 +3408,16 @@
     return tool[0].toUpperCase() + tool.slice(1);
   }
 
+  /// Read from the live preset, never written by hand. These used to be three fixed strings, so
+  /// the strip kept claiming "0.35 mm · graphite" after the writer had changed both, and the
+  /// widths it named did not match the defaults either.
+  function nibDetail(preset: PenPreset) {
+    return `${(preset.widthPt * MM_PER_PT).toFixed(2)} mm · ${colorName(preset.color).toLowerCase()}`;
+  }
+
   function currentToolDetail() {
-    if (tool === "pen") return penPreset === 1 ? "0.35 mm · graphite" : "0.70 mm · blueprint";
-    if (tool === "highlighter") return "4.0 mm · amber";
+    if (tool === "pen") return nibDetail(settings.penPresets[penPreset - 1]);
+    if (tool === "highlighter") return nibDetail(settings.highlighter);
     if (tool === "eraser") return "whole strokes";
     if (tool === "lasso" || tool === "select") return `${selectedStrokeIds.length} selected`;
     return "";
@@ -3576,21 +3584,24 @@
         title="Open another notebook"
         disabled={busy}
         onclick={() => void showLibrary()}
-      >+</button>
+      >
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
+      </button>
     </div>
     <div class="command-actions">
       {#if pageOpen}
-        <button class="export-button" type="button" onclick={exportPdf} disabled={busy}>
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v11m0 0-4-4m4 4 4-4M5 17v2a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-2" /></svg>
-          Export PDF
+        <button class="icon-button" type="button" aria-label="Export PDF" title="Export PDF" onclick={exportPdf} disabled={busy}>
+          <!-- Arrow up and out of the tray: the page leaves Goodtype. Down read as "download",
+               which is the one thing this button never does. -->
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15V4m0 0-4 4m4-4 4 4M5 17v2a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-2" /></svg>
         </button>
       {:else}
-        <button class="export-button" type="button" onclick={reopen} disabled={busy}>Reopen notebook</button>
+        <button class="text-action" type="button" onclick={reopen} disabled={busy}>Reopen notebook</button>
       {/if}
       {#if pageOpen}
         <div class="add-page-anchor">
           <button class="icon-button" class:active={addPageOpen} type="button" aria-label="Add page" aria-expanded={addPageOpen} title="Add page" disabled={busy} onclick={() => (addPageOpen = !addPageOpen)}>
-            <svg class="stroke-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M13 3.5H7a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h6"></path><path d="M18 9.5v9"></path><path d="M13.5 14h9"></path></svg>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M13 3.5H7a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h6"></path><path d="M18 9.5v9"></path><path d="M13.5 14h9"></path></svg>
           </button>
           {#if addPageOpen}
             <AddPageMenu
@@ -3616,13 +3627,13 @@
         </div>
       {/if}
       <button class="icon-button" class:active={searchOpen} type="button" aria-label="Search typed content" title="Search (Ctrl+F)" onclick={() => (searchOpen = !searchOpen)}>
-        <svg class="stroke-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.6-3.6"></path></svg>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.6-3.6"></path></svg>
       </button>
       <button class="icon-button" class:active={sideEditorOpen} type="button" aria-label="Page text and Typst source view" aria-pressed={sideEditorOpen} title="Editor view (Ctrl+Shift+E)" onclick={toggleSideEditor}>
-        <svg class="stroke-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="4.5" width="17" height="15" rx="2"></rect><path d="M10 4.5v15"></path></svg>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="4.5" width="17" height="15" rx="2"></rect><path d="M10 4.5v15"></path></svg>
       </button>
       <button class="icon-button" class:active={moreOpen} type="button" aria-label="More notebook actions" aria-expanded={moreOpen} data-preserve-selection onclick={() => (moreOpen = !moreOpen)}>
-        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.7"></circle><circle cx="12" cy="12" r="1.7"></circle><circle cx="19" cy="12" r="1.7"></circle></svg>
+        <svg class="solid-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.7"></circle><circle cx="12" cy="12" r="1.7"></circle><circle cx="19" cy="12" r="1.7"></circle></svg>
       </button>
     </div>
   </header>
@@ -3648,7 +3659,7 @@
           : sideEditorBlockId
             ? `Typst block ${sideEditorBlockId}`
             : ""}
-        awayPageNumber={sideEditorPageNumber}
+        pageNumber={sideEditorPageNumber}
         hasAnyBlock={Boolean(pageTypst) || typstBlocks.length > 0}
         {root}
         dock={settings.sideEditorDock}
@@ -4102,11 +4113,6 @@
         />
       {/if}
 
-      <div class="zoom-pill">
-        <button type="button" aria-label="Zoom out" onclick={() => changeZoom(zoom / ZOOM_STEP)}>−</button>
-        <output aria-label="Page zoom">{Math.round(zoom * 100)}%</output>
-        <button type="button" aria-label="Zoom in" onclick={() => changeZoom(zoom * ZOOM_STEP)}>+</button>
-      </div>
       </div>
     </section>
     </div>
@@ -4141,7 +4147,13 @@
     {/if}
     <div class:failure={transactionFailed} class="operation-status" title={status}>{status}</div>
     <span class="page-count">Page {activePageNumber()} of {notebookManifest?.pages.length ?? 1}</span><span class="footer-divider"></span>
-    <button type="button" onclick={() => changeZoom(1)}>{Math.round(zoom * 100)}%</button>
+    <!-- Zoom reads and is changed in one place. It used to be a floating pill over the canvas
+         *and* a number down here, so neither looked like the answer. -->
+    <span class="zoom-group">
+      <button type="button" aria-label="Zoom out" onclick={() => changeZoom(zoom / ZOOM_STEP)}>−</button>
+      <button type="button" class="zoom-value" aria-label="Reset zoom to 100%" title="Reset zoom" onclick={() => changeZoom(1)}>{Math.round(zoom * 100)}%</button>
+      <button type="button" aria-label="Zoom in" onclick={() => changeZoom(zoom * ZOOM_STEP)}>+</button>
+    </span>
     <span class="footer-divider"></span><span class:failure={transactionFailed} class="local-state">{transactionFailed ? "Needs attention" : savePending ? "Local · saving" : "Local · saved"}</span>
   </footer>
 
@@ -4223,6 +4235,40 @@
     --blueprint-light: #7fb0f7;
     --amber: #e0912b;
     --oxide: #e5645e;
+
+    /* Two control sizes, and only two. `chrome` is the window's own furniture — the command
+       strip, the instrument palette, undo/redo. `dense` is anything sitting inside a working
+       surface, where a row of tools has to stay out of the way of the work. A control that is
+       neither is a control that has not been thought about; there is no third size to reach for. */
+    --control: 36px;
+    --control-dense: 28px;
+
+    /* Icon box and its stroke travel together: apparent stroke weight is `stroke × size / 24`,
+       so a smaller icon needs a heavier number to look the same weight. Pairing them here is
+       what stops 16px icons reading as faint next to 20px ones. */
+    --icon: 20px;
+    --icon-dense: 16px;
+    --stroke: 1.7;
+    --stroke-dense: 2;
+
+    /* Controls take the small radius, the things that contain them take the large one. */
+    --radius: 6px;
+    --radius-lg: 10px;
+    --radius-pill: 999px;
+
+    /* Three edges. `wash` is a hover fill, `edge` outlines a container, `edge-soft` divides two
+       regions of one container. Controls get no border at all — a bordered button inside a
+       bordered panel is the box-in-a-box that reads as clutter. */
+    --wash: rgb(255 255 255 / 8%);
+    --edge: rgb(255 255 255 / 12%);
+    --edge-soft: rgb(255 255 255 / 7%);
+
+    /* Four sizes: counters and eyebrows, secondary text, everything you click, titles. */
+    --text-xs: 10px;
+    --text-sm: 11px;
+    --text-md: 13px;
+    --text-lg: 15px;
+
     /* One UI font across the whole chrome (the header face). Monospace lives only in the
        Typst code editor. */
     --font-ui: Bahnschrift, "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
@@ -4264,79 +4310,90 @@
     align-items: center;
   }
 
-  .notebook-identity { flex: 1; min-width: 0; gap: 8px; }
+  /* The gap matches the one between tabs, so the trailing "+" reads as the next seat in the row
+     rather than a separate control that happens to sit nearby. */
+  .notebook-identity { flex: 1; min-width: 0; gap: 4px; }
+  .notebook-identity .home-button { margin-right: 6px; }
 
   /* Sized like the strip's other icon controls so the row reads as one set, and it replaces the
      decorative square that used to sit here — the corner was already the eye's first stop. */
   .home-button {
     display: grid;
-    width: 40px;
-    height: 40px;
+    width: var(--control);
+    height: var(--control);
     flex: none;
     padding: 0;
-    border: 1px solid rgb(255 255 255 / 18%);
-    border-radius: 7px;
+    border: 0;
+    border-radius: var(--radius);
     background: transparent;
     color: var(--text);
     cursor: pointer;
     place-items: center;
   }
 
-  .home-button:hover:not(:disabled) { background: rgb(255 255 255 / 8%); }
-  .home-button svg {
-    width: 20px;
-    height: 20px;
-    fill: none;
-    stroke: currentColor;
-    stroke-width: 1.6;
-    stroke-linecap: round;
-    stroke-linejoin: round;
-  }
+  .home-button:hover:not(:disabled) { background: var(--wash); }
   .new-tab-button {
-    width: 40px;
-    height: 40px;
+    display: grid;
+    width: var(--control);
+    height: var(--control);
     flex: none;
-    border: 1px solid rgb(255 255 255 / 18%);
-    border-radius: 7px;
+    padding: 0;
+    border: 0;
+    border-radius: var(--radius);
     background: transparent;
     color: var(--muted);
     cursor: pointer;
-    font-size: 21px;
+    place-items: center;
   }
-  .new-tab-button:hover:not(:disabled) { background: rgb(255 255 255 / 8%); color: var(--text); }
+  .new-tab-button:hover:not(:disabled) { background: var(--wash); color: var(--text); }
 
   .blue-dot { width: 6px; height: 6px; flex: none; border-radius: 50%; background: var(--blueprint); }
-  .page-count, .zoom-pill output {
+  .page-count {
     color: var(--quiet);
-    font-size: 10px;
+    font-size: var(--text-xs);
     font-variant-numeric: tabular-nums;
     letter-spacing: .02em;
   }
 
-  .command-actions { flex: none; gap: 8px; }
-  .export-button, .icon-button {
-    height: 40px;
-    border: 1px solid rgb(255 255 255 / 18%);
-    border-radius: 7px;
+  .command-actions { flex: none; gap: 4px; }
+
+  /* Only shown when no notebook is open, so it never sits in the icon row and can stay worded. */
+  .text-action {
+    height: var(--control);
+    padding: 0 12px;
+    border: 1px solid var(--edge);
+    border-radius: var(--radius);
     background: transparent;
     color: var(--text);
+    font-size: var(--text-md);
+    font-weight: 600;
     cursor: pointer;
   }
 
-  .export-button {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 0 14px;
-    font-size: 13px;
-    font-weight: 600;
+  .icon-button {
+    display: grid;
+    width: var(--control);
+    height: var(--control);
+    border: 0;
+    border-radius: var(--radius);
+    background: transparent;
+    color: var(--text);
+    cursor: pointer;
+    place-items: center;
   }
 
-  .export-button svg { width: 16px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
-  .icon-button { display: grid; width: 40px; place-items: center; }
-  .icon-button svg { width: 20px; fill: currentColor; }
-  .icon-button svg.stroke-icon { fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
-  .export-button:hover, .icon-button:hover, .icon-button.active { background: rgb(255 255 255 / 8%); }
+  .command-strip svg { width: var(--icon); height: var(--icon); }
+  /* Filled glyphs — the overflow dots, the pen nib — are shapes, not line drawings; everything
+     else is a stroke at the one weight. */
+  .command-strip svg:not(.solid-icon) {
+    fill: none;
+    stroke: currentColor;
+    stroke-width: var(--stroke);
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+  .command-strip svg.solid-icon { fill: currentColor; }
+  .text-action:hover, .icon-button:hover, .icon-button.active { background: var(--wash); }
   .icon-button:disabled { opacity: 0.45; cursor: default; }
 
   /* The add-page popout hangs off its own button rather than the strip's right edge, so the
@@ -4400,7 +4457,7 @@
     align-items: center;
     gap: 4px;
     color: var(--quiet);
-    font-size: 10px;
+    font-size: var(--text-xs);
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
   }
@@ -4408,7 +4465,7 @@
     width: 26px;
     height: 26px;
     border: 1px solid rgb(255 255 255 / 10%);
-    border-radius: 6px;
+    border-radius: var(--radius);
     background: var(--panel);
     color: var(--muted);
     cursor: pointer;
@@ -4432,7 +4489,7 @@
     box-shadow: 0 2px 6px rgb(0 0 0 / 30%), 0 24px 60px rgb(0 0 0 / 45%);
     transform-origin: top left;
   }
-  .page-loading { display: grid; height: 100%; color: #8d949d; font-size: 12px; place-items: center; }
+  .page-loading { display: grid; height: 100%; color: #8d949d; font-size: var(--text-md); place-items: center; }
 
   /* The object and ink layer rules now live with the renderer, in PageSurface.svelte. */
 
@@ -4451,31 +4508,56 @@
   }
   .workspace-chrome > * { pointer-events: auto; }
 
-  .history-pill, .zoom-pill {
+  .history-pill {
+    position: relative;
+    z-index: 15;
     display: flex;
     align-items: center;
-    border: 1px solid rgb(255 255 255 / 10%);
+    padding: 4px;
+    border: 1px solid var(--edge);
+    border-radius: var(--radius-lg);
     background: var(--panel);
     box-shadow: 0 12px 30px rgb(0 0 0 / 45%);
+    gap: 2px;
+    grid-area: 1 / 1;
+    justify-self: start;
+    align-self: start;
   }
-
-  .history-pill, .zoom-pill { position: relative; z-index: 15; }
-  .history-pill { grid-area: 1 / 1; justify-self: start; align-self: start; gap: 2px; padding: 5px; border-radius: 10px; }
-  .history-pill button, .zoom-pill button { display: grid; border-radius: 7px; background: transparent; color: var(--text); cursor: pointer; place-items: center; }
-  .history-pill button { width: 40px; height: 40px; }
-  .history-pill button:hover:not(:disabled), .zoom-pill button:hover { background: rgb(255 255 255 / 8%); }
-  .history-pill svg { width: 19px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+  .history-pill button {
+    display: grid;
+    width: var(--control);
+    height: var(--control);
+    border-radius: var(--radius);
+    background: transparent;
+    color: var(--text);
+    cursor: pointer;
+    place-items: center;
+  }
+  .history-pill button:hover:not(:disabled) { background: var(--wash); }
+  .history-pill svg {
+    width: var(--icon);
+    height: var(--icon);
+    fill: none;
+    stroke: currentColor;
+    stroke-width: var(--stroke);
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
 
   .instrument-palette {
     position: relative;
     z-index: 20;
     display: grid;
-    grid-template-columns: 46px;
+    /* One control wide plus its breathing room. Stated once and reused by the columns inside:
+       when the grid track and the column boxes disagree, the tiles centre on the wider box and
+       drift off the panel's own centre line. */
+    --rail: calc(var(--control) + 6px);
+    grid-template-columns: var(--rail);
     grid-template-rows: auto 1fr;
     gap: 3px 0;
     padding: 6px;
-    border: 1px solid rgb(255 255 255 / 12%);
-    border-radius: 13px;
+    border: 1px solid var(--edge);
+    border-radius: var(--radius-lg);
     background: var(--panel);
     box-shadow: 0 20px 50px rgb(0 0 0 / 52%);
     touch-action: none;
@@ -4512,20 +4594,20 @@
   .palette-primary {
     grid-column: 1;
     grid-row: 2;
-    width: 46px;
+    width: var(--rail);
   }
 
   .palette-context {
     grid-column: 2;
     grid-row: 2;
-    width: 46px;
-    border-left: 1px solid rgb(255 255 255 / 12%);
+    width: var(--rail);
+    border-left: 1px solid var(--edge);
   }
 
   .instrument-palette.expanded.inward-right .palette-primary { grid-column: 2; }
   .instrument-palette.expanded.inward-right .palette-context {
     grid-column: 1;
-    border-right: 1px solid rgb(255 255 255 / 12%);
+    border-right: 1px solid var(--edge);
     border-left: 0;
   }
 
@@ -4550,7 +4632,7 @@
   .horizontal .palette-context {
     grid-column: 2;
     grid-row: 2;
-    border-top: 1px solid rgb(255 255 255 / 12%);
+    border-top: 1px solid var(--edge);
     border-left: 0;
   }
 
@@ -4558,7 +4640,7 @@
   .horizontal.expanded.inward-bottom .palette-context {
     grid-row: 1;
     border-top: 0;
-    border-bottom: 1px solid rgb(255 255 255 / 12%);
+    border-bottom: 1px solid var(--edge);
   }
 
   .instrument-palette.dragging { position: absolute; box-shadow: 0 26px 60px rgb(0 0 0 / 68%); }
@@ -4578,7 +4660,7 @@
   .dragging .palette-grip { cursor: grabbing; }
   .palette-grip i { width: 3.5px; height: 3.5px; border-radius: 50%; background: rgb(255 255 255 / 28%); }
 
-  .palette-divider { width: 26px; height: 1px; margin: 1px 0; background: rgb(255 255 255 / 12%); }
+  .palette-divider { width: 26px; height: 1px; margin: 1px 0; background: var(--edge); }
   .horizontal .palette-divider { width: 1px; height: 26px; margin: 0 3px; }
 
   /* Inline stroke sizes and colors carried on the palette bar (contextual to the active tool). */
@@ -4592,19 +4674,19 @@
     /* Buttons carry a UA border and padding; without resetting them the tile box is not the
        34px it claims to be, so the rings inside sit off-centre from one another. */
     box-sizing: border-box;
-    width: 34px;
-    height: 34px;
+    width: var(--control-dense);
+    height: var(--control-dense);
     flex: none;
     padding: 0;
     border: 0;
     place-items: center;
-    border-radius: 9px;
+    border-radius: var(--radius);
     background: transparent;
     color: var(--text);
     cursor: pointer;
   }
 
-  .size-tile:hover { background: rgb(255 255 255 / 6%); }
+  .size-tile:hover { background: var(--wash); }
   .size-tile.active { outline: 1.5px solid var(--blueprint); background: rgb(76 141 240 / 16%); }
   .size-line { width: 20px; border-radius: 3px; }
   /* No outline: the row's own rhythm already says where the slot is, and a box drawn around an
@@ -4619,16 +4701,17 @@
   }
   .eraser-size.active .eraser-ring { color: var(--text); }
   .advanced-tool-settings svg {
-    width: 19px;
+    width: var(--icon-dense);
+    height: var(--icon-dense);
     fill: none;
     stroke: currentColor;
-    stroke-width: 1.6;
+    stroke-width: var(--stroke-dense);
     stroke-linecap: round;
     stroke-linejoin: round;
   }
-  .advanced-tool-settings[aria-expanded="true"] { background: rgb(255 255 255 / 8%); }
+  .advanced-tool-settings[aria-expanded="true"] { background: var(--wash); }
 
-  .horizontal .palette-context .size-tile { width: 28px; height: 28px; border-radius: 7px; }
+  .horizontal .palette-context .size-tile { width: var(--control-dense); height: var(--control-dense); }
   .horizontal .palette-context .color-dot { width: 20px; height: 20px; }
   .horizontal .palette-context .palette-divider { height: 20px; }
 
@@ -4669,7 +4752,7 @@
     border-color: rgb(255 255 255 / 30%);
     background: transparent;
     color: var(--quiet);
-    font-size: 15px;
+    font-size: var(--text-lg);
     line-height: 1;
   }
 
@@ -4695,15 +4778,14 @@
   .instrument-palette.dock-left .palette-panel-anchor { left: calc(100% + 10px); }
   .instrument-palette.dock-right .palette-panel-anchor { right: calc(100% + 10px); }
 
-  .zoom-pill { grid-area: 3 / 3; justify-self: end; align-self: end; gap: 2px; padding: 4px; border-radius: 9px; }
-  .zoom-pill button { width: 34px; height: 34px; font-size: 19px; }
-  .zoom-pill output { min-width: 48px; padding: 0 7px; color: #c4cad2; text-align: center; }
+  .zoom-group { display: flex; align-items: center; gap: 1px; }
+  .zoom-group .zoom-value { min-width: 42px; font-variant-numeric: tabular-nums; text-align: center; }
 
   .closed-state { display: grid; align-content: center; justify-items: center; padding: 2rem; background: var(--surround); text-align: center; }
   .closed-mark { width: 34px; height: 42px; border: 1px solid var(--quiet); border-radius: 3px; box-shadow: inset 0 5px var(--panel); }
-  .closed-state h1 { margin: 18px 0 5px; font-size: 24px; font-weight: 600; }
-  .closed-state p { margin: 0; color: var(--muted); }
-  .closed-state button { margin-top: 20px; padding: 10px 14px; border-radius: 7px; background: var(--blueprint); color: #10141a; font-weight: 700; cursor: pointer; }
+  .closed-state h1 { margin: 18px 0 5px; font-size: 20px; font-weight: 600; }
+  .closed-state p { margin: 0; color: var(--muted); font-size: var(--text-md); }
+  .closed-state button { margin-top: 20px; padding: 10px 14px; border-radius: var(--radius); background: var(--blueprint); color: #10141a; font-size: var(--text-md); font-weight: 700; cursor: pointer; }
 
   .status-strip {
     z-index: 30;
@@ -4712,10 +4794,10 @@
     align-items: center;
     gap: 12px;
     padding: 0 16px;
-    border-top: 1px solid rgb(255 255 255 / 8%);
+    border-top: 1px solid var(--edge-soft);
     background: var(--charcoal);
     color: var(--muted);
-    font-size: 11px;
+    font-size: var(--text-sm);
   }
 
   .tool-status { flex: none; gap: 6px; }
@@ -4737,8 +4819,8 @@
   }
   .operation-status { overflow: hidden; flex: 1; color: var(--quiet); text-align: center; text-overflow: ellipsis; white-space: nowrap; }
   .operation-status.failure, .local-state.failure { color: var(--oxide); }
-  .footer-divider { width: 1px; height: 15px; flex: none; background: rgb(255 255 255 / 12%); }
-  .status-strip button { padding: 3px 5px; border-radius: 4px; background: transparent; color: var(--muted); cursor: pointer; }
+  .footer-divider { width: 1px; height: 15px; flex: none; background: var(--edge); }
+  .status-strip button { padding: 3px 5px; border-radius: var(--radius); background: transparent; color: var(--muted); cursor: pointer; }
   .status-strip button:hover { background: rgb(255 255 255 / 8%); }
   .local-state { flex: none; }
 
@@ -4748,23 +4830,22 @@
     max-height: 100%;
     overflow: auto;
     padding: 22px 24px;
-    border: 1px solid rgb(255 255 255 / 12%);
-    border-radius: 14px;
+    border: 1px solid var(--edge);
+    border-radius: var(--radius-lg);
     background: var(--panel);
     box-shadow: 0 24px 60px rgb(0 0 0 / 55%);
   }
 
   .panel-heading { display: flex; align-items: flex-start; justify-content: space-between; }
   .panel-heading span { color: var(--quiet); font: 10px "Cascadia Mono", Consolas, monospace; letter-spacing: .1em; text-transform: uppercase; }
-  .panel-heading h2 { margin: 4px 0 0; font-size: 22px; font-weight: 600; }
+  .panel-heading h2 { margin: 4px 0 0; font-size: 20px; font-weight: 600; }
   .diagnostic-path { overflow-wrap: anywhere; color: var(--quiet); font: 10px "Cascadia Mono", Consolas, monospace; }
-  .diagnostics-panel dl { display: grid; grid-template-columns: minmax(210px, 1fr) 1fr; gap: 8px 18px; margin: 18px 0 0; padding-top: 16px; border-top: 1px solid rgb(255 255 255 / 8%); font-size: 12px; }
+  .diagnostics-panel dl { display: grid; grid-template-columns: minmax(210px, 1fr) 1fr; gap: 8px 18px; margin: 18px 0 0; padding-top: 16px; border-top: 1px solid rgb(255 255 255 / 8%); font-size: var(--text-md); }
   .diagnostics-panel dt { color: var(--muted); }
   .diagnostics-panel dd { margin: 0; color: var(--text); font-family: "Cascadia Mono", Consolas, monospace; font-variant-numeric: tabular-nums; }
 
   .screen-reader-status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; }
   @media (max-width: 800px) {
     .operation-status, .page-count { display: none; }
-    .export-button { width: 40px; padding: 0; justify-content: center; font-size: 0; }
   }
 </style>

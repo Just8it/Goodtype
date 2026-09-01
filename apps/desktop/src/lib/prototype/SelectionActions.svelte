@@ -110,33 +110,33 @@
     gap: 3px;
     padding: 5px;
     pointer-events: auto;
-    border: 1px solid rgb(255 255 255 / 12%);
-    border-radius: 11px;
+    border: 1px solid var(--edge);
+    border-radius: var(--radius-lg);
     background: var(--panel);
     box-shadow: 0 18px 44px rgb(0 0 0 / 55%);
   }
   .selection-actions.ready { visibility: visible; }
   button {
     display: grid;
-    width: 36px;
-    height: 36px;
+    width: var(--control);
+    height: var(--control);
     padding: 0;
     border: 0;
-    border-radius: 7px;
+    border-radius: var(--radius);
     background: transparent;
     color: var(--text);
     cursor: pointer;
     place-items: center;
   }
-  button:hover:not(:disabled) { background: rgb(255 255 255 / 6%); }
+  button:hover:not(:disabled) { background: var(--wash); }
   button:focus-visible { outline: 2px solid var(--blueprint); outline-offset: 1px; }
   button:disabled { opacity: 0.45; cursor: default; }
   svg {
-    width: 19px;
-    height: 19px;
+    width: var(--icon);
+    height: var(--icon);
     fill: none;
     stroke: currentColor;
-    stroke-width: 1.7;
+    stroke-width: var(--stroke);
     stroke-linecap: round;
     stroke-linejoin: round;
   }

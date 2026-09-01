@@ -173,8 +173,8 @@
     flex-direction: column;
     gap: 7px;
     padding: 12px;
-    border: 1px solid rgb(255 255 255 / 12%);
-    border-radius: 11px;
+    border: 1px solid var(--edge);
+    border-radius: var(--radius-lg);
     background: #23272f;
     box-shadow: 0 18px 44px rgb(0 0 0 / 55%);
   }
@@ -187,7 +187,7 @@
 
   .name {
     color: #e9ebee;
-    font-size: 13px;
+    font-size: var(--text-md);
   }
 
   .value {
@@ -197,7 +197,7 @@
 
   .preview {
     padding: 4px 6px;
-    border-radius: 7px;
+    border-radius: var(--radius);
     background: #fcfcfa;
   }
 
@@ -209,21 +209,21 @@
 
   .label {
     color: #6a727c;
-    font-size: 10px;
+    font-size: var(--text-xs);
     letter-spacing: 0.08em;
     text-transform: uppercase;
   }
 
   .label.plain {
     color: #e9ebee;
-    font-size: 12px;
+    font-size: var(--text-md);
     letter-spacing: 0;
     text-transform: none;
   }
 
   .note {
     color: #6a727c;
-    font-size: 10.5px;
+    font-size: var(--text-xs);
   }
 
   .types {
@@ -239,7 +239,7 @@
     gap: 1px;
     padding: 6px 8px;
     border: 1px solid transparent;
-    border-radius: 7px;
+    border-radius: var(--radius);
     background: transparent;
     color: #e9ebee;
     text-align: left;
@@ -247,7 +247,7 @@
   }
 
   .type:hover {
-    background: rgb(255 255 255 / 6%);
+    background: var(--wash);
   }
 
   .type.current {
@@ -256,12 +256,12 @@
   }
 
   .type-label {
-    font-size: 12px;
+    font-size: var(--text-md);
   }
 
   .type-note {
     color: #6a727c;
-    font-size: 10.5px;
+    font-size: var(--text-xs);
   }
 
   .switch {
@@ -277,7 +277,7 @@
     flex: none;
     padding: 2px;
     border: 0;
-    border-radius: 10px;
+    border-radius: var(--radius-lg);
     background: #3a414c;
     cursor: pointer;
   }
@@ -309,10 +309,10 @@
   .step {
     padding: 5px 0;
     border: 1px solid rgb(255 255 255 / 10%);
-    border-radius: 6px;
+    border-radius: var(--radius);
     background: transparent;
     color: #aeb5be;
-    font-size: 10.5px;
+    font-size: var(--text-xs);
     cursor: pointer;
   }
 

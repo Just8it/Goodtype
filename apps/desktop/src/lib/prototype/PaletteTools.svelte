@@ -35,7 +35,7 @@
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 4l6 6-9 9-5 1 1-5 7-11z"></path><path d="M12.5 6.5l5 5"></path></svg>
       <span class="tool-state" aria-hidden="true" style:height={`${Math.max(2, Math.min(settings.penPresets[1].widthPt * 1.4, 6))}px`} style:background={settings.penPresets[1].color}></span>
     {:else if definition.id === "highlighter"}
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 15l7-9 5 4-6 9-4 1-2-5z"></path><path d="M8 20h8" stroke-width="2.4"></path></svg>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 15l7-9 5 4-6 9-4 1-2-5z"></path><path d="M8 20h8"></path></svg>
       <span class="tool-state" aria-hidden="true" style:height={`${Math.max(2, Math.min(settings.highlighter.widthPt * 1.2, 6))}px`} style:background={settings.highlighter.color} style:opacity={settings.highlighterOpacity}></span>
     {:else if definition.id === "eraser"}
       <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="12" width="13" height="7" rx="1.6" transform="rotate(-38 10 15)"></rect><path d="M9 21h11"></path></svg>
@@ -45,7 +45,7 @@
     {:else if definition.id === "page-text"}
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3.5h14v17H5z"></path><path d="M8 8h8M8 11h8M8 14h6"></path></svg>
     {:else}
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7.5V6h11v1.5M9.5 6v13M7 19h5"></path><path d="M18.5 4.5v6M15.5 7.5h6" stroke-width="1.9"></path></svg>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7.5V6h11v1.5M9.5 6v13M7 19h5"></path><path d="M18.5 4.5v6M15.5 7.5h6"></path></svg>
     {/if}
   </button>
 {/each}
@@ -54,26 +54,26 @@
   .tool-tile {
     position: relative;
     display: grid;
-    width: 40px;
-    height: 40px;
+    width: var(--control);
+    height: var(--control);
     flex: none;
     padding: 0;
     border: 0;
-    border-radius: 10px;
+    border-radius: var(--radius);
     background: transparent;
     color: #c4cad2;
     cursor: pointer;
     place-items: center;
   }
-  .tool-tile:hover { background: rgb(255 255 255 / 6%); }
+  .tool-tile:hover { background: var(--wash); }
   .tool-tile.active { background: var(--blueprint); color: #fff; }
   .tool-tile:focus-visible { outline: 2px solid var(--blueprint); outline-offset: 1px; }
   .tool-tile svg {
-    width: 21px;
-    height: 21px;
+    width: var(--icon);
+    height: var(--icon);
     fill: none;
     stroke: currentColor;
-    stroke-width: 1.6;
+    stroke-width: var(--stroke);
     stroke-linecap: round;
     stroke-linejoin: round;
   }
@@ -84,7 +84,7 @@
     bottom: 4px;
     width: 10px;
     min-height: 2px;
-    border-radius: 999px;
+    border-radius: var(--radius-pill);
     box-shadow: 0 0 0 1px rgb(255 255 255 / 55%);
     pointer-events: none;
   }
@@ -101,6 +101,6 @@
   }
   .eraser-tool-state.medium { width: 7px; height: 7px; }
   .eraser-tool-state.large { width: 9px; height: 9px; }
-  .palette-divider { width: 26px; height: 1px; margin: 1px 0; background: rgb(255 255 255 / 12%); }
+  .palette-divider { width: 26px; height: 1px; margin: 1px 0; background: var(--edge); }
   .palette-divider.horizontal { width: 1px; height: 26px; margin: 0 3px; }
 </style>

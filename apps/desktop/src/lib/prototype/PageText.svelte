@@ -130,9 +130,9 @@
     bottom: 0;
     right: 0;
     padding: 3px 6px;
-    border-radius: 4px;
+    border-radius: var(--radius);
     background: rgb(116 35 31 / 88%);
     color: #fff;
-    font-size: 9px;
+    font-size: var(--text-xs);
   }
 </style>

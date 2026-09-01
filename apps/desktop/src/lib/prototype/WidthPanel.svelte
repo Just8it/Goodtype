@@ -1,5 +1,6 @@
 <script lang="ts">
   import { untrack } from "svelte";
+  import { MM_PER_PT } from "../settings";
   import { dismissable } from "../workspace/dismiss";
 
   /**
@@ -10,9 +11,9 @@
    * nib for headings. Presets are the fast path, not the only one.
    *
    * Millimetres because that is what a nib is sold in — a 0.35 is a 0.35 whatever the document
-   * is set in — while the geometry underneath is points. The conversion is stated once here.
+   * is set in — while the geometry underneath is points. The conversion lives in `settings.ts`,
+   * so the status strip names the same nib this panel sets.
    */
-  const MM_PER_PT = 1 / 2.835;
 
   let {
     widthPt,
@@ -118,8 +119,8 @@
     gap: 10px;
     width: 220px;
     padding: 12px;
-    border: 1px solid rgb(255 255 255 / 12%);
-    border-radius: 11px;
+    border: 1px solid var(--edge);
+    border-radius: var(--radius-lg);
     background: var(--panel);
     box-shadow: 0 18px 44px rgb(0 0 0 / 55%);
   }
@@ -135,16 +136,16 @@
     width: 100%;
     padding: 8px 10px;
     border: 1px solid rgb(255 255 255 / 16%);
-    border-radius: 7px;
+    border-radius: var(--radius);
     background: rgb(0 0 0 / 25%);
     color: var(--text);
     font: inherit;
-    font-size: 14px;
+    font-size: var(--text-lg);
   }
 
   .unit {
     color: var(--quiet);
-    font-size: 12px;
+    font-size: var(--text-md);
   }
 
   .rail {
@@ -155,7 +156,7 @@
   .sample {
     display: grid;
     height: 30px;
-    border-radius: 7px;
+    border-radius: var(--radius);
     background: rgb(0 0 0 / 25%);
     place-items: center;
   }
@@ -163,7 +164,7 @@
   .sample span {
     display: block;
     width: 70%;
-    border-radius: 999px;
+    border-radius: var(--radius-pill);
     background: var(--muted);
   }
 
@@ -182,9 +183,9 @@
     height: 30px;
     padding: 0 11px;
     border: 0;
-    border-radius: 7px;
+    border-radius: var(--radius);
     font: inherit;
-    font-size: 12.5px;
+    font-size: var(--text-md);
     cursor: pointer;
   }
 
@@ -195,7 +196,7 @@
   }
 
   .remove {
-    background: rgb(255 255 255 / 6%);
+    background: var(--wash);
     color: var(--oxide);
   }
 

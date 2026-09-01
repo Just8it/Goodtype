@@ -197,6 +197,9 @@ export const COLOR_PRESETS: { hex: string; name: string }[] = [
   { hex: "#6a727c", name: "Slate" },
 ];
 
+/** Nib widths are stored in points and shown to the writer in millimetres. */
+export const MM_PER_PT = 1 / 2.835;
+
 /** A readable name for a colour, so assistive tech never has to spell out a hex code. */
 export function colorName(hex: string): string {
   const known = COLOR_PRESETS.find(

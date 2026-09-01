@@ -368,7 +368,7 @@
     position: absolute;
     z-index: -1;
     border: 1px solid rgb(30 35 43 / 14%);
-    border-radius: 7px;
+    border-radius: var(--radius);
     background: #fff;
     content: "";
     inset: calc(-1 * var(--block-gutter));
@@ -414,7 +414,7 @@
     width: 100%;
     padding: 0;
     border: 0;
-    border-radius: 4px;
+    border-radius: var(--radius);
     background: transparent;
     text-align: left;
     cursor: move;

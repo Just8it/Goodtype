@@ -296,8 +296,8 @@
     flex-direction: column;
     gap: 6px;
     padding: 11px;
-    border: 1px solid rgb(255 255 255 / 12%);
-    border-radius: 11px;
+    border: 1px solid var(--edge);
+    border-radius: var(--radius-lg);
     background: #23272f;
     box-shadow: 0 18px 44px rgb(0 0 0 / 55%);
   }
@@ -305,7 +305,7 @@
   .field {
     position: relative;
     height: 104px;
-    border-radius: 7px;
+    border-radius: var(--radius);
     cursor: crosshair;
     touch-action: none;
   }
@@ -313,7 +313,7 @@
   .hue {
     position: relative;
     height: 12px;
-    border-radius: 6px;
+    border-radius: var(--radius);
     background: linear-gradient(
       to right,
       #f00 0%,
@@ -346,7 +346,7 @@
 
   .row-label {
     color: #6a727c;
-    font-size: 10px;
+    font-size: var(--text-xs);
     letter-spacing: 0.08em;
     text-transform: uppercase;
   }
@@ -362,7 +362,7 @@
     height: 20px;
     padding: 0;
     border: 1px solid rgb(255 255 255 / 14%);
-    border-radius: 5px;
+    border-radius: var(--radius);
     cursor: pointer;
   }
 
@@ -390,15 +390,15 @@
     height: 22px;
     flex: none;
     border: 1px solid rgb(255 255 255 / 16%);
-    border-radius: 5px;
+    border-radius: var(--radius);
   }
 
   input {
     width: 100%;
     min-width: 0;
     padding: 4px 6px;
-    border: 1px solid rgb(255 255 255 / 12%);
-    border-radius: 5px;
+    border: 1px solid var(--edge);
+    border-radius: var(--radius);
     background: #16181d;
     color: #e9ebee;
     font: 11px/1.4 "Cascadia Mono", Consolas, monospace;
@@ -407,17 +407,17 @@
   .apply,
   .remove {
     padding: 4px 8px;
-    border: 1px solid rgb(255 255 255 / 12%);
-    border-radius: 5px;
+    border: 1px solid var(--edge);
+    border-radius: var(--radius);
     background: #1b1e24;
     color: #e9ebee;
-    font-size: 11px;
+    font-size: var(--text-sm);
     cursor: pointer;
   }
 
   .apply:hover,
   .remove:hover {
-    background: rgb(255 255 255 / 8%);
+    background: var(--wash);
   }
 
   .remove {

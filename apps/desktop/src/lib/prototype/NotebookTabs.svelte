@@ -77,7 +77,9 @@
         title={`Close ${tab.title}`}
         disabled={busy}
         onclick={() => void onClose(tab.root)}
-      >×</button>
+      >
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18" /></svg>
+      </button>
     </div>
   {/each}
 </div>
@@ -86,7 +88,9 @@
   .notebook-tabs {
     display: flex;
     min-width: 0;
-    flex: 1;
+    /* Only as wide as the tabs themselves. Stretching to fill the strip pushed the "open another
+       notebook" button to the far side of the window, away from the tabs it adds to. */
+    flex: 0 1 auto;
     overflow-x: auto;
     gap: 4px;
     scrollbar-width: none;
@@ -96,17 +100,20 @@
     display: flex;
     min-width: 132px;
     max-width: 220px;
-    height: 40px;
+    height: var(--control);
     flex: 1 1 180px;
     align-items: center;
-    border: 1px solid rgb(255 255 255 / 10%);
-    border-bottom: 2px solid transparent;
-    border-radius: 7px 7px 2px 2px;
+    border: 1px solid var(--edge);
+    /* The bottom edge stays 2px in every state so selecting a tab tints it rather than resizing
+       it. It used to be transparent when inactive, which left the box visibly open at the
+       bottom — a browser-tab move that only reads right when the tab docks onto content below. */
+    border-bottom: 2px solid var(--edge);
+    border-radius: var(--radius);
     background: rgb(255 255 255 / 3%);
   }
   .notebook-tab.active { border-bottom-color: var(--blueprint); background: var(--panel); }
   .notebook-tab.switching { opacity: .65; }
-  .notebook-tab:hover { background: rgb(255 255 255 / 7%); }
+  .notebook-tab:hover { background: var(--wash); }
   .tab-target {
     display: flex;
     min-width: 0;
@@ -122,20 +129,31 @@
     text-align: left;
   }
   .notebook-tab.active .tab-target { color: var(--text); }
-  .tab-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* Without this the title fell through to the browser's 16px default, which is why the tabs
+     read a full step larger than every other label in the strip. */
+  .tab-title { overflow: hidden; font-size: var(--text-md); text-overflow: ellipsis; white-space: nowrap; }
   .tab-close {
-    width: 34px;
-    height: 34px;
+    display: grid;
+    width: var(--control-dense);
+    height: var(--control-dense);
     flex: none;
     padding: 0;
     border: 0;
-    border-radius: 6px;
+    border-radius: var(--radius);
     background: transparent;
     color: var(--quiet);
     cursor: pointer;
-    font-size: 17px;
+    place-items: center;
   }
-  .tab-close:hover:not(:disabled) { background: rgb(255 255 255 / 8%); color: var(--text); }
+  .tab-close svg {
+    width: var(--icon-dense);
+    height: var(--icon-dense);
+    fill: none;
+    stroke: currentColor;
+    stroke-linecap: round;
+    stroke-width: var(--stroke-dense);
+  }
+  .tab-close:hover:not(:disabled) { background: var(--wash); color: var(--text); }
   .state-dot {
     width: 6px;
     height: 6px;

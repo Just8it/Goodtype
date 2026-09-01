@@ -14,7 +14,7 @@
     mode = "edit",
     source = "",
     blockLabel = "",
-    awayPageNumber = null,
+    pageNumber = null,
     hasAnyBlock = false,
     root = null,
     dock = "left",
@@ -38,7 +38,8 @@
     mode?: "edit" | "style" | "away" | "none";
     source?: string;
     blockLabel?: string;
-    awayPageNumber?: number | null;
+    /** The page the target lives on — shown in the strip, and named in the `away` notice. */
+    pageNumber?: number | null;
     hasAnyBlock?: boolean;
     root?: string | null;
     dock?: "left" | "right";
@@ -120,21 +121,42 @@
   style:width={`${width}px`}
   aria-label="Typst source"
 >
+  <!-- Identity strip: what this panel is holding, and how to move or close it. Everything you do
+       *to* the text lives in the writing bar below, so this row never grows tool buttons. -->
   <header>
-    <span class="title">{mode === "style" ? "Notebook style" : pageText ? "Page text" : mode === "edit" || mode === "away" ? blockLabel : "Typst source"}</span>
+    <span class="identity">
+      <span class="title">{mode === "style" ? "Notebook style" : pageText ? "Page text" : mode === "edit" || mode === "away" ? blockLabel : "Typst source"}</span>
+      <!-- Only when the target is somewhere you cannot see. While you are editing the page in
+           view, the status strip already answers "which page", and printing it twice made
+           neither one look like the answer. -->
+      {#if pageNumber !== null && mode === "away"}
+        <span class="where">Page {pageNumber}</span>
+      {/if}
+    </span>
     {#if mode === "edit" || mode === "style"}
       <button
         type="button"
-        class="text-action"
+        class="icon"
+        aria-label="Explain at caret"
         title="Explain at caret (F1)"
         onclick={() => void editor?.showHelp()}
-      >Help</button>
+      >
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <circle cx="12" cy="12" r="8.5" />
+          <path d="M12 16.5v-.6c0-1 .4-1.6 1.2-2.2.8-.6 1.3-1.2 1.3-2.2A2.5 2.5 0 0 0 12 9a2.4 2.4 0 0 0-2.4 2" />
+        </svg>
+      </button>
       <button
         type="button"
-        class="text-action"
+        class="icon"
+        aria-label="Format document"
         title="Format document (Ctrl+Shift+F)"
         onclick={() => void editor?.formatDocument()}
-      >Format</button>
+      >
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M4 7h16M4 12h10M4 17h13" />
+        </svg>
+      </button>
     {/if}
     <button
       type="button"
@@ -144,7 +166,7 @@
       onclick={() => onDockChange(dock === "left" ? "right" : "left")}
     >
       <svg viewBox="0 0 24 24" aria-hidden="true">
-        <rect x="3.5" y="4.5" width="17" height="15" rx="2" />
+        <rect x="3" y="4.5" width="18" height="15" rx="2" />
         <path d={dock === "left" ? "M10 4.5v15" : "M14 4.5v15"} />
       </svg>
     </button>
@@ -155,7 +177,7 @@
       title="Close source view (Ctrl+Shift+E)"
       onclick={onClose}
     >
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" /></svg>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5l14 14M19 5 5 19" /></svg>
     </button>
   </header>
 
@@ -198,9 +220,9 @@
     <!-- The target is still held, just not on the page in view. Editing stays parked rather than
          writing to a page the writer cannot see. -->
     <div class="notice">
-      <p>{blockLabel} is on page {awayPageNumber}.</p>
+      <p>{blockLabel} is on page {pageNumber}.</p>
       <button type="button" class="action" onclick={() => onGoToBlock?.()}>
-        Go to page {awayPageNumber}
+        Go to page {pageNumber}
       </button>
       <p class="quiet">Or double-click a Typst block on this page to edit that one instead.</p>
     </div>
@@ -260,84 +282,81 @@
     /* The page always keeps at least half the window. Enforced in CSS so it stays true when the
        window is resized, not just while dragging. */
     max-width: 50%;
-    border-right: 1px solid rgb(255 255 255 / 8%);
-    background: #1b1e24;
+    border-right: 1px solid var(--edge-soft);
+    background: var(--surround, #1b1e24);
   }
 
   .side-editor.dock-right {
     border-right: 0;
-    border-left: 1px solid rgb(255 255 255 / 8%);
+    border-left: 1px solid var(--edge-soft);
   }
 
   header {
     display: flex;
-    height: 34px;
+    height: var(--control);
     align-items: center;
-    gap: 4px;
+    gap: 2px;
     padding: 0 6px 0 12px;
-    border-bottom: 1px solid rgb(255 255 255 / 8%);
-    background: #23272f;
+    border-bottom: 1px solid var(--edge-soft);
+    background: var(--panel, #23272f);
+  }
+
+  .identity {
+    display: flex;
+    min-width: 0;
+    flex: 1;
+    align-items: baseline;
+    padding-right: 6px;
+    gap: 9px;
   }
 
   .title {
     overflow: hidden;
-    flex: 1;
-    color: #aeb5be;
-    font-size: 11px;
-    letter-spacing: 0.04em;
+    color: var(--muted, #aeb5be);
+    font-size: var(--text-sm);
+    letter-spacing: 0.09em;
     text-overflow: ellipsis;
     text-transform: uppercase;
     white-space: nowrap;
   }
 
+  /* Which page the target sits on. Quiet, because it is context rather than a control. */
+  .where {
+    flex: none;
+    color: var(--quiet, #6a727c);
+    font-size: var(--text-sm);
+  }
+
   .icon {
     display: grid;
-    width: 24px;
-    height: 24px;
+    width: var(--control-dense);
+    height: var(--control-dense);
+    flex: none;
     border: 0;
-    border-radius: 6px;
+    border-radius: var(--radius);
     background: transparent;
-    color: #aeb5be;
+    color: var(--muted, #aeb5be);
     cursor: pointer;
     place-items: center;
   }
 
-  .text-action {
-    height: 24px;
-    padding: 0 7px;
-    border: 0;
-    border-radius: 6px;
-    background: transparent;
-    color: #aeb5be;
-    font-size: 11px;
-    cursor: pointer;
-  }
-
-  .text-action:hover,
-  .text-action:focus-visible {
-    background: rgb(255 255 255 / 8%);
-    color: #e9ebee;
-    outline: 2px solid #7fb0f7;
-    outline-offset: 1px;
-  }
-
   .icon:hover {
-    background: rgb(255 255 255 / 8%);
-    color: #e9ebee;
+    background: var(--wash);
+    color: var(--text, #e9ebee);
   }
 
   .icon:focus-visible {
-    outline: 2px solid #7fb0f7;
+    outline: 2px solid var(--blueprint-light, #7fb0f7);
     outline-offset: 1px;
   }
 
   .icon svg {
-    width: 15px;
-    height: 15px;
+    width: var(--icon-dense);
+    height: var(--icon-dense);
     fill: none;
     stroke: currentColor;
     stroke-linecap: round;
-    stroke-width: 1.6;
+    stroke-width: var(--stroke-dense);
   }
 
   .body {
@@ -353,7 +372,7 @@
     gap: 10px;
     padding: 18px 16px;
     color: #e9ebee;
-    font-size: 12px;
+    font-size: var(--text-md);
   }
 
   .notice p {
@@ -362,21 +381,21 @@
 
   .notice .quiet {
     color: #6a727c;
-    font-size: 11px;
+    font-size: var(--text-sm);
   }
 
   .action {
     padding: 7px 11px;
-    border: 1px solid rgb(255 255 255 / 12%);
-    border-radius: 7px;
+    border: 1px solid var(--edge);
+    border-radius: var(--radius);
     background: #23272f;
     color: #e9ebee;
-    font-size: 12px;
+    font-size: var(--text-md);
     cursor: pointer;
   }
 
   .action:hover {
-    background: rgb(255 255 255 / 8%);
+    background: var(--wash);
   }
 
   .action:focus-visible {
@@ -388,9 +407,9 @@
     max-height: 9rem;
     margin: 0;
     padding: 8px 12px;
-    border-top: 1px solid rgb(255 255 255 / 8%);
+    border-top: 1px solid var(--edge-soft);
     color: #aeb5be;
-    font: 11px/1.5 "Cascadia Mono", Consolas, monospace;
+    font: var(--text-sm)/1.5 "Cascadia Mono", Consolas, monospace;
     list-style: none;
     overflow-y: auto;
   }

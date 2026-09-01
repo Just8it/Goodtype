@@ -276,7 +276,7 @@
   .editor {
     min-width: 18rem;
     max-width: 42rem;
-    border-radius: 9px;
+    border-radius: var(--radius-lg);
     box-shadow: 0 14px 36px rgb(0 0 0 / 50%);
     text-align: left;
     /* It floats over the page now rather than sitting flush under the block, so it carries its
@@ -410,7 +410,7 @@
        .cm-tooltip` rule is more specific than anything we can write from outside, so this is
        the override point rather than a specificity war. */
     border: 1px solid rgb(255 255 255 / 12%) !important;
-    border-radius: 11px;
+    border-radius: var(--radius-lg);
     background: #23272f !important;
     box-shadow: 0 18px 44px rgb(0 0 0 / 55%);
     color: #e9ebee;
@@ -429,7 +429,7 @@
     align-items: baseline;
     gap: 10px;
     padding: 5px 9px;
-    border-radius: 7px;
+    border-radius: var(--radius);
     color: #e9ebee;
   }
 
