@@ -8,8 +8,8 @@
   // at ten lines: short edits happen on the page, sustained writing happens here, and the canvas
   // stays live either way.
   //
-  // The panel keeps its target until the writer picks another block. Scrolling past pages that
-  // happen to have no Typst on them must never silently drop what you were writing.
+  // A movable block stays pinned until the writer picks another block. Page text follows the
+  // active page because each page owns its own fixed writing surface.
   let {
     mode = "edit",
     source = "",
@@ -121,7 +121,7 @@
   aria-label="Typst source"
 >
   <header>
-    <span class="title">{mode === "style" ? "Notebook style" : mode === "edit" || mode === "away" ? blockLabel : "Typst source"}</span>
+    <span class="title">{mode === "style" ? "Notebook style" : pageText ? "Page text" : mode === "edit" || mode === "away" ? blockLabel : "Typst source"}</span>
     {#if mode === "edit" || mode === "style"}
       <button
         type="button"
@@ -206,18 +206,25 @@
     </div>
   {:else}
     <div class="notice">
-      <p>What would you like to write?</p>
-      {#if hasAnyBlock}
-        <button type="button" class="action" onclick={() => onGoToBlock?.()}>
-          Go to the first block
+      {#if pageText}
+        <p>This page has no Page text yet.</p>
+        <button type="button" class="action" onclick={() => onCreatePageText?.()}>
+          Write Page text
+        </button>
+      {:else}
+        <p>What would you like to write?</p>
+        {#if hasAnyBlock}
+          <button type="button" class="action" onclick={() => onGoToBlock?.()}>
+            Go to the first block
+          </button>
+        {/if}
+        <button type="button" class="action" onclick={() => onCreatePageText?.()}>
+          Write Page text
+        </button>
+        <button type="button" class="action" onclick={() => onCreateBlock?.()}>
+          Add a Typst block
         </button>
       {/if}
-      <button type="button" class="action" onclick={() => onCreatePageText?.()}>
-        Write Page text
-      </button>
-      <button type="button" class="action" onclick={() => onCreateBlock?.()}>
-        Add a Typst block
-      </button>
       <p class="quiet">Page text fills the writing area; Typst blocks stay movable.</p>
     </div>
   {/if}

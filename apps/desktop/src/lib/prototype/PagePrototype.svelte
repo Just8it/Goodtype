@@ -351,7 +351,7 @@
   let sideEditorStyle = $state(false);
   let sideEditorBlockId = $state<string | null>(null);
   let sideEditorPageText = $state(false);
-  /// The page the target block belongs to, so scrolling elsewhere does not lose it.
+  /// The page a pinned movable block belongs to. Page text instead follows the active page.
   let sideEditorPageId = $state<string | null>(null);
   let sideEditor = $state<{ focus: () => void }>();
 
@@ -362,8 +362,8 @@
   const editingPageText = $derived(
     sideEditorOpen && sideEditorPageText && pageTypst?.id === sideEditorBlockId,
   );
-  /// `edit` when the target is on the page in view, `away` when it is held on another page, and
-  /// `none` when nothing has been picked yet. The target only changes when the writer picks one.
+  /// `edit` when the target is on the page in view, `away` when a movable block is held on
+  /// another page, and `none` when the active page has no Page text or no target was picked.
   const sideEditorMode = $derived<"edit" | "style" | "away" | "none">(
     sideEditorStyle ? "style" : sideEditorBlock ? "edit" : sideEditorBlockId ? "away" : "none",
   );
@@ -1041,6 +1041,15 @@
       };
     } else {
       pageTypst = null;
+    }
+
+    // A movable block stays pinned when the writer scrolls away. Page text is different: it is
+    // the current page's writing surface, so an already-open Page text editor follows page focus.
+    // Keeping the flag true when there is no surface lets the next page retarget automatically
+    // and gives this page the dedicated "Write Page text" empty state.
+    if (sideEditorOpen && sideEditorPageText && !sideEditorStyle) {
+      sideEditorBlockId = pageTypst?.id ?? null;
+      sideEditorPageId = activePageId;
     }
 
     const inkGroup = snapshot.page.objects.find(
