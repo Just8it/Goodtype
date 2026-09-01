@@ -695,8 +695,9 @@ fn page_text_source(page: &ExportPage, source: &str) -> String {
         "#set text(size: 11pt, fill: rgb(\"{text_color}\"), top-edge: 1em, bottom-edge: 0em)\n#set par(leading: {leading}pt, spacing: {leading}pt)\n#let goodtype_rhythm = {rhythm}"
     );
     if page.page_text_baseline_grid {
+        // Reserve whole rows and put the visible block on the final row instead of at the top.
         prelude.push_str(&format!(
-            "\n#let goodtype_gap = {leading}pt\n#let goodtype_snap_block(it) = block(\n  above: goodtype_gap,\n  below: goodtype_gap,\n  layout(size => {{\n    let measured = measure(width: size.width, it)\n    let rows = calc.max(1, calc.ceil((measured.height + goodtype_gap) / goodtype_rhythm))\n    block(width: size.width, height: rows * goodtype_rhythm - goodtype_gap, it)\n  }}),\n)\n#show heading: set block(above: 0pt, below: 0pt)\n#show math.equation.where(block: true): set block(above: 0pt, below: 0pt)\n#show heading: goodtype_snap_block\n#show math.equation.where(block: true): goodtype_snap_block",
+            "\n#let goodtype_gap = {leading}pt\n#let goodtype_snap_block(it) = block(\n  above: goodtype_gap,\n  below: goodtype_gap,\n  layout(size => {{\n    let measured = measure(width: size.width, it)\n    let rows = calc.max(1, calc.ceil((measured.height + goodtype_gap) / goodtype_rhythm))\n    block(width: size.width, height: rows * goodtype_rhythm - goodtype_gap, align(bottom, it))\n  }}),\n)\n#show heading: set block(above: 0pt, below: 0pt)\n#show math.equation.where(block: true): set block(above: 0pt, below: 0pt)\n#show heading: goodtype_snap_block\n#show math.equation.where(block: true): goodtype_snap_block",
         ));
     }
     if layout.columns == 2 {
@@ -1009,6 +1010,7 @@ mod tests {
         let snapped = page_text_source(&page, "Body");
         assert!(snapped.contains("leading: 13pt"));
         assert!(snapped.contains("#show heading: goodtype_snap_block"));
+        assert!(snapped.contains("align(bottom, it)"));
         page.page_text_baseline_grid = false;
         assert!(!page_text_source(&page, "Body").contains("goodtype_snap_block"));
     }

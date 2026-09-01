@@ -72,6 +72,7 @@ export function pageTextSource(
   // metrics, and the tiny difference accumulates until later baselines visibly miss the paper.
   let prelude = `#set text(size: ${DEFAULT_FONT_PT}pt, fill: rgb("${layout.textColor}"), top-edge: 1em, bottom-edge: 0em)\n#set par(leading: ${gap}pt, spacing: ${gap}pt)\n#let goodtype_rhythm = ${snapBlocksToGrid ? `${layout.lineSpacingPt}pt` : "1em"}`;
   if (snapBlocksToGrid) {
+    // Reserve whole rows and put the visible block on the final row instead of at the top.
     prelude += `
 #let goodtype_gap = ${gap}pt
 #let goodtype_snap_block(it) = block(
@@ -80,7 +81,7 @@ export function pageTextSource(
   layout(size => {
     let measured = measure(width: size.width, it)
     let rows = calc.max(1, calc.ceil((measured.height + goodtype_gap) / goodtype_rhythm))
-    block(width: size.width, height: rows * goodtype_rhythm - goodtype_gap, it)
+    block(width: size.width, height: rows * goodtype_rhythm - goodtype_gap, align(bottom, it))
   }),
 )
 #show heading: set block(above: 0pt, below: 0pt)

@@ -48,6 +48,7 @@ describe("page text paper alignment", () => {
     expect(source).toContain("par(leading: 5pt, spacing: 5pt)");
     expect(source).toContain("#show heading: goodtype_snap_block");
     expect(source).toContain("math.equation.where(block: true)");
+    expect(source).toContain("align(bottom, it)");
   });
 
   it("can leave Typst block spacing untouched", () => {
