@@ -15,7 +15,7 @@
 <p align="center">A local-first technical notebook where handwriting and typesetting share the same page.</p>
 
 Write with a pen, drop in a Typst block for the equation you do not want to draw by hand, and
-place images or PDF material alongside both — on fixed pages that export as one PDF, with the ink
+place images or PDF material alongside both, on fixed pages that export as one PDF, with the ink
 still vector and the text still selectable.
 
 Goodtype keeps your notebooks as plain files on your own disk. No account, no sync, no updater,
@@ -32,8 +32,8 @@ no telemetry.
 > compatibility shims this early would fix mistakes in place instead of correcting them.
 >
 > Do not keep anything you care about only in Goodtype. Expect to lose test notebooks between
-> builds. Once the format settles, this will be replaced by a schema version and real migrations —
-> until then, treat it as a prototype you write on, not a place you store work.
+> builds. Once the format settles, this will be replaced by a schema version and real migrations.
+> Until then, treat it as a prototype you write on, not a place you store work.
 
 ## What it does today
 
@@ -41,7 +41,7 @@ no telemetry.
 - **Vector ink.** A stroke is stored as points and rendered as its silhouette, so pressure and nib
   character survive into the exported PDF instead of flattening to a constant width.
 - **Typst blocks** compiled in-process, with completion driven by the same compiler that renders
-  them — no `typst.exe`, no subprocess, no cold start.
+  them, no `typst.exe`, no subprocess, no cold start.
 - **Typst Universe packages**, resolved from a local cache first and downloaded only on a miss.
 - **Images and PDF material** placed and scaled on the page.
 - **Multi-page notebooks** that scroll continuously, with per-page undo and redo.
@@ -52,7 +52,7 @@ no telemetry.
 
 ## Local-first
 
-A notebook is a directory of ordinary files — a JSON manifest, one file per page, Typst sources as
+A notebook is a directory of ordinary files, a JSON manifest, one file per page, Typst sources as
 `.typ`, ink layers as JSON, and assets kept beside them. You can read them, diff them, and put them
 in your own version control. Nothing about the format needs Goodtype to be running, or to exist.
 
@@ -66,7 +66,7 @@ Goodtype currently targets Windows 10 and 11.
 **You will need**
 
 - [WebView2](https://developer.microsoft.com/microsoft-edge/webview2/) (already present on current Windows)
-- [Rustup](https://rustup.rs/) — the pinned toolchain installs itself from `rust-toolchain.toml`
+- [Rustup](https://rustup.rs/), the pinned toolchain installs itself from `rust-toolchain.toml`
 - [Node.js 25.2.1](https://nodejs.org/) and [pnpm 11.9.0](https://pnpm.io/installation)
 - [Visual Studio Build Tools 2022](https://visualstudio.microsoft.com/visual-cpp-build-tools/) with
   **Desktop development with C++** and a Windows 10 or 11 SDK
@@ -85,7 +85,7 @@ Run it:
 pnpm tauri dev
 ```
 
-Build a release executable — one self-contained binary, Typst compiler included:
+Build a release executable, one self-contained binary, Typst compiler included:
 
 ```powershell
 pnpm tauri build      # -> target\release\goodtype-desktop.exe
@@ -99,7 +99,7 @@ will warn about an unrecognised app.
 
 | | |
 |---|---|
-| `apps/desktop/` | Tauri 2 shell and Svelte 5 frontend — canvas, palette, editor, workspace |
+| `apps/desktop/` | Tauri 2 shell and Svelte 5 frontend. canvas, palette, editor, workspace |
 | `crates/goodtype-core/` | Notebook format, atomic persistence, history, recovery, stroke geometry |
 | `crates/goodtype-typst/` | Embedded Typst compilation, completion, and PDF export |
 | `fixtures/` | Notebook, ink, and export material the tests assert against |
@@ -107,8 +107,8 @@ will warn about an unrecognised app.
 
 Two decisions shape most of the code. **The Typst compiler is linked in rather than shelled out
 to**, which is what makes rendering feel immediate and keeps the build to a single binary. And
-**ink geometry is computed identically in Rust and TypeScript** — the live canvas needs it in the
-webview, export needs it in Rust — with both implementations asserted against the same fixture, so
+**ink geometry is computed identically in Rust and TypeScript**, the live canvas needs it in the
+webview, export needs it in Rust, with both implementations asserted against the same fixture, so
 the two cannot drift apart without failing `cargo xtask verify`.
 
 ## Contributing
@@ -118,9 +118,9 @@ with warnings denied, both test suites, type-checking, and a production build, a
 
 ## License
 
-Apache License 2.0 — see [LICENSE](./LICENSE).
+Apache License 2.0 - see [LICENSE](./LICENSE).
 
 Goodtype links the Typst compiler into its binary and embeds the fonts Typst ships with, so a built
-executable redistributes third-party work under its own licences — Typst under Apache-2.0, and New
+executable redistributes third-party work under its own licences, Typst under Apache-2.0, and New
 Computer Modern, Libertinus, and DejaVu Sans Mono under the SIL Open Font License and the Bitstream
 Vera licence. [NOTICE](./NOTICE) lists all of it.
