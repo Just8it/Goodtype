@@ -42,9 +42,16 @@ no telemetry.
   character survive into the exported PDF instead of flattening to a constant width.
 - **Typst blocks** compiled in-process, with completion driven by the same compiler that renders
   them, no `typst.exe`, no subprocess, no cold start.
+- **Page text**, a Typst writing surface that belongs to the page rather than floating on it, with
+  headings and display equations sitting on the paper's own ruling.
 - **Typst Universe packages**, resolved from a local cache first and downloaded only on a miss.
-- **Images and PDF material** placed and scaled on the page.
-- **Multi-page notebooks** that scroll continuously, with per-page undo and redo.
+- **Paper worth writing on.** Ruled, squared, dotted and plain templates in three paper tones, at
+  sizes from A6 to Tabloid in either orientation, previewed before the page exists.
+- **Images and PDF material** placed and scaled on the page, or a PDF brought in a page at a time
+  as pages of its own.
+- **Multi-page notebooks** that scroll continuously, with pages you can reorder, duplicate, clear
+  or delete, and undo scoped either to the page in view or to the whole notebook.
+- **Several notebooks open at once** in tabs, with search across a notebook's typed content.
 - **PDF export** of the whole notebook, in manifest order, from the files on disk rather than from
   whatever the screen happens to be showing.
 - **Crash recovery** built on atomic writes and a revision check, so an interrupted save cannot
