@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { untrack } from "svelte";
+  import { onDestroy, untrack } from "svelte";
   import BrandMark from "../brand/BrandMark.svelte";
   import NamePrompt from "./NamePrompt.svelte";
   import NotebookSetup from "./NotebookSetup.svelte";
@@ -15,7 +15,6 @@
     libraryRoot as readLibraryRoot,
     listLibrary,
     listLibraryFavourites,
-    moveLibraryEntry,
     openLibraryNotebook,
     pickLibraryRoot,
     pickNotebookRoot,
@@ -25,6 +24,7 @@
   import {
     bands,
     breadcrumb,
+    canMoveLibraryEntries,
     parentPath,
     type LibraryEntry,
     type LibraryListing,
@@ -36,6 +36,7 @@
     location = { view: "library", path: "" },
     onOpen,
     onCreate,
+    onMove,
     returnLabel,
     onReturn,
     onLocationChange,
@@ -56,6 +57,8 @@
     onOpen: (root: string) => void;
     /** Same, for a directory that is not a notebook yet and must be filled. */
     onCreate: (root: string, setup: NotebookSetupValue) => void;
+    /** The workspace saves and remaps any open tabs around the Rust-owned filesystem move. */
+    onMove: (paths: string[], destination: string) => Promise<string | null>;
     returnLabel?: string;
     onReturn?: () => void;
     onLocationChange?: (location: ShelfLocation) => void;
@@ -70,6 +73,26 @@
     | { kind: "notebook" }
     | { kind: "rename"; path: string; initial: string };
 
+  type MoveIntent = {
+    lead: LibraryEntry;
+    paths: string[];
+  };
+
+  type DragSession = MoveIntent & {
+    pointerId: number;
+    pointerType: string;
+    startX: number;
+    startY: number;
+    x: number;
+    y: number;
+    active: boolean;
+  };
+
+  type DropTarget = {
+    kind: "folder" | "crumb";
+    path: string;
+  };
+
   let libraryRoot = $state<string | null>(null);
   // Seeded once from the caller and reported back on every move, so the two never fight: this
   // owns it while the shelf is on screen, the caller holds it while a notebook is.
@@ -80,6 +103,7 @@
   let order = $state<SortOrder>("name");
   let busy = $state(false);
   let failure = $state<string | null>(null);
+  let mutationFailure = $state<string | null>(null);
   let setupShown = false;
 
   let menu = $state<"new" | "sort" | null>(null);
@@ -87,8 +111,13 @@
   let prompt = $state<Prompt | null>(null);
   /** Null means plain browsing; a set — even an empty one — means select mode is on. */
   let picked = $state.raw<string[] | null>(null);
-  let dragging = $state<string | null>(null);
-  let dropTarget = $state<string | null>(null);
+  let moving = $state.raw<MoveIntent | null>(null);
+  let drag = $state<DragSession | null>(null);
+  let dropTarget = $state<DropTarget | null>(null);
+  let contentsElement: HTMLDivElement | undefined;
+  let queuedDragPoint: { x: number; y: number } | null = null;
+  let dragFrame: number | null = null;
+  let suppressClickPath: string | null = null;
 
   const crumbs = $derived(breadcrumb(path));
   const shelf = $derived(bands(entries, order));
@@ -99,6 +128,8 @@
   $effect(() => {
     void start();
   });
+
+  onDestroy(() => clearDrag());
 
   async function start() {
     if (!tauriAvailable) return;
@@ -166,6 +197,8 @@
   }
 
   async function show(next: string) {
+    clearDrag();
+    moving = null;
     view = "library";
     path = next;
     picked = null;
@@ -174,6 +207,8 @@
   }
 
   async function showFavourites() {
+    clearDrag();
+    moving = null;
     view = "favourites";
     picked = null;
     onLocationChange?.({ view, path });
@@ -191,15 +226,18 @@
   }
 
   /** Run a change to the library, then re-read rather than patching the list in place. */
-  async function mutate(work: () => Promise<unknown>, done?: string) {
+  async function mutate(work: () => Promise<unknown>, done?: string): Promise<boolean> {
     busy = true;
+    mutationFailure = null;
     try {
       await work();
       if (done) onStatus(done);
       await reload();
+      return true;
     } catch (error) {
-      failure = message(error);
+      mutationFailure = message(error);
       busy = false;
+      return false;
     }
   }
 
@@ -245,21 +283,200 @@
     picked = null;
   }
 
-  /**
-   * Move by dragging onto a folder tile or onto a crumb.
-   *
-   * This is why there is no folder tree: a crumb is already a visible, correctly-sized target
-   * for "put this further up", and a folder tile is one for "put this in there". Neither needed
-   * a second navigation surface to exist.
-   */
-  async function moveTo(source: string, destination: string) {
-    dragging = null;
+  /** Move one tile or a whole selection onto a folder tile or crumb. */
+  async function moveTo(sourcePaths: string[], destination: string) {
+    clearDrag();
     dropTarget = null;
-    if (source === destination) return;
-    await mutate(
-      () => moveLibraryEntry(source, destination),
-      "Verschoben",
-    );
+    moving = null;
+    if (!canMoveLibraryEntries(sourcePaths, destination)) return;
+    picked = null;
+    let moveStatus: string | null = null;
+    const moved = await mutate(async () => {
+      moveStatus = await onMove(sourcePaths, destination);
+    });
+    if (moved) {
+      onStatus(
+        moveStatus ?? (sourcePaths.length === 1
+          ? `„${pathName(sourcePaths[0])}“ verschoben`
+          : `${sourcePaths.length} Elemente verschoben`),
+      );
+    }
+  }
+
+  function beginMove(lead: LibraryEntry, sourcePaths = [lead.path]) {
+    moving = { lead, paths: [...sourcePaths] };
+    entryMenu = null;
+    menu = null;
+  }
+
+  function beginPickedMove() {
+    const paths = picked ?? [];
+    const lead = entries.find((entry) => paths.includes(entry.path));
+    if (lead && paths.length > 0) beginMove(lead, paths);
+  }
+
+  function chooseDestination(destination: string) {
+    if (moving && canMoveLibraryEntries(moving.paths, destination)) {
+      void moveTo(moving.paths, destination);
+    }
+  }
+
+  function dragPaths(entry: LibraryEntry): string[] {
+    if (!selecting) return [entry.path];
+    return picked?.includes(entry.path) ? [...picked] : [];
+  }
+
+  function beginEntryDrag(event: PointerEvent, entry: LibraryEntry) {
+    if (
+      busy ||
+      moving ||
+      !event.isPrimary ||
+      event.button !== 0 ||
+      event.pointerType === "touch"
+    ) {
+      return;
+    }
+    const paths = dragPaths(entry);
+    if (paths.length === 0) return;
+    (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+    drag = {
+      lead: entry,
+      paths,
+      pointerId: event.pointerId,
+      pointerType: event.pointerType,
+      startX: event.clientX,
+      startY: event.clientY,
+      x: event.clientX,
+      y: event.clientY,
+      active: false,
+    };
+  }
+
+  function continueEntryDrag(event: PointerEvent) {
+    const session = drag;
+    if (!session || session.pointerId !== event.pointerId) return;
+    if (!session.active) {
+      const threshold = session.pointerType === "pen" ? 4 : 6;
+      if (Math.hypot(event.clientX - session.startX, event.clientY - session.startY) < threshold) {
+        return;
+      }
+      entryMenu = null;
+      menu = null;
+      drag = { ...session, active: true, x: event.clientX, y: event.clientY };
+    }
+    event.preventDefault();
+    queueDrag(event.clientX, event.clientY);
+  }
+
+  function finishEntryDrag(event: PointerEvent) {
+    const session = drag;
+    if (!session || session.pointerId !== event.pointerId) return;
+    // Resolve once more at release: a fast pen can enter a target and lift before the queued
+    // animation frame has painted its hover state.
+    const destination = targetAt(session.paths, event.clientX, event.clientY)?.path;
+    const wasActive = session.active;
+    clearDrag();
+    const target = event.currentTarget as HTMLElement;
+    if (target.hasPointerCapture(event.pointerId)) target.releasePointerCapture(event.pointerId);
+    if (!wasActive) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+    suppressClickPath = session.lead.path;
+    window.setTimeout(() => {
+      if (suppressClickPath === session.lead.path) suppressClickPath = null;
+    }, 0);
+    if (destination !== undefined) void moveTo(session.paths, destination);
+  }
+
+  function cancelEntryDrag(event?: PointerEvent) {
+    if (!event || drag?.pointerId === event.pointerId) clearDrag();
+  }
+
+  function clearDrag() {
+    if (dragFrame !== null && typeof cancelAnimationFrame !== "undefined") {
+      cancelAnimationFrame(dragFrame);
+    }
+    dragFrame = null;
+    queuedDragPoint = null;
+    drag = null;
+    dropTarget = null;
+  }
+
+  function queueDrag(x: number, y: number) {
+    queuedDragPoint = { x, y };
+    if (dragFrame !== null) return;
+    dragFrame = requestAnimationFrame(updateDragFrame);
+  }
+
+  function updateDragFrame() {
+    dragFrame = null;
+    const point = queuedDragPoint;
+    queuedDragPoint = null;
+    const session = drag;
+    if (!point || !session?.active) return;
+
+    drag = { ...session, x: point.x, y: point.y };
+    dropTarget = targetAt(session.paths, point.x, point.y);
+    if (autoScroll(point.y)) queueDrag(point.x, point.y);
+  }
+
+  function targetAt(sourcePaths: string[], x: number, y: number): DropTarget | null {
+    const target = document
+      .elementFromPoint(x, y)
+      ?.closest<HTMLElement>("[data-library-drop-path]");
+    const destination = target?.dataset.libraryDropPath;
+    const kind = target?.dataset.libraryDropKind;
+    if (
+      destination === undefined ||
+      (kind !== "folder" && kind !== "crumb") ||
+      !canMoveLibraryEntries(sourcePaths, destination)
+    ) {
+      return null;
+    }
+    return { kind, path: destination };
+  }
+
+  function autoScroll(pointerY: number): boolean {
+    const element = contentsElement;
+    if (!element) return false;
+    const rect = element.getBoundingClientRect();
+    const edge = 68;
+    let delta = 0;
+    if (pointerY < rect.top + edge) {
+      delta = -12 * Math.min(1, (rect.top + edge - pointerY) / edge);
+    } else if (pointerY > rect.bottom - edge) {
+      delta = 12 * Math.min(1, (pointerY - (rect.bottom - edge)) / edge);
+    }
+    if (delta === 0) return false;
+    const before = element.scrollTop;
+    element.scrollTop += delta;
+    return element.scrollTop !== before;
+  }
+
+  function isPointerTarget(kind: DropTarget["kind"], destination: string): boolean {
+    return dropTarget?.kind === kind && dropTarget.path === destination;
+  }
+
+  function isMoveTarget(destination: string): boolean {
+    return moving !== null && canMoveLibraryEntries(moving.paths, destination);
+  }
+
+  function handleWindowKeydown(event: KeyboardEvent) {
+    if (event.key !== "Escape" || (!drag && !moving)) return;
+    event.preventDefault();
+    clearDrag();
+    moving = null;
+  }
+
+  function dragPreviewStyle(session: DragSession): string {
+    const left = Math.min(session.x + 16, window.innerWidth - 236);
+    const top = Math.min(session.y + 16, window.innerHeight - 54);
+    return `transform: translate3d(${Math.max(8, left)}px, ${Math.max(8, top)}px, 0)`;
+  }
+
+  function pathName(entryPath: string): string {
+    return entryPath.split("/").at(-1) ?? entryPath;
   }
 
   function togglePicked(entryPath: string) {
@@ -270,6 +487,11 @@
   }
 
   function activate(entry: LibraryEntry) {
+    if (suppressClickPath === entry.path) return;
+    if (moving) {
+      if (entry.kind === "folder") chooseDestination(entry.path);
+      return;
+    }
     if (selecting) {
       togglePicked(entry.path);
       return;
@@ -289,6 +511,11 @@
         id: "favourite",
         label: starred.has(entry.path) ? "Favorit entfernen" : "Zu Favoriten",
         onSelect: () => void toggleFavourite(entry.path),
+      },
+      {
+        id: "move",
+        label: "Verschieben…",
+        onSelect: () => beginMove(entry),
       },
       {
         id: "delete",
@@ -357,7 +584,9 @@
   }
 </script>
 
-<div class="library">
+<svelte:window onkeydown={handleWindowKeydown} onblur={() => clearDrag()} />
+
+<div class="library" class:dragging={drag?.active}>
   <aside class="rail">
     <div class="brand">
       <BrandMark size={20} title="" />
@@ -415,20 +644,18 @@
               type="button"
               class="crumb"
               class:here={index === crumbs.length - 1}
-              class:drop={dropTarget === `crumb:${crumb.path}`}
+              class:drop={isPointerTarget("crumb", crumb.path)}
+              class:moveTarget={isMoveTarget(crumb.path)}
+              data-library-drop-path={crumb.path}
+              data-library-drop-kind="crumb"
               aria-current={index === crumbs.length - 1 ? "page" : undefined}
+              aria-label={moving && isMoveTarget(crumb.path)
+                ? `${crumb.name}, Auswahl hierher verschieben`
+                : crumb.name}
+              aria-disabled={moving !== null && !isMoveTarget(crumb.path)}
               disabled={busy}
-              ondragover={(event) => {
-                if (!dragging) return;
-                event.preventDefault();
-                dropTarget = `crumb:${crumb.path}`;
-              }}
-              ondragleave={() => (dropTarget = null)}
-              ondrop={(event) => {
-                event.preventDefault();
-                if (dragging) void moveTo(dragging, crumb.path);
-              }}
-              onclick={() => void show(crumb.path)}>{crumb.name}</button
+              onclick={() => moving ? chooseDestination(crumb.path) : void show(crumb.path)}
+              >{crumb.name}</button
             >
           {/each}
         </nav>
@@ -438,7 +665,7 @@
 
       {#if libraryRoot}
         <div class="anchor">
-          <button type="button" class="control" disabled={busy} onclick={() => (menu = menu === "sort" ? null : "sort")}>
+          <button type="button" class="control" disabled={busy || moving !== null} onclick={() => (menu = menu === "sort" ? null : "sort")}>
             Sortieren: {order === "name" ? "Name" : "Datum"}
           </button>
           {#if menu === "sort"}
@@ -449,7 +676,7 @@
         <button
           type="button"
           class="control"
-          disabled={busy}
+          disabled={busy || moving !== null}
           onclick={() => (picked = selecting ? null : [])}
         >
           {selecting ? "Fertig" : "Auswählen"}
@@ -457,7 +684,7 @@
 
         {#if view === "library"}
           <div class="anchor">
-            <button type="button" class="primary" disabled={busy} onclick={() => (menu = menu === "new" ? null : "new")}>
+            <button type="button" class="primary" disabled={busy || moving !== null} onclick={() => (menu = menu === "new" ? null : "new")}>
               + Neu
             </button>
             {#if menu === "new"}
@@ -468,17 +695,42 @@
       {/if}
     </header>
 
-    {#if selecting && picked && picked.length > 0}
+    {#if moving}
+      <div class="action-bar move-bar" role="status">
+        <span class="move-title">
+          {moving.paths.length === 1 ? `„${moving.lead.name}“` : `${moving.paths.length} Elemente`} verschieben
+        </span>
+        <span class="move-help">Zielordner oder Pfad wählen</span>
+        <div class="spacer"></div>
+        <button type="button" class="control" onclick={() => (moving = null)}>Abbrechen</button>
+      </div>
+    {:else if selecting && picked && picked.length > 0}
       <div class="action-bar">
         <span>{picked.length} ausgewählt</span>
         <div class="spacer"></div>
+        <button type="button" class="control" disabled={busy} onclick={beginPickedMove}>
+          Verschieben…
+        </button>
         <button type="button" class="control" disabled={busy} onclick={() => void remove(picked ?? [])}>
           In den Papierkorb
         </button>
       </div>
     {/if}
 
-    <div class="contents">
+    {#if mutationFailure}
+      <div class="operation-error" role="alert">
+        <span>{mutationFailure}</span>
+        <div class="spacer"></div>
+        <button
+          type="button"
+          class="error-dismiss"
+          aria-label="Fehlermeldung schließen"
+          onclick={() => (mutationFailure = null)}
+        >×</button>
+      </div>
+    {/if}
+
+    <div class="contents" bind:this={contentsElement}>
       {#if !tauriAvailable}
         <p class="notice">The library needs the desktop app — a browser has no folder to read.</p>
       {:else if !libraryRoot}
@@ -522,23 +774,28 @@
               <div
                 class="tile folder"
                 class:chosen={picked?.includes(folder.path)}
-                class:drop={dropTarget === folder.path}
+                class:drop={isPointerTarget("folder", folder.path)}
+                class:moveTarget={isMoveTarget(folder.path)}
+                class:draggingSource={drag?.active && drag.paths.includes(folder.path)}
+                data-library-drop-path={folder.path}
+                data-library-drop-kind="folder"
                 role="presentation"
-                draggable={!selecting}
-                ondragstart={() => (dragging = folder.path)}
-                ondragend={() => ((dragging = null), (dropTarget = null))}
-                ondragover={(event) => {
-                  if (!dragging || dragging === folder.path) return;
-                  event.preventDefault();
-                  dropTarget = folder.path;
-                }}
-                ondragleave={() => (dropTarget = null)}
-                ondrop={(event) => {
-                  event.preventDefault();
-                  if (dragging) void moveTo(dragging, folder.path);
-                }}
               >
-                <button type="button" class="hit" disabled={busy} onclick={() => activate(folder)}>
+                <button
+                  type="button"
+                  class="hit"
+                  aria-label={moving && isMoveTarget(folder.path)
+                    ? `${folder.name}, Auswahl hierher verschieben`
+                    : folder.name}
+                  aria-disabled={moving !== null && !isMoveTarget(folder.path)}
+                  disabled={busy}
+                  onpointerdown={(event) => beginEntryDrag(event, folder)}
+                  onpointermove={continueEntryDrag}
+                  onpointerup={finishEntryDrag}
+                  onpointercancel={cancelEntryDrag}
+                  onlostpointercapture={cancelEntryDrag}
+                  onclick={() => activate(folder)}
+                >
                   <svg width="19" height="19" viewBox="0 0 24 24" fill="none" aria-hidden="true">
                     <path
                       d="M3 7.5A1.5 1.5 0 0 1 4.5 6h4l2 2.5h7A1.5 1.5 0 0 1 19 10v7.5A1.5 1.5 0 0 1 17.5 19h-13A1.5 1.5 0 0 1 3 17.5v-10z"
@@ -548,7 +805,9 @@
                   </svg>
                   <span class="grow"></span>
                   <span class="tile-name">{folder.name}</span>
-                  <span class="tile-meta">{items(folder.childCount)}</span>
+                  <span class="tile-meta">
+                    {isPointerTarget("folder", folder.path) ? "Hier ablegen" : items(folder.childCount)}
+                  </span>
                 </button>
                 {@render tileMarks(folder)}
               </div>
@@ -567,12 +826,20 @@
               <div
                 class="tile notebook"
                 class:chosen={picked?.includes(notebook.path)}
+                class:draggingSource={drag?.active && drag.paths.includes(notebook.path)}
                 role="presentation"
-                draggable={!selecting}
-                ondragstart={() => (dragging = notebook.path)}
-                ondragend={() => ((dragging = null), (dropTarget = null))}
               >
-                <button type="button" class="hit" disabled={busy} onclick={() => activate(notebook)}>
+                <button
+                  type="button"
+                  class="hit"
+                  disabled={busy || moving !== null}
+                  onpointerdown={(event) => beginEntryDrag(event, notebook)}
+                  onpointermove={continueEntryDrag}
+                  onpointerup={finishEntryDrag}
+                  onpointercancel={cancelEntryDrag}
+                  onlostpointercapture={cancelEntryDrag}
+                  onclick={() => activate(notebook)}
+                >
                   <NotebookCover
                     paper={notebook.paper}
                     path={notebook.path}
@@ -593,6 +860,28 @@
   </section>
 </div>
 
+{#if drag?.active}
+  <div class="drag-preview" style={dragPreviewStyle(drag)} aria-hidden="true">
+    {#if drag.lead.kind === "folder"}
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
+        <path
+          d="M3 7.5A1.5 1.5 0 0 1 4.5 6h4l2 2.5h7A1.5 1.5 0 0 1 19 10v7.5A1.5 1.5 0 0 1 17.5 19h-13A1.5 1.5 0 0 1 3 17.5v-10z"
+          stroke="currentColor"
+          stroke-width="1.5"
+        />
+      </svg>
+    {:else}
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
+        <path d="M6 3.5h8l4 4v13H6zM14 3.5v4h4" stroke="currentColor" stroke-width="1.5" />
+      </svg>
+    {/if}
+    <span>
+      {drag.paths.length === 1 ? drag.lead.name : `${drag.paths.length} Elemente`}
+    </span>
+    {#if drag.paths.length > 1}<span class="drag-count">{drag.paths.length}</span>{/if}
+  </div>
+{/if}
+
 {#snippet tileMarks(entry: LibraryEntry)}
   {#if starred.has(entry.path)}
     <span class="star" aria-label="Favorit">
@@ -603,7 +892,7 @@
   {/if}
   {#if selecting}
     <span class="check" class:on={picked?.includes(entry.path)} aria-hidden="true"></span>
-  {:else}
+  {:else if !moving}
     <div class="anchor tile-menu">
       <button
         type="button"
@@ -792,6 +1081,11 @@
     font: inherit;
     font-size: 14.5px;
     cursor: pointer;
+    transition:
+      color 150ms ease,
+      background 150ms ease,
+      box-shadow 150ms ease,
+      transform 150ms cubic-bezier(0.2, 0.75, 0.25, 1);
   }
 
   .here-label {
@@ -811,8 +1105,15 @@
   }
 
   .crumb.drop {
-    outline: 1px solid var(--blueprint, #4c8df0);
+    box-shadow: 0 0 0 1px var(--blueprint, #4c8df0), 0 5px 14px rgb(0 0 0 / 18%);
     background: rgb(76 141 240 / 20%);
+    color: var(--text, #e9ebee);
+    transform: translateY(-1px);
+  }
+
+  .crumb.moveTarget:not(.drop) {
+    box-shadow: inset 0 0 0 1px rgb(76 141 240 / 42%);
+    color: var(--text, #e9ebee);
   }
 
   .separator {
@@ -870,6 +1171,48 @@
     font-size: 13px;
   }
 
+  .move-title {
+    color: var(--text, #e9ebee);
+    font-weight: 600;
+  }
+
+  .move-help {
+    color: var(--muted, #aeb5be);
+  }
+
+  .operation-error {
+    display: flex;
+    flex: none;
+    gap: 12px;
+    align-items: center;
+    min-height: 42px;
+    padding: 8px 24px;
+    border-bottom: 1px solid rgb(229 100 94 / 32%);
+    background: rgb(229 100 94 / 10%);
+    color: #f0aaa6;
+    font-size: 12.5px;
+  }
+
+  .error-dismiss {
+    display: grid;
+    flex: none;
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    border: 0;
+    border-radius: 5px;
+    background: transparent;
+    color: currentColor;
+    font: inherit;
+    font-size: 18px;
+    cursor: pointer;
+    place-items: center;
+  }
+
+  .error-dismiss:hover {
+    background: rgb(255 255 255 / 7%);
+  }
+
   .contents {
     flex: 1;
     padding: 22px 24px 32px;
@@ -918,6 +1261,10 @@
 
   .tile {
     position: relative;
+    transition:
+      opacity 150ms ease,
+      transform 160ms cubic-bezier(0.2, 0.75, 0.25, 1),
+      filter 160ms ease;
   }
 
   .hit {
@@ -932,6 +1279,8 @@
     font: inherit;
     text-align: left;
     cursor: pointer;
+    user-select: none;
+    -webkit-user-drag: none;
   }
 
   /* Folders are short, wide and opaque; notebooks are tall paper. The silhouettes differ before
@@ -943,23 +1292,62 @@
     border-radius: 7px;
     background: var(--panel, #23272f);
     color: var(--muted, #aeb5be);
+    box-shadow: 0 1px 2px rgb(0 0 0 / 12%);
+    transition:
+      border-color 150ms ease,
+      background 150ms ease,
+      box-shadow 160ms ease,
+      opacity 150ms ease,
+      transform 160ms cubic-bezier(0.2, 0.75, 0.25, 1);
   }
 
   .folder .hit {
     padding: 11px 13px;
   }
 
-  .folder:hover {
+  .folder:hover:not(.draggingSource):not(.drop) {
     background: #2a2f38;
   }
 
   .folder.drop {
-    outline: 2px solid var(--blueprint, #4c8df0);
+    border-color: var(--blueprint, #4c8df0);
+    outline: 1px solid var(--blueprint, #4c8df0);
     background: rgb(76 141 240 / 18%);
+    box-shadow:
+      0 10px 25px rgb(0 0 0 / 24%),
+      0 0 0 5px rgb(76 141 240 / 12%);
+    color: var(--text, #e9ebee);
+    transform: translateY(-3px) scale(1.02);
+  }
+
+  .folder.moveTarget:not(.drop) {
+    border-color: rgb(76 141 240 / 52%);
+    background: rgb(76 141 240 / 8%);
   }
 
   .notebook {
     width: 152px;
+  }
+
+  @media (hover: hover) and (pointer: fine) {
+    .tile:hover:not(.draggingSource) {
+      filter: brightness(1.04);
+      transform: translateY(-2px);
+    }
+
+    .folder.drop {
+      transform: translateY(-3px) scale(1.02);
+    }
+  }
+
+  .tile.draggingSource {
+    opacity: 0.32;
+    transform: scale(0.985);
+  }
+
+  .library.dragging,
+  .library.dragging .hit {
+    cursor: grabbing;
   }
 
   .notebook .hit {
@@ -1068,6 +1456,11 @@
     outline-offset: 2px;
   }
 
+  .error-dismiss:focus-visible {
+    outline: 2px solid var(--blueprint, #4c8df0);
+    outline-offset: 2px;
+  }
+
   .link {
     flex: none;
     padding: 0;
@@ -1123,8 +1516,65 @@
     color: var(--oxide, #e5645e);
   }
 
+  .drag-preview {
+    position: fixed;
+    z-index: 1000;
+    top: 0;
+    left: 0;
+    display: flex;
+    gap: 9px;
+    align-items: center;
+    width: max-content;
+    max-width: 220px;
+    height: 40px;
+    padding: 0 11px;
+    border: 1px solid rgb(255 255 255 / 18%);
+    border-radius: 9px;
+    background: rgb(35 39 47 / 96%);
+    box-shadow: 0 12px 28px rgb(0 0 0 / 32%);
+    color: var(--text, #e9ebee);
+    font-family: var(--font-ui, "Bahnschrift", system-ui, sans-serif);
+    font-size: 12.5px;
+    font-weight: 600;
+    pointer-events: none;
+  }
+
+  .drag-preview > span:not(.drag-count) {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .drag-count {
+    display: grid;
+    flex: none;
+    min-width: 20px;
+    height: 20px;
+    padding: 0 5px;
+    border-radius: 10px;
+    background: var(--blueprint, #4c8df0);
+    color: #0e1b31;
+    font-size: 10.5px;
+    place-items: center;
+  }
+
   button:disabled {
     cursor: default;
     opacity: 0.55;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .tile,
+    .folder,
+    .crumb {
+      transition: none;
+    }
+
+    .tile:hover:not(.draggingSource),
+    .folder.drop,
+    .crumb.drop,
+    .tile.draggingSource {
+      transform: none;
+    }
   }
 </style>

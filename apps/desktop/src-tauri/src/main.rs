@@ -33,7 +33,7 @@ fn main() {
             library::create_library_folder,
             library::create_library_notebook,
             library::rename_library_entry,
-            library::move_library_entry,
+            library::move_library_entries,
             library::delete_library_entry,
             library::write_notebook_cover,
             library::library_cover,

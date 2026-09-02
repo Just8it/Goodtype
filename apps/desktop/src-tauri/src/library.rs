@@ -13,6 +13,7 @@
 //! [`resolve`] is the only place one becomes real — see there for why that is a boundary rather
 //! than a convention.
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
@@ -21,7 +22,7 @@ use goodtype_core::{PageDefaults, layout, paths};
 use serde::{Deserialize, Serialize};
 use tauri_plugin_dialog::DialogExt;
 
-use crate::settings::{StoredLibrary, read_library, write_library};
+use crate::settings::{StoredLibrary, read_library, relocate_recent_roots, write_library};
 use crate::workspace::{AllowedRoots, allow_root, path_string};
 
 /// A notebook's manifest can be large; a listing only needs the page count out of it. Reading
@@ -68,6 +69,28 @@ pub struct LibraryListing {
     /// Echoed back so a listing that arrives late cannot be mistaken for the current folder.
     pub path: String,
     pub entries: Vec<LibraryEntry>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryRootMove {
+    from: String,
+    to: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryMoveResult {
+    paths: Vec<String>,
+    root_moves: Vec<LibraryRootMove>,
+    /// Navigation metadata is non-canonical. A failure to rewrite it must not make a completed
+    /// filesystem move look as though it failed and tempt the frontend to retry it.
+    warning: Option<String>,
+}
+
+struct ExecutedMove {
+    paths: Vec<String>,
+    directories: Vec<(PathBuf, PathBuf)>,
 }
 
 /// Resolve a library-relative path to a real one inside the library.
@@ -349,36 +372,184 @@ pub fn rename_library_entry(
     Ok(relative_child(parent, &name))
 }
 
-/// Move an entry into another folder of the library.
-#[tauri::command]
-pub fn move_library_entry(
-    app: tauri::AppHandle,
-    roots: tauri::State<'_, AllowedRoots>,
-    path: String,
-    destination: String,
-) -> Result<String, String> {
-    let root = current_root(&app, &roots)?;
-    let source = resolve(&root, &path)?;
-    let into = resolve(&root, &destination)?;
-    reject_notebook_internals(&root, &source)?;
-    reject_notebook_internals(&root, &into)?;
+/// Validate a shelf move completely before changing the filesystem, then roll back any completed
+/// renames if the operating system refuses a later one. This is shared by single and multi-item
+/// moves so a pen drag of a selection remains one action rather than a partly completed loop of
+/// frontend commands.
+fn move_entries(
+    root: &Path,
+    source_paths: &[String],
+    destination: &str,
+) -> Result<ExecutedMove, String> {
+    const MAX_MOVE_ENTRIES: usize = 200;
+    if source_paths.is_empty() || source_paths.len() > MAX_MOVE_ENTRIES {
+        return Err(format!("move 1 to {MAX_MOVE_ENTRIES} entries at a time"));
+    }
+    if source_paths.iter().collect::<HashSet<_>>().len() != source_paths.len() {
+        return Err("the move contains the same entry more than once".to_owned());
+    }
+
+    let canonical_root = paths::canonical_root(root).map_err(|error| error.to_string())?;
+    let into = resolve(&canonical_root, destination)?;
+    reject_notebook_internals(root, &into)?;
     if !into.is_dir() || is_notebook(&into) {
         return Err("that destination is not a folder".to_owned());
     }
-    // Moving a folder inside itself would carry the tree out of reach of the shelf, and on most
-    // filesystems it half-succeeds rather than failing cleanly.
-    if into.starts_with(&source) {
-        return Err("a folder cannot be moved into itself".to_owned());
+
+    let mut planned = Vec::with_capacity(source_paths.len());
+    let mut targets = HashSet::with_capacity(source_paths.len());
+    for path in source_paths {
+        let source = resolve(&canonical_root, path)?;
+        reject_notebook_internals(&canonical_root, &source)?;
+        if source == canonical_root {
+            return Err("the library itself cannot be moved".to_owned());
+        }
+        // Moving a folder inside itself would carry the tree out of reach of the shelf, and on
+        // most filesystems it half-succeeds rather than failing cleanly.
+        if into.starts_with(&source) {
+            return Err("a folder cannot be moved into itself".to_owned());
+        }
+        let name = source
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or("that entry has no name")?
+            .to_owned();
+        let target = free_child(&canonical_root, destination, &name)?;
+        if !targets.insert(target.clone()) {
+            return Err(format!("more than one selected entry is named `{name}`"));
+        }
+        planned.push((
+            path.clone(),
+            source,
+            target,
+            relative_child(destination, &name),
+        ));
     }
-    let name = source
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or("that entry has no name")?
-        .to_owned();
-    let target = free_child(&root, &destination, &name)?;
-    fs::rename(&source, &target).map_err(|error| error.to_string())?;
-    forget_favourite(&root, &path)?;
-    Ok(relative_child(&destination, &name))
+
+    // A folder and something inside it cannot both be independent members of one move. The
+    // normal shelf never creates this selection, but favourites can show entries from different
+    // depths and the privileged boundary must not rely on UI shape.
+    for (index, (_, source, _, _)) in planned.iter().enumerate() {
+        if planned
+            .iter()
+            .enumerate()
+            .any(|(other_index, (_, other, _, _))| {
+                index != other_index && source.starts_with(other)
+            })
+        {
+            return Err(
+                "a selection cannot contain both a folder and one of its children".to_owned(),
+            );
+        }
+    }
+
+    for (completed, (_, source, target, _)) in planned.iter().enumerate() {
+        if let Err(error) = fs::rename(source, target) {
+            let mut rollback_failed = false;
+            for (_, original, moved, _) in planned[..completed].iter().rev() {
+                rollback_failed |= fs::rename(moved, original).is_err();
+            }
+            return Err(if rollback_failed {
+                format!(
+                    "could not move `{}`: {error}; restoring the earlier moves also failed",
+                    source_paths[completed]
+                )
+            } else {
+                format!("could not move `{}`: {error}", source_paths[completed])
+            });
+        }
+    }
+
+    // Path-based favourites below every moved folder become stale. If their atomic preferences
+    // write fails, restore the filesystem too so the whole user action still fails together.
+    let mut shelf = read_shelf(root);
+    let before = shelf.favourites.len();
+    shelf.favourites.retain(|favourite| {
+        !source_paths
+            .iter()
+            .any(|path| favourite == path || favourite.starts_with(&format!("{path}/")))
+    });
+    if shelf.favourites.len() != before
+        && let Err(error) = write_shelf(root, &shelf)
+    {
+        let mut rollback_failed = false;
+        for (_, original, moved, _) in planned.iter().rev() {
+            rollback_failed |= fs::rename(moved, original).is_err();
+        }
+        return Err(if rollback_failed {
+            format!("{error}; restoring the moved entries also failed")
+        } else {
+            error
+        });
+    }
+
+    Ok(ExecutedMove {
+        paths: planned
+            .iter()
+            .map(|(_, _, _, relative)| relative.clone())
+            .collect(),
+        directories: planned
+            .into_iter()
+            .map(|(_, source, target, _)| (source, target))
+            .collect(),
+    })
+}
+
+fn relocated_path(path: &Path, moves: &[(PathBuf, PathBuf)]) -> Option<PathBuf> {
+    moves.iter().find_map(|(source, target)| {
+        path.strip_prefix(source)
+            .ok()
+            .map(|suffix| target.join(suffix))
+    })
+}
+
+/// Move a selection as one validated shelf action.
+#[tauri::command]
+pub fn move_library_entries(
+    app: tauri::AppHandle,
+    roots: tauri::State<'_, AllowedRoots>,
+    tinymist: tauri::State<'_, crate::tinymist::Tinymist>,
+    paths: Vec<String>,
+    destination: String,
+) -> Result<LibraryMoveResult, String> {
+    let root = current_root(&app, &roots)?;
+
+    // Hold the allowlist while the roots it names change identity. This prevents another command
+    // from observing the short interval between the filesystem rename and the in-memory update.
+    let mut allowed = roots.0.lock().map_err(|error| error.to_string())?;
+    tinymist.reset();
+    let moved = move_entries(&root, &paths, &destination)?;
+
+    let allowed_moves = allowed
+        .iter()
+        .filter_map(|from| relocated_path(from, &moved.directories).map(|to| (from.clone(), to)))
+        .collect::<Vec<_>>();
+    for (from, to) in &allowed_moves {
+        allowed.remove(from);
+        allowed.insert(to.clone());
+    }
+    drop(allowed);
+
+    let root_moves = allowed_moves
+        .iter()
+        .filter_map(|(from, to)| {
+            Some(LibraryRootMove {
+                from: path_string(from.clone()).ok()?,
+                to: path_string(to.clone()).ok()?,
+            })
+        })
+        .collect();
+    let warning = relocate_recent_roots(&app, &moved.directories)
+        .err()
+        .map(|error| {
+            format!("the notebooks moved, but their reopening history was not updated: {error}")
+        });
+
+    Ok(LibraryMoveResult {
+        paths: moved.paths,
+        root_moves,
+        warning,
+    })
 }
 
 /// Move an entry to the library's trash.
@@ -885,10 +1056,73 @@ mod tests {
         let root = library();
         let outer = fs::canonicalize(root.path().join("Semester 3")).unwrap();
         let inner = fs::canonicalize(root.path().join("Semester 3/Altklausuren")).unwrap();
-        // The shape `move_library_entry` guards with, checked directly so the guard is pinned
+        // The shape the batch move guards with, checked directly so the guard is pinned
         // even though the command itself needs a running Tauri app.
         assert!(inner.starts_with(&outer));
         assert!(!outer.starts_with(&inner));
+    }
+
+    #[test]
+    fn a_selection_moves_together_after_every_target_has_been_validated() {
+        let root = library();
+        fs::create_dir(root.path().join("Archiv")).unwrap();
+        let old_notebook = fs::canonicalize(root.path().join("Semester 3/Thermodynamik")).unwrap();
+        write_shelf(
+            root.path(),
+            &Shelf {
+                favourites: vec![
+                    "Semester 3/Altklausuren".to_owned(),
+                    "Semester 3/Thermodynamik".to_owned(),
+                ],
+            },
+        )
+        .unwrap();
+
+        let moved = move_entries(
+            root.path(),
+            &[
+                "Semester 3/Altklausuren".to_owned(),
+                "Semester 3/Thermodynamik".to_owned(),
+            ],
+            "Archiv",
+        )
+        .unwrap();
+
+        assert_eq!(moved.paths, ["Archiv/Altklausuren", "Archiv/Thermodynamik"]);
+        assert_eq!(
+            relocated_path(&old_notebook, &moved.directories),
+            Some(fs::canonicalize(root.path().join("Archiv/Thermodynamik")).unwrap())
+        );
+        assert!(root.path().join("Archiv/Altklausuren").is_dir());
+        assert!(
+            root.path()
+                .join("Archiv/Thermodynamik/goodtype.json")
+                .is_file()
+        );
+        assert!(!root.path().join("Semester 3/Altklausuren").exists());
+        assert!(!root.path().join("Semester 3/Thermodynamik").exists());
+        assert!(read_shelf(root.path()).favourites.is_empty());
+    }
+
+    #[test]
+    fn a_conflict_refuses_the_whole_selection_before_the_first_rename() {
+        let root = library();
+        fs::create_dir(root.path().join("Archiv")).unwrap();
+        fs::create_dir(root.path().join("Archiv/Thermodynamik")).unwrap();
+
+        let result = move_entries(
+            root.path(),
+            &[
+                "Semester 3/Altklausuren".to_owned(),
+                "Semester 3/Thermodynamik".to_owned(),
+            ],
+            "Archiv",
+        );
+
+        assert!(result.is_err());
+        assert!(root.path().join("Semester 3/Altklausuren").is_dir());
+        assert!(root.path().join("Semester 3/Thermodynamik").is_dir());
+        assert!(!root.path().join("Archiv/Altklausuren").exists());
     }
 
     #[test]

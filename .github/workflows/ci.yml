@@ -44,5 +44,12 @@ jobs:
           node-version-file: .node-version
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: cargo check --workspace
+      # Tinymist Gate 1 currently ships only the pinned Windows x64 sidecar. Tauri otherwise
+      # derives a target-specific external-binary name here and rejects these source-only smoke
+      # builds before Rust is checked. Keep the native sidecar mandatory in Windows verification;
+      # macOS/Linux continue to compile the contained in-process intelligence fallback.
+      - name: Check Rust workspace without the Windows-only Tinymist sidecar
+        run: cargo check --workspace
+        env:
+          TAURI_CONFIG: '{"bundle":{"externalBin":[]}}'
       - run: pnpm build

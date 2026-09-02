@@ -22,6 +22,7 @@
     listRecoveryCandidates,
     restoreRecoveryCandidate,
   } from "../ipc/recovery";
+  import { moveLibraryEntries } from "../ipc/library";
   // The local `compileTypst` owns the cache check, the browser fallback and the block's preview
   // state; this is only the round trip it makes when none of those answer.
   import { compileTypst as requestTypstCompile } from "../ipc/typst";
@@ -792,13 +793,20 @@
 
   async function openNotebookAt(
     nextRoot: string,
-    options: { createIfMissing?: boolean; skipCurrentPersist?: boolean; setup?: NotebookSetup } = {},
+    options: {
+      createIfMissing?: boolean;
+      skipCurrentPersist?: boolean;
+      stayInLibrary?: boolean;
+      setup?: NotebookSetup;
+    } = {},
   ): Promise<boolean> {
     if (nextRoot === root && activeSnapshot) {
-      notebookChosen = true;
+      notebookChosen = !options.stayInLibrary;
       pageOpen = true;
-      await tick();
-      scrollToPage(activePageId, "auto");
+      if (!options.stayInLibrary) {
+        await tick();
+        scrollToPage(activePageId, "auto");
+      }
       status = "Notebook ready";
       return true;
     }
@@ -860,10 +868,12 @@
       } catch {
         sessionRemembered = false;
       }
-      notebookChosen = true;
+      notebookChosen = !options.stayInLibrary;
       pageOpen = true;
-      await tick();
-      scrollToPage(snapshot.page.id, "auto");
+      if (!options.stayInLibrary) {
+        await tick();
+        scrollToPage(snapshot.page.id, "auto");
+      }
       status = sessionRemembered
         ? "Notebook ready"
         : "Notebook ready, but its reopening position could not be remembered";
@@ -3265,6 +3275,56 @@
     status = "Choose a notebook, or return to an open tab";
   }
 
+  /**
+   * Save the live notebook, let Rust move the filesystem entries, then retarget every affected
+   * tab and reload the active one from its new root without leaving the library surface.
+   */
+  async function moveLibrarySelection(
+    paths: string[],
+    destination: string,
+  ): Promise<string | null> {
+    if (activeSnapshot && !(await persist())) {
+      throw new Error("The open notebook could not be saved, so nothing was moved");
+    }
+    if (root) await recordNotebookPage(root, activePageId).catch(() => {});
+
+    const previousRoot = root;
+    const previousTabs = openTabs;
+    const result = await moveLibraryEntries(paths, destination);
+    if (result.rootMoves.length === 0) return result.warning;
+
+    const relocated = new Map(result.rootMoves.map((move) => [move.from, move.to]));
+    openTabs = openTabs.map((tab) => ({
+      ...tab,
+      root: relocated.get(tab.root) ?? tab.root,
+    }));
+
+    const nextRoot = relocated.get(previousRoot);
+    if (nextRoot) {
+      const reopened = await openNotebookAt(nextRoot, {
+        skipCurrentPersist: true,
+        stayInLibrary: true,
+      });
+      if (!reopened) {
+        // The canonical data was confirmed before the move and remains the same directory at a
+        // new root. Keep that in-memory snapshot usable even if a fresh read hit a transient
+        // failure, and make the unusual state explicit rather than pretending the move failed.
+        root = nextRoot;
+        openTabs = previousTabs.map((tab) => ({
+          ...tab,
+          root: relocated.get(tab.root) ?? tab.root,
+        }));
+        notebookChosen = false;
+        await rememberNotebookSession();
+        return "Verschoben; der aktive Tab konnte am neuen Ort nicht neu geladen werden";
+      }
+    } else if (!(await rememberNotebookSession())) {
+      return "Verschoben; die neue Tab-Position konnte nicht gespeichert werden";
+    }
+
+    return result.warning;
+  }
+
   function returnToNotebook() {
     if (!activeSnapshot || !root) return;
     notebookChosen = true;
@@ -3545,6 +3605,7 @@
           showInitialSetup = false;
           void openNotebookAt(nextRoot, { createIfMissing: true, setup });
         }}
+        onMove={moveLibrarySelection}
         returnLabel={openTabs.find((tab) => tab.root === root)?.title}
         onReturn={openTabs.length > 0 ? returnToNotebook : undefined}
         onLocationChange={(next) => (shelfLocation = next)}

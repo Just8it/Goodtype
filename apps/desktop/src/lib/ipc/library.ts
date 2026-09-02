@@ -54,8 +54,18 @@ export function renameLibraryEntry(path: string, name: string): Promise<string> 
   return invoke<string>("rename_library_entry", { path, name });
 }
 
-export function moveLibraryEntry(path: string, destination: string): Promise<string> {
-  return invoke<string>("move_library_entry", { path, destination });
+export type LibraryMoveResult = {
+  paths: string[];
+  rootMoves: { from: string; to: string }[];
+  warning: string | null;
+};
+
+/** Moves one or more entries only after Rust has validated every source and target. */
+export function moveLibraryEntries(
+  paths: string[],
+  destination: string,
+): Promise<LibraryMoveResult> {
+  return invoke<LibraryMoveResult>("move_library_entries", { paths, destination });
 }
 
 /** Moves to the library's trash rather than deleting outright. */

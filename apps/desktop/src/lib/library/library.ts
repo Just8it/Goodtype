@@ -75,6 +75,24 @@ export function childPath(parent: string, name: string): string {
 }
 
 /**
+ * Whether dropping `source` into `destination` can produce a different valid shelf location.
+ *
+ * This only keeps impossible/no-op targets from lighting up in the UI. Rust remains the
+ * authority: it resolves both paths inside the selected root and repeats every containment and
+ * collision check before moving anything.
+ */
+export function canMoveLibraryEntry(source: string, destination: string): boolean {
+  if (!source || source === destination) return false;
+  if (parentPath(source) === destination) return false;
+  return !destination.startsWith(`${source}/`);
+}
+
+/** All members move or none do; this mirrors the Rust batch command's contract. */
+export function canMoveLibraryEntries(sources: string[], destination: string): boolean {
+  return sources.length > 0 && sources.every((source) => canMoveLibraryEntry(source, destination));
+}
+
+/**
  * Names Goodtype will create a folder or notebook under.
  *
  * Deliberately narrow rather than merely legal. These names become directory names on someone

@@ -3,7 +3,10 @@
 //! Both files live in the app configuration directory, never inside a notebook: they are
 //! device preferences and navigation history, not canonical notebook content.
 
-use std::{fs, path::PathBuf};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use serde::{Deserialize, Serialize};
 use tauri::Manager;
@@ -408,6 +411,49 @@ pub fn recent_session(app: &tauri::AppHandle) -> Result<(Vec<String>, Option<Str
     Ok((roots, recents.active_root))
 }
 
+fn relocated_root(root: &str, moves: &[(PathBuf, PathBuf)]) -> Option<String> {
+    let root = Path::new(root);
+    moves.iter().find_map(|(source, target)| {
+        let suffix = root.strip_prefix(source).ok()?;
+        target.join(suffix).into_os_string().into_string().ok()
+    })
+}
+
+/// Keep app-local recents and restored tabs pointed at notebooks moved by the library.
+///
+/// `moves` are already validated, canonical directory renames owned by the library command. This
+/// function does not authorize a path or touch notebook content; it only rewrites navigation
+/// metadata that would otherwise become stale after a successful move of a notebook or ancestor.
+pub fn relocate_recent_roots(
+    app: &tauri::AppHandle,
+    moves: &[(PathBuf, PathBuf)],
+) -> Result<(), String> {
+    let mut recents = read_config::<RecentNotebooks>(app, "recents.json")?;
+    let mut changed = false;
+    for entry in &mut recents.entries {
+        if let Some(relocated) = relocated_root(&entry.root, moves) {
+            entry.root = relocated;
+            changed = true;
+        }
+    }
+    for root in &mut recents.open_roots {
+        if let Some(relocated) = relocated_root(root, moves) {
+            *root = relocated;
+            changed = true;
+        }
+    }
+    if let Some(active) = recents.active_root.as_mut()
+        && let Some(relocated) = relocated_root(active, moves)
+    {
+        *active = relocated;
+        changed = true;
+    }
+    if changed {
+        write_config(app, "recents.json", &recents)?;
+    }
+    Ok(())
+}
+
 pub fn record_recent_session(
     app: &tauri::AppHandle,
     roots: Vec<String>,
@@ -560,7 +606,9 @@ pub fn seed_remote_packages(app: &tauri::AppHandle, policy: &RemotePackages) {
 
 #[cfg(test)]
 mod tests {
-    use super::{AppSettings, RecentNotebooks, sanitize, session_roots};
+    use std::path::PathBuf;
+
+    use super::{AppSettings, RecentNotebooks, relocated_root, sanitize, session_roots};
 
     #[test]
     fn touch_glide_has_a_bounded_hardware_tuning_range() {
@@ -592,5 +640,22 @@ mod tests {
             serde_json::from_str(r#"{"entries":[],"activeRoot":"C:\\notes\\physics"}"#)
                 .expect("single-root session should still load");
         assert_eq!(session_roots(&recents), [r"C:\notes\physics"]);
+    }
+
+    #[test]
+    fn moving_an_ancestor_relocates_the_notebook_root_below_it() {
+        let source = PathBuf::from("notes").join("semester-3");
+        let target = PathBuf::from("notes").join("archive").join("semester-3");
+        let notebook = source.join("thermodynamics");
+        assert_eq!(
+            relocated_root(&notebook.to_string_lossy(), &[(source, target.clone())]),
+            Some(
+                target
+                    .join("thermodynamics")
+                    .into_os_string()
+                    .into_string()
+                    .unwrap()
+            )
+        );
     }
 }

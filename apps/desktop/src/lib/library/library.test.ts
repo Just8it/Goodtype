@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   bands,
   breadcrumb,
+  canMoveLibraryEntries,
+  canMoveLibraryEntry,
   childPath,
   nameProblem,
   parentPath,
@@ -44,6 +46,24 @@ describe("library paths", () => {
     expect(parentPath("")).toBeNull();
     expect(childPath("", "Semester 1")).toBe("Semester 1");
     expect(childPath("Semester 1", "Mathe 3")).toBe("Semester 1/Mathe 3");
+  });
+
+  it("only offers destinations that can actually change an entry's location", () => {
+    expect(canMoveLibraryEntry("Semester 3/Thermodynamik", "Semester 4")).toBe(true);
+    expect(canMoveLibraryEntry("Semester 3/Thermodynamik", "")).toBe(true);
+
+    // Dropping into the current parent would only create a name collision.
+    expect(canMoveLibraryEntry("Semester 3/Thermodynamik", "Semester 3")).toBe(false);
+    expect(canMoveLibraryEntry("Semester 3", "Semester 3")).toBe(false);
+    // A folder can never become a child of itself, directly or through a descendant.
+    expect(canMoveLibraryEntry("Semester 3", "Semester 3/Archiv")).toBe(false);
+  });
+
+  it("keeps a multi-selection all-or-nothing", () => {
+    const selection = ["Semester 3/Thermodynamik", "Semester 3/Mechanik"];
+    expect(canMoveLibraryEntries(selection, "Semester 4")).toBe(true);
+    expect(canMoveLibraryEntries(selection, "Semester 3")).toBe(false);
+    expect(canMoveLibraryEntries([], "Semester 4")).toBe(false);
   });
 });
 
