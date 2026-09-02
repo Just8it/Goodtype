@@ -530,13 +530,13 @@
     {
       id: "name",
       label: "Name",
-      marker: order === "name" ? "✓" : undefined,
+      checked: order === "name",
       onSelect: () => (order = "name"),
     },
     {
       id: "modified",
       label: "Zuletzt geändert",
-      marker: order === "modified" ? "✓" : undefined,
+      checked: order === "modified",
       onSelect: () => (order = "modified"),
     },
   ]);
@@ -594,7 +594,10 @@
     </div>
 
     {#if onReturn}
-      <button type="button" class="return-to-notebook" onclick={onReturn}>← {returnLabel ?? "Open notebook"}</button>
+      <button type="button" class="return-to-notebook" onclick={onReturn}>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14 6-6 6 6 6" /></svg>
+        <span>{returnLabel ?? "Offenes Notizbuch"}</span>
+      </button>
     {/if}
 
     {#if libraryRoot}
@@ -611,14 +614,25 @@
           type="button"
           class="view"
           class:current={view === "library"}
-          onclick={() => void show("")}>Bibliothek</button
+          aria-current={view === "library" ? "page" : undefined}
+          onclick={() => void show("")}
         >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M4 5.5h6.5v13H4zM13.5 5.5H20v13h-6.5z" />
+            <path d="M7.25 9h0M16.75 9h0" />
+          </svg>
+          <span class="grow">Bibliothek</span>
+        </button>
         <button
           type="button"
           class="view"
           class:current={view === "favourites"}
+          aria-current={view === "favourites" ? "page" : undefined}
           onclick={() => void showFavourites()}
         >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="m12 4 2.4 5 5.6.7-4 3.9 1 5.4-5-2.7-5 2.7 1-5.4-4-3.9 5.6-.7L12 4Z" />
+          </svg>
           <span class="grow">Favoriten</span>
           {#if favourites.length > 0}<span class="tally">{favourites.length}</span>{/if}
         </button>
@@ -632,7 +646,7 @@
          search are for, and moving is a drag onto a crumb or a folder tile. -->
   </aside>
 
-  <section class="shelf">
+  <section class="shelf" aria-busy={busy}>
     <header class="bar">
       {#if view === "favourites"}
         <span class="here-label">Favoriten</span>
@@ -652,8 +666,7 @@
               aria-label={moving && isMoveTarget(crumb.path)
                 ? `${crumb.name}, Auswahl hierher verschieben`
                 : crumb.name}
-              aria-disabled={moving !== null && !isMoveTarget(crumb.path)}
-              disabled={busy}
+              disabled={busy || (moving !== null && !isMoveTarget(crumb.path))}
               onclick={() => moving ? chooseDestination(crumb.path) : void show(crumb.path)}
               >{crumb.name}</button
             >
@@ -665,8 +678,18 @@
 
       {#if libraryRoot}
         <div class="anchor">
-          <button type="button" class="control" disabled={busy || moving !== null} onclick={() => (menu = menu === "sort" ? null : "sort")}>
-            Sortieren: {order === "name" ? "Name" : "Datum"}
+          <button
+            type="button"
+            class="control menu-control"
+            aria-haspopup="menu"
+            aria-expanded={menu === "sort"}
+            disabled={busy || moving !== null}
+            onclick={() => (menu = menu === "sort" ? null : "sort")}
+          >
+            <span>Sortieren: {order === "name" ? "Name" : "Datum"}</span>
+            <svg class:open={menu === "sort"} viewBox="0 0 24 24" aria-hidden="true">
+              <path d="m7 9.5 5 5 5-5" />
+            </svg>
           </button>
           {#if menu === "sort"}
             <ShelfMenu label="Sortieren" items={sortItems} onClose={() => (menu = null)} />
@@ -676,6 +699,7 @@
         <button
           type="button"
           class="control"
+          aria-pressed={selecting}
           disabled={busy || moving !== null}
           onclick={() => (picked = selecting ? null : [])}
         >
@@ -684,8 +708,19 @@
 
         {#if view === "library"}
           <div class="anchor">
-            <button type="button" class="primary" disabled={busy || moving !== null} onclick={() => (menu = menu === "new" ? null : "new")}>
-              + Neu
+            <button
+              type="button"
+              class="primary menu-control"
+              aria-haspopup="menu"
+              aria-expanded={menu === "new"}
+              disabled={busy || moving !== null}
+              onclick={() => (menu = menu === "new" ? null : "new")}
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
+              <span>Neu</span>
+              <svg class="menu-caret" class:open={menu === "new"} viewBox="0 0 24 24" aria-hidden="true">
+                <path d="m7 9.5 5 5 5-5" />
+              </svg>
             </button>
             {#if menu === "new"}
               <ShelfMenu label="Neu" items={newItems} onClose={() => (menu = null)} />
@@ -711,7 +746,7 @@
         <button type="button" class="control" disabled={busy} onclick={beginPickedMove}>
           Verschieben…
         </button>
-        <button type="button" class="control" disabled={busy} onclick={() => void remove(picked ?? [])}>
+        <button type="button" class="control destructive" disabled={busy} onclick={() => void remove(picked ?? [])}>
           In den Papierkorb
         </button>
       </div>
@@ -726,23 +761,29 @@
           class="error-dismiss"
           aria-label="Fehlermeldung schließen"
           onclick={() => (mutationFailure = null)}
-        >×</button>
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" /></svg>
+        </button>
       </div>
     {/if}
 
     <div class="contents" bind:this={contentsElement}>
       {#if !tauriAvailable}
-        <p class="notice">The library needs the desktop app — a browser has no folder to read.</p>
+        <p class="notice">Die Bibliothek benötigt die Desktop-App, damit sie deinen Ordner lesen kann.</p>
       {:else if !libraryRoot}
         <div class="first-run">
+          <div class="first-run-mark" aria-hidden="true">
+            <svg viewBox="0 0 24 24">
+              <path d="M3.5 7.5A1.5 1.5 0 0 1 5 6h4l2 2.5h8A1.5 1.5 0 0 1 20.5 10v8A1.5 1.5 0 0 1 19 19.5H5A1.5 1.5 0 0 1 3.5 18V7.5Z" />
+            </svg>
+          </div>
           <h1>Wo sollen deine Notizbücher liegen?</h1>
           <p>
-            Wähle einen Ordner. Alles darin gehört dir: Ordner verschachteln sich beliebig, und
-            jeder Ordner mit einem Notizbuch darin ist eines. Goodtype legt keine Datenbank an —
-            was im Explorer liegt, liegt auch hier.
+            Wähle den Ordner, in dem Goodtype deine Notizbücher zeigt. Unterordner werden direkt
+            übernommen; Goodtype legt keine zusätzliche Datenbank an.
           </p>
           <button type="button" class="primary" disabled={busy} onclick={chooseLibrary}>
-            Ordner wählen
+            Bibliotheksordner wählen
           </button>
         </div>
       {:else if failure}
@@ -788,6 +829,7 @@
                     ? `${folder.name}, Auswahl hierher verschieben`
                     : folder.name}
                   aria-disabled={moving !== null && !isMoveTarget(folder.path)}
+                  aria-pressed={selecting ? picked?.includes(folder.path) : undefined}
                   disabled={busy}
                   onpointerdown={(event) => beginEntryDrag(event, folder)}
                   onpointermove={continueEntryDrag}
@@ -832,6 +874,8 @@
                 <button
                   type="button"
                   class="hit"
+                  aria-label={`${notebook.name}, ${pages(notebook.pageCount)}, zuletzt geändert ${whenModified(notebook.modifiedMs)}`}
+                  aria-pressed={selecting ? picked?.includes(notebook.path) : undefined}
                   disabled={busy || moving !== null}
                   onpointerdown={(event) => beginEntryDrag(event, notebook)}
                   onpointermove={continueEntryDrag}
@@ -886,7 +930,7 @@
   {#if starred.has(entry.path)}
     <span class="star" aria-label="Favorit">
       <svg width="13" height="13" viewBox="0 0 24 24" aria-hidden="true">
-        <path d="M12 4l2.4 5 5.6.7-4 3.9 1 5.4-5-2.7-5 2.7 1-5.4-4-3.9 5.6-.7L12 4z" fill="#E0912B" />
+        <path d="M12 4l2.4 5 5.6.7-4 3.9 1 5.4-5-2.7-5 2.7 1-5.4-4-3.9 5.6-.7L12 4z" />
       </svg>
     </span>
   {/if}
@@ -898,9 +942,18 @@
         type="button"
         class="chevron"
         aria-label={`Aktionen für ${entry.name}`}
+        title="Weitere Aktionen"
+        aria-haspopup="menu"
+        aria-expanded={entryMenu === entry.path}
         disabled={busy}
-        onclick={() => (entryMenu = entryMenu === entry.path ? null : entry.path)}>▾</button
+        onclick={() => (entryMenu = entryMenu === entry.path ? null : entry.path)}
       >
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <circle cx="5" cy="12" r="1.35" />
+          <circle cx="12" cy="12" r="1.35" />
+          <circle cx="19" cy="12" r="1.35" />
+        </svg>
+      </button>
       {#if entryMenu === entry.path}
         <ShelfMenu
           label={`Aktionen für ${entry.name}`}
@@ -941,6 +994,7 @@
     background: var(--surround, #1b1e24);
     color: var(--text, #e9ebee);
     font-family: var(--font-ui, "Bahnschrift", system-ui, sans-serif);
+    isolation: isolate;
   }
 
   .rail {
@@ -948,8 +1002,8 @@
     flex: none;
     flex-direction: column;
     width: 236px;
-    padding: 16px 12px 12px;
-    border-right: 1px solid rgb(255 255 255 / 12%);
+    padding: 12px;
+    border-right: 1px solid var(--edge-soft, rgb(255 255 255 / 7%));
     background: var(--charcoal, #16181d);
   }
 
@@ -957,32 +1011,53 @@
     display: flex;
     gap: 9px;
     align-items: center;
-    padding: 0 6px 14px;
-    font-size: 15px;
+    min-height: var(--control, 36px);
+    padding: 0 6px 12px;
+    font-size: var(--text-lg, 15px);
     font-weight: 600;
+    letter-spacing: -0.01em;
   }
 
   .return-to-notebook {
+    display: flex;
     width: 100%;
-    min-height: 40px;
-    margin-bottom: 12px;
-    padding: 8px 10px;
-    border: 1px solid rgb(255 255 255 / 12%);
-    border-radius: 7px;
-    background: rgb(255 255 255 / 4%);
+    min-height: var(--control, 36px);
+    align-items: center;
+    gap: 7px;
+    margin-bottom: 10px;
+    padding: 6px 8px;
+    border: 0;
+    border-radius: var(--radius, 6px);
+    background: transparent;
     color: var(--text, #e9ebee);
+    font-size: var(--text-md, 13px);
     cursor: pointer;
     text-align: left;
+    touch-action: manipulation;
+    transition: background 120ms ease, color 120ms ease;
   }
-  .return-to-notebook:hover { background: rgb(255 255 255 / 8%); }
+  .return-to-notebook:hover { background: var(--wash, rgb(255 255 255 / 8%)); }
+
+  .return-to-notebook svg,
+  .view svg {
+    width: var(--icon-dense, 16px);
+    height: var(--icon-dense, 16px);
+    flex: none;
+    fill: none;
+    stroke: currentColor;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    stroke-width: var(--stroke-dense, 2);
+  }
 
   .where {
     display: flex;
     gap: 8px;
     align-items: center;
-    padding: 8px 10px;
-    border: 1px solid rgb(255 255 255 / 12%);
-    border-radius: 7px;
+    min-height: var(--control, 36px);
+    padding: 7px 8px;
+    border: 0;
+    border-radius: var(--radius, 6px);
     background: rgb(255 255 255 / 4%);
   }
 
@@ -993,8 +1068,8 @@
 
   .overline {
     color: var(--quiet, #6a727c);
-    font-size: 9.5px;
-    letter-spacing: 0.09em;
+    font-size: var(--text-xs, 10px);
+    letter-spacing: 0.08em;
     text-transform: uppercase;
   }
 
@@ -1003,7 +1078,7 @@
     margin-top: 2px;
     color: var(--muted, #aeb5be);
     direction: rtl;
-    font-size: 11.5px;
+    font-size: var(--text-sm, 11px);
     text-overflow: ellipsis;
     white-space: nowrap;
   }
@@ -1011,38 +1086,42 @@
   .views {
     display: flex;
     flex-direction: column;
-    gap: 1px;
-    margin-top: 14px;
+    gap: 3px;
+    margin-top: 10px;
   }
 
   .view {
     display: flex;
     gap: 10px;
     align-items: center;
-    padding: 8px 10px;
-    border: 0;
-    border-radius: 7px;
+    min-height: var(--control, 36px);
+    padding: 6px 8px;
+    border: 1px solid transparent;
+    border-radius: var(--radius, 6px);
     background: transparent;
     color: var(--muted, #aeb5be);
     font: inherit;
-    font-size: 13.5px;
+    font-size: var(--text-md, 13px);
     text-align: left;
     cursor: pointer;
+    touch-action: manipulation;
+    transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
   }
 
   .view:hover:not(.current) {
-    background: rgb(255 255 255 / 5%);
+    background: var(--wash, rgb(255 255 255 / 8%));
   }
 
   .view.current {
-    outline: 1px solid rgb(76 141 240 / 50%);
+    border-color: rgb(76 141 240 / 52%);
     background: rgb(76 141 240 / 16%);
     color: var(--text, #e9ebee);
   }
 
   .tally {
     color: var(--quiet, #6a727c);
-    font-size: 11px;
+    font-size: var(--text-sm, 11px);
+    font-variant-numeric: tabular-nums;
   }
 
   .shelf {
@@ -1055,16 +1134,17 @@
   .bar {
     display: flex;
     flex: none;
-    gap: 10px;
+    gap: 7px;
     align-items: center;
-    height: 56px;
+    height: 58px;
     padding: 0 24px;
-    border-bottom: 1px solid rgb(255 255 255 / 12%);
+    border-bottom: 1px solid var(--edge-soft, rgb(255 255 255 / 7%));
+    background: var(--charcoal, #16181d);
   }
 
   .crumbs {
     display: flex;
-    gap: 3px;
+    gap: 2px;
     align-items: center;
     min-width: 0;
     overflow: hidden;
@@ -1073,19 +1153,20 @@
   .crumb,
   .here-label {
     flex: none;
-    padding: 3px 6px;
+    min-height: var(--control-dense, 28px);
+    padding: 4px 7px;
     border: 0;
-    border-radius: 7px;
+    border-radius: var(--radius, 6px);
     background: transparent;
     color: var(--muted, #aeb5be);
     font: inherit;
-    font-size: 14.5px;
+    font-size: var(--text-md, 13px);
     cursor: pointer;
     transition:
-      color 150ms ease,
-      background 150ms ease,
-      box-shadow 150ms ease,
-      transform 150ms cubic-bezier(0.2, 0.75, 0.25, 1);
+      color 120ms ease,
+      background 120ms ease,
+      box-shadow 140ms ease,
+      transform 140ms cubic-bezier(0.16, 1, 0.3, 1);
   }
 
   .here-label {
@@ -1118,7 +1199,7 @@
 
   .separator {
     color: var(--quiet, #6a727c);
-    font-size: 13px;
+    font-size: var(--text-sm, 11px);
   }
 
   .spacer {
@@ -1130,34 +1211,88 @@
   }
 
   .control {
-    height: 34px;
+    display: inline-flex;
+    min-height: var(--control, 36px);
+    align-items: center;
+    gap: 7px;
     padding: 0 11px;
-    border: 1px solid rgb(255 255 255 / 16%);
-    border-radius: 7px;
-    background: transparent;
+    border: 0;
+    border-radius: var(--radius, 6px);
+    background: rgb(255 255 255 / 5%);
     color: var(--muted, #aeb5be);
     font: inherit;
-    font-size: 13px;
+    font-size: var(--text-md, 13px);
     white-space: nowrap;
     cursor: pointer;
+    touch-action: manipulation;
+    transition: background 120ms ease, color 120ms ease;
   }
 
   .control:hover:not(:disabled) {
-    background: rgb(255 255 255 / 5%);
+    background: var(--wash, rgb(255 255 255 / 8%));
+    color: var(--text, #e9ebee);
+  }
+
+  .control[aria-pressed="true"] {
+    box-shadow: inset 0 0 0 1px rgb(76 141 240 / 52%);
+    background: rgb(76 141 240 / 16%);
+    color: var(--text, #e9ebee);
+  }
+
+  .control.destructive {
+    color: var(--oxide, #e5645e);
+  }
+
+  .control.destructive:hover:not(:disabled) {
+    background: rgb(229 100 94 / 12%);
   }
 
   .primary {
-    height: 34px;
+    display: inline-flex;
+    min-height: var(--control, 36px);
+    align-items: center;
+    justify-content: center;
+    gap: 7px;
     padding: 0 13px;
     border: 0;
-    border-radius: 7px;
+    border-radius: var(--radius, 6px);
     background: var(--blueprint, #4c8df0);
     color: #0e1b31;
     font: inherit;
-    font-size: 13px;
+    font-size: var(--text-md, 13px);
     font-weight: 600;
     white-space: nowrap;
     cursor: pointer;
+    touch-action: manipulation;
+    transition: background 120ms ease, transform 120ms cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  .primary:hover:not(:disabled) {
+    background: var(--blueprint-light, #7fb0f7);
+  }
+
+  .primary:active:not(:disabled) {
+    transform: translateY(1px);
+  }
+
+  .menu-control > svg {
+    width: var(--icon-dense, 16px);
+    height: var(--icon-dense, 16px);
+    flex: none;
+    fill: none;
+    stroke: currentColor;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    stroke-width: var(--stroke-dense, 2);
+  }
+
+  .menu-control > svg:not(:first-child),
+  .menu-control > .menu-caret {
+    transition: transform 140ms cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  .menu-control > svg.open {
+    transform: rotate(180deg);
   }
 
   .action-bar {
@@ -1165,10 +1300,11 @@
     flex: none;
     gap: 10px;
     align-items: center;
-    padding: 10px 24px;
-    border-bottom: 1px solid rgb(255 255 255 / 12%);
+    min-height: 48px;
+    padding: 6px 24px;
+    border-bottom: 1px solid var(--edge-soft, rgb(255 255 255 / 7%));
     background: rgb(76 141 240 / 10%);
-    font-size: 13px;
+    font-size: var(--text-md, 13px);
   }
 
   .move-title {
@@ -1185,38 +1321,66 @@
     flex: none;
     gap: 12px;
     align-items: center;
-    min-height: 42px;
+    min-height: 44px;
     padding: 8px 24px;
     border-bottom: 1px solid rgb(229 100 94 / 32%);
     background: rgb(229 100 94 / 10%);
     color: #f0aaa6;
-    font-size: 12.5px;
+    font-size: var(--text-md, 13px);
   }
 
   .error-dismiss {
     display: grid;
     flex: none;
-    width: 28px;
-    height: 28px;
+    width: var(--control-dense, 28px);
+    height: var(--control-dense, 28px);
     padding: 0;
     border: 0;
-    border-radius: 5px;
+    border-radius: var(--radius, 6px);
     background: transparent;
     color: currentColor;
     font: inherit;
-    font-size: 18px;
     cursor: pointer;
     place-items: center;
   }
 
   .error-dismiss:hover {
-    background: rgb(255 255 255 / 7%);
+    background: var(--wash, rgb(255 255 255 / 8%));
+  }
+
+  .error-dismiss svg {
+    width: var(--icon-dense, 16px);
+    height: var(--icon-dense, 16px);
+    fill: none;
+    stroke: currentColor;
+    stroke-linecap: round;
+    stroke-width: var(--stroke-dense, 2);
   }
 
   .contents {
     flex: 1;
     padding: 22px 24px 32px;
     overflow-y: auto;
+    scrollbar-color: var(--quiet, #6a727c) transparent;
+    scrollbar-width: thin;
+    transition: opacity 120ms ease;
+  }
+
+  .contents::selection,
+  .contents :global(::selection) {
+    background: rgb(76 141 240 / 34%);
+    color: var(--text, #e9ebee);
+  }
+
+  .contents::-webkit-scrollbar {
+    width: 10px;
+  }
+
+  .contents::-webkit-scrollbar-thumb {
+    border: 3px solid transparent;
+    border-radius: var(--radius-pill, 999px);
+    background: var(--quiet, #6a727c);
+    background-clip: padding-box;
   }
 
   .band {
@@ -1232,21 +1396,22 @@
 
   .band-label {
     color: var(--quiet, #6a727c);
-    font-size: 10px;
-    letter-spacing: 0.11em;
+    font-size: var(--text-xs, 10px);
+    letter-spacing: 0.08em;
     text-transform: uppercase;
   }
 
   .band-count,
   .tile-meta {
     color: var(--quiet, #6a727c);
-    font-size: 10.5px;
+    font-size: var(--text-sm, 11px);
+    font-variant-numeric: tabular-nums;
   }
 
   .band-rule {
     flex: 1;
     height: 1px;
-    background: rgb(255 255 255 / 12%);
+    background: var(--edge-soft, rgb(255 255 255 / 7%));
   }
 
   .grid {
@@ -1263,8 +1428,7 @@
     position: relative;
     transition:
       opacity 150ms ease,
-      transform 160ms cubic-bezier(0.2, 0.75, 0.25, 1),
-      filter 160ms ease;
+      transform 160ms cubic-bezier(0.16, 1, 0.3, 1);
   }
 
   .hit {
@@ -1279,6 +1443,7 @@
     font: inherit;
     text-align: left;
     cursor: pointer;
+    touch-action: manipulation;
     user-select: none;
     -webkit-user-drag: none;
   }
@@ -1288,17 +1453,16 @@
   .folder {
     width: 172px;
     height: 98px;
-    border: 1px solid rgb(255 255 255 / 12%);
-    border-radius: 7px;
+    border: 1px solid var(--edge, rgb(255 255 255 / 12%));
+    border-radius: var(--radius, 6px);
     background: var(--panel, #23272f);
     color: var(--muted, #aeb5be);
-    box-shadow: 0 1px 2px rgb(0 0 0 / 12%);
     transition:
-      border-color 150ms ease,
-      background 150ms ease,
-      box-shadow 160ms ease,
+      border-color 120ms ease,
+      background 120ms ease,
+      box-shadow 140ms ease,
       opacity 150ms ease,
-      transform 160ms cubic-bezier(0.2, 0.75, 0.25, 1);
+      transform 160ms cubic-bezier(0.16, 1, 0.3, 1);
   }
 
   .folder .hit {
@@ -1306,7 +1470,8 @@
   }
 
   .folder:hover:not(.draggingSource):not(.drop) {
-    background: #2a2f38;
+    background: rgb(255 255 255 / 6%);
+    border-color: rgb(255 255 255 / 18%);
   }
 
   .folder.drop {
@@ -1331,8 +1496,7 @@
 
   @media (hover: hover) and (pointer: fine) {
     .tile:hover:not(.draggingSource) {
-      filter: brightness(1.04);
-      transform: translateY(-2px);
+      transform: translateY(-1px);
     }
 
     .folder.drop {
@@ -1356,10 +1520,10 @@
 
   .tile.chosen::after {
     position: absolute;
-    border-radius: 9px;
+    border-radius: var(--radius-lg, 10px);
     content: "";
     inset: -4px;
-    outline: 2px solid var(--blueprint, #4c8df0);
+    outline: 2px solid var(--blueprint-light, #7fb0f7);
     pointer-events: none;
   }
 
@@ -1370,15 +1534,11 @@
   .tile-name {
     overflow: hidden;
     color: var(--text, #e9ebee);
-    font-size: 13.5px;
+    font-size: var(--text-md, 13px);
     font-weight: 500;
     line-height: 1.3;
     text-overflow: ellipsis;
     white-space: nowrap;
-  }
-
-  .notebook .tile-name {
-    font-size: 13px;
   }
 
   .tile-meta {
@@ -1394,6 +1554,7 @@
     height: 22px;
     border-radius: 3px;
     background: rgb(22 24 29 / 82%);
+    color: var(--amber, #e0912b);
     place-items: center;
     pointer-events: none;
   }
@@ -1402,6 +1563,10 @@
     top: 7px;
     left: 7px;
     right: auto;
+  }
+
+  .star path {
+    fill: currentColor;
   }
 
   .check {
@@ -1413,6 +1578,8 @@
     border: 1.5px solid rgb(255 255 255 / 55%);
     border-radius: 50%;
     background: rgb(22 24 29 / 82%);
+    pointer-events: none;
+    transition: border-color 120ms ease, background 120ms ease, transform 120ms ease;
   }
 
   .check.on {
@@ -1420,29 +1587,56 @@
     background: var(--blueprint, #4c8df0);
   }
 
+  .check.on::after {
+    position: absolute;
+    top: 3px;
+    left: 5px;
+    width: 4px;
+    height: 8px;
+    border-right: 1.7px solid #10141a;
+    border-bottom: 1.7px solid #10141a;
+    content: "";
+    transform: rotate(45deg);
+  }
+
   .tile-menu {
     position: absolute;
-    right: 2px;
-    bottom: 2px;
+    right: 4px;
+    bottom: 4px;
+  }
+
+  .notebook .tile-menu {
+    top: 7px;
+    right: 7px;
+    bottom: auto;
   }
 
   .chevron {
-    width: 22px;
-    height: 22px;
+    display: grid;
+    width: var(--control-dense, 28px);
+    height: var(--control-dense, 28px);
     padding: 0;
     border: 0;
-    border-radius: 3px;
-    background: transparent;
-    color: var(--quiet, #6a727c);
-    font: inherit;
-    font-size: 11px;
+    border-radius: var(--radius, 6px);
+    background: rgb(22 24 29 / 76%);
+    color: var(--muted, #aeb5be);
     cursor: pointer;
+    place-items: center;
+    touch-action: manipulation;
+    transition: background 120ms ease, color 120ms ease;
   }
 
   .tile:hover .chevron,
+  .chevron[aria-expanded="true"],
   .chevron:focus-visible {
-    background: rgb(255 255 255 / 8%);
+    background: var(--wash, rgb(255 255 255 / 8%));
     color: var(--text, #e9ebee);
+  }
+
+  .chevron svg {
+    width: var(--icon-dense, 16px);
+    height: var(--icon-dense, 16px);
+    fill: currentColor;
   }
 
   .hit:focus-visible,
@@ -1452,13 +1646,13 @@
   .view:focus-visible,
   .link:focus-visible,
   .chevron:focus-visible {
-    outline: 2px solid var(--blueprint, #4c8df0);
-    outline-offset: 2px;
+    outline: 2px solid var(--blueprint-light, #7fb0f7);
+    outline-offset: 1px;
   }
 
   .error-dismiss:focus-visible {
-    outline: 2px solid var(--blueprint, #4c8df0);
-    outline-offset: 2px;
+    outline: 2px solid var(--blueprint-light, #7fb0f7);
+    outline-offset: 1px;
   }
 
   .link {
@@ -1468,8 +1662,16 @@
     background: transparent;
     color: var(--blueprint, #4c8df0);
     font: inherit;
-    font-size: 11px;
+    min-height: var(--control-dense, 28px);
+    padding: 0 3px;
+    border-radius: var(--radius, 6px);
+    font-size: var(--text-sm, 11px);
     cursor: pointer;
+    touch-action: manipulation;
+  }
+
+  .link:hover:not(:disabled) {
+    background: var(--wash, rgb(255 255 255 / 8%));
   }
 
   .first-run {
@@ -1478,16 +1680,40 @@
     text-align: center;
   }
 
+  .first-run-mark {
+    display: grid;
+    width: 46px;
+    height: 46px;
+    margin: 0 auto 16px;
+    border: 1px solid var(--edge, rgb(255 255 255 / 12%));
+    border-radius: var(--radius-lg, 10px);
+    background: var(--panel, #23272f);
+    color: var(--blueprint-light, #7fb0f7);
+    place-items: center;
+  }
+
+  .first-run-mark svg {
+    width: 24px;
+    height: 24px;
+    fill: none;
+    stroke: currentColor;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    stroke-width: var(--stroke, 1.7);
+  }
+
   .first-run h1 {
     margin: 0 0 12px;
-    font-size: 24px;
+    font-size: 22px;
     font-weight: 600;
+    letter-spacing: -0.02em;
+    text-wrap: balance;
   }
 
   .first-run p {
     margin: 0 0 22px;
     color: var(--muted, #aeb5be);
-    font-size: 14px;
+    font-size: var(--text-md, 13px);
     line-height: 1.55;
   }
 
@@ -1503,7 +1729,7 @@
   .empty p,
   .notice {
     margin: 0;
-    font-size: 14px;
+    font-size: var(--text-md, 13px);
   }
 
   .notice {
@@ -1528,13 +1754,13 @@
     max-width: 220px;
     height: 40px;
     padding: 0 11px;
-    border: 1px solid rgb(255 255 255 / 18%);
-    border-radius: 9px;
+    border: 1px solid var(--edge, rgb(255 255 255 / 12%));
+    border-radius: var(--radius-lg, 10px);
     background: rgb(35 39 47 / 96%);
-    box-shadow: 0 12px 28px rgb(0 0 0 / 32%);
+    box-shadow: 0 18px 44px rgb(0 0 0 / 55%);
     color: var(--text, #e9ebee);
     font-family: var(--font-ui, "Bahnschrift", system-ui, sans-serif);
-    font-size: 12.5px;
+    font-size: var(--text-md, 13px);
     font-weight: 600;
     pointer-events: none;
   }
@@ -1551,22 +1777,118 @@
     min-width: 20px;
     height: 20px;
     padding: 0 5px;
-    border-radius: 10px;
+    border-radius: var(--radius-pill, 999px);
     background: var(--blueprint, #4c8df0);
     color: #0e1b31;
-    font-size: 10.5px;
+    font-size: var(--text-xs, 10px);
     place-items: center;
   }
 
   button:disabled {
     cursor: default;
-    opacity: 0.55;
+    opacity: 0.45;
+  }
+
+  @media (max-width: 760px) {
+    .library {
+      flex-direction: column;
+    }
+
+    .rail {
+      width: 100%;
+      flex-direction: row;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 7px;
+      padding: 8px 12px;
+      border-right: 0;
+      border-bottom: 1px solid var(--edge-soft, rgb(255 255 255 / 7%));
+    }
+
+    .brand {
+      min-height: var(--control, 36px);
+      padding: 0 6px 0 0;
+    }
+
+    .return-to-notebook {
+      width: auto;
+      margin: 0;
+    }
+
+    .where {
+      min-width: 180px;
+      flex: 1;
+    }
+
+    .views {
+      flex: none;
+      flex-direction: row;
+      margin: 0;
+    }
+
+    .bar {
+      padding: 0 14px;
+      overflow-x: auto;
+    }
+
+    .contents {
+      padding: 18px 16px 28px;
+    }
+  }
+
+  @media (max-width: 520px) {
+    .brand span,
+    .where-text {
+      display: none;
+    }
+
+    .where {
+      min-width: auto;
+      flex: none;
+      background: transparent;
+    }
+
+    .link {
+      padding: 0 8px;
+    }
+
+    .crumbs {
+      overflow-x: auto;
+    }
+
+    .bar {
+      gap: 5px;
+    }
+  }
+
+  @media (pointer: coarse) {
+    .return-to-notebook,
+    .where,
+    .view,
+    .control,
+    .primary {
+      min-height: var(--control-touch, 44px);
+    }
+
+    .link,
+    .error-dismiss,
+    .chevron {
+      min-width: var(--control-touch, 44px);
+      min-height: var(--control-touch, 44px);
+    }
+
+    .bar {
+      height: 64px;
+    }
   }
 
   @media (prefers-reduced-motion: reduce) {
     .tile,
     .folder,
-    .crumb {
+    .crumb,
+    .primary,
+    .menu-control > svg,
+    .check {
       transition: none;
     }
 
