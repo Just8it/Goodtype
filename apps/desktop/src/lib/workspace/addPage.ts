@@ -13,7 +13,7 @@ import type { PagePosition } from "../model";
 /** The writer's choice, before it is resolved against whichever page is open. */
 export type AddPageWhere = "before" | "after" | "last";
 
-/** One thing a new page can be made from. Blank today; templates, images, and imports next. */
+/** One thing a new page can be made from: a paper template, or a document brought in. */
 export type AddPageSource = {
   /** Stable identity for the keyed each block. */
   id: string;
@@ -28,7 +28,11 @@ export type AddPageSource = {
    * here, so a preview never has to be a stored bitmap that can go stale.
    */
   preview?: string;
-  onSelect: (position: PagePosition) => void;
+  /**
+   * Commit. `count` is how many of this page to make; a source that cannot honour it — an import
+   * brings whatever the file holds — is free to ignore it.
+   */
+  onSelect: (position: PagePosition, count: number) => void;
 };
 
 /**
@@ -38,6 +42,18 @@ export type AddPageSource = {
 export type AddPageGroup = {
   id: string;
   title: string;
+  /**
+   * Which half of the menu the shelf belongs to. `blank` shelves are built here, from the size,
+   * orientation and paper chosen above them; `import` shelves bring a document in and take its
+   * geometry from the file, so those controls do not apply and are not shown beside them.
+   *
+   * `current` is the page you are on: a starting point rather than a kind of ruling, so it is
+   * pinned beside the import instead of sitting among the paper filters.
+   *
+   * A lane rather than a position in the list: an image importer should land next to the PDF one
+   * by saying what it is, not by being inserted at the right index.
+   */
+  lane?: "blank" | "current" | "import";
   sources: AddPageSource[];
 };
 

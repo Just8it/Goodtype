@@ -16,6 +16,8 @@ type Shared = {
   label: string;
   /** Right-aligned secondary text: a shortcut, a current value, a count. */
   hint?: string;
+  /** Stroke path on a 24 viewBox. Optional: an entry without one keeps the column's alignment. */
+  icon?: string;
   disabled?: boolean;
 };
 

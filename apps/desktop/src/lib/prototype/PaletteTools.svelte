@@ -7,7 +7,8 @@
     activeCommands: readonly PaletteCommand[];
     expandedCommand: PaletteCommand | null;
     horizontal: boolean;
-    onActivate: (command: PaletteCommand) => void;
+    /** The tile comes back with the command so a card can be anchored to what was tapped. */
+    onActivate: (command: PaletteCommand, tile: HTMLElement) => void;
   };
 
   let { settings, activeCommands, expandedCommand, horizontal, onActivate }: Props = $props();
@@ -26,7 +27,7 @@
     aria-pressed={definition.action ? undefined : active}
     aria-expanded={definition.context && active ? expandedCommand === definition.id : undefined}
     title={definition.title}
-    onclick={() => onActivate(definition.id)}
+    onclick={(event) => onActivate(definition.id, event.currentTarget)}
   >
     {#if definition.id === "pen-1"}
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15.5 3.5l5 5-9.5 9.5-5.5 1.5 1.5-5.5 9.5-9.5z"></path><path d="M6.5 19.5l1.3-3.6"></path></svg>
@@ -54,12 +55,12 @@
   .tool-tile {
     position: relative;
     display: grid;
-    width: var(--control);
-    height: var(--control);
+    width: var(--control-touch);
+    height: var(--control-touch);
     flex: none;
     padding: 0;
     border: 0;
-    border-radius: var(--radius);
+    border-radius: var(--radius-lg);
     background: transparent;
     color: #c4cad2;
     cursor: pointer;

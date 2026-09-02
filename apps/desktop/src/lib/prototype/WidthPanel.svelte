@@ -21,6 +21,7 @@
     minimumMm = 0.05,
     maximumMm = 20,
     canRemove = false,
+    embedded = false,
     onCommit,
     onRemove,
     onClose,
@@ -30,6 +31,8 @@
     minimumMm?: number;
     maximumMm?: number;
     canRemove?: boolean;
+    /** Rendered as a card sub-view rather than a popout: no chrome, and no self-dismissal. */
+    embedded?: boolean;
     /** Takes a width in points, the unit everything downstream is in. */
     onCommit: (widthPt: number) => void;
     onRemove?: () => void;
@@ -61,7 +64,9 @@
   }
 </script>
 
-<aside use:dismissable={onClose} class="width-panel" aria-label="Stroke width">
+<!-- Embedded, the card owns dismissal: the outside-press listener would fire on the card's own
+     header and close the sub-view out from under the writer. -->
+<aside use:dismissable={embedded ? () => {} : onClose} class:embedded class="width-panel" aria-label="Stroke width">
   <div class="row">
     <input
       bind:value={mm}
@@ -123,6 +128,14 @@
     border-radius: var(--radius-lg);
     background: var(--panel);
     box-shadow: 0 18px 44px rgb(0 0 0 / 55%);
+  }
+
+  .width-panel.embedded {
+    width: auto;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
   }
 
   .row {

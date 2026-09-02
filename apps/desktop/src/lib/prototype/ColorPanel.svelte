@@ -9,6 +9,7 @@
     recent = [],
     mode = "edit",
     canRemove = false,
+    embedded = false,
     onPick,
     onChange,
     onRemove,
@@ -19,6 +20,8 @@
     /** `edit` retargets an existing swatch; `add` appends a new one. */
     mode?: "edit" | "add";
     canRemove?: boolean;
+    /** Rendered as a card sub-view: no chrome, and no self-nudging against the viewport. */
+    embedded?: boolean;
     /** Take this colour and close. What a preset chip or a typed hex does. */
     onPick: (color: string) => void;
     /**
@@ -140,7 +143,8 @@
     // Re-measure whenever the content that changes the panel's size changes.
     void recent.length;
     void canRemove;
-    if (!panel) return;
+    // Embedded, the card is already placed and clamped; nudging here would fight it.
+    if (embedded || !panel) return;
     const margin = 12;
     requestAnimationFrame(() => {
       if (!panel) return;
@@ -173,8 +177,9 @@
 
 <div
   bind:this={panel}
+  class:embedded
   class="color-panel"
-  style:transform={`translate(${shift.x}px, ${shift.y}px)`}
+  style:transform={embedded ? null : `translate(${shift.x}px, ${shift.y}px)`}
   role="dialog"
   tabindex="-1"
   aria-label={mode === "add" ? "Add a color" : "Edit color"}
@@ -300,6 +305,14 @@
     border-radius: var(--radius-lg);
     background: #23272f;
     box-shadow: 0 18px 44px rgb(0 0 0 / 55%);
+  }
+
+  .color-panel.embedded {
+    width: auto;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
   }
 
   .field {

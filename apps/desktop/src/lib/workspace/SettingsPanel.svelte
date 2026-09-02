@@ -1,331 +1,599 @@
 <script lang="ts">
+  import { tick } from "svelte";
   import type { AppSettings } from "../settings";
+  import {
+    SETTING_GROUPS,
+    searchSettings,
+    type SettingActions,
+    type SettingGroup,
+    type SettingItem,
+  } from "./settingsSchema";
 
+  /**
+   * App-level preferences: a list of categories and the settings inside the one you picked.
+   *
+   * It used to be a single scrolling column of hand-written sections, which worked at five and
+   * would not have worked at fifteen — the column simply got longer, with no way to reach a
+   * setting except to scroll past every setting before it. Now the categories are a list, and
+   * a search field reaches anything by name.
+   *
+   * What is in here is what belongs to no single tool. Nib, width and colour are on the palette,
+   * one tap from the page; putting them behind a window would be a step backwards from that.
+   *
+   * The settings themselves are described in `settingsSchema.ts`. This file knows how to draw a
+   * toggle, a choice and a slider, and nothing about what any particular preference means.
+   */
   let {
     settings,
+    actions,
     onChange,
     onClose,
   }: {
     settings: AppSettings;
+    /** What the entries that *do* something rather than store something should call. */
+    actions: SettingActions;
     onChange: (settings: AppSettings) => void;
     onClose: () => void;
   } = $props();
 
-  function updateCalibration(patch: Partial<AppSettings["calibration"]>) {
-    onChange({ ...settings, calibration: { ...settings.calibration, ...patch } });
+  let groupId = $state(SETTING_GROUPS[0].id);
+  let query = $state("");
+  let panel = $state<HTMLElement>();
+  let field = $state<HTMLInputElement>();
+
+  const group = $derived<SettingGroup>(
+    SETTING_GROUPS.find((entry) => entry.id === groupId) ?? SETTING_GROUPS[0],
+  );
+  const hits = $derived(searchSettings(query));
+  const searching = $derived(query.trim().length > 0);
+
+  function apply(item: SettingItem, value: boolean | string | number) {
+    const control = item.control;
+    if (control.kind === "toggle") onChange(control.write(settings, value as boolean));
+    else if (control.kind === "choice") onChange(control.write(settings, value as string));
+    else if (control.kind === "slider") onChange(control.write(settings, value as number));
   }
+
+  /// Arrow keys walk the category list, the way they walk every other group in this app.
+  function moveWithin(event: KeyboardEvent) {
+    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+    const list = (event.currentTarget as HTMLElement).closest<HTMLElement>("[role='tablist']");
+    const items = list ? [...list.querySelectorAll<HTMLButtonElement>("button")] : [];
+    const current = items.indexOf(document.activeElement as HTMLButtonElement);
+    if (current < 0) return;
+    event.preventDefault();
+    const next = items[(current + (event.key === "ArrowDown" ? 1 : -1) + items.length) % items.length];
+    next?.focus();
+    next?.click();
+  }
+
+  function keydown(event: KeyboardEvent) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      // Escape clears a search before it closes the window: the first press should undo the
+      // thing that changed the view, not the thing that opened it.
+      if (searching) {
+        query = "";
+        void tick().then(() => field?.focus());
+      } else onClose();
+      return;
+    }
+    if (event.key !== "Tab" || !panel) return;
+    const stops = [...panel.querySelectorAll<HTMLElement>("button, input, select")].filter(
+      (stop) => !(stop as HTMLButtonElement).disabled && stop.tabIndex >= 0,
+    );
+    if (stops.length < 2) return;
+    const first = stops[0];
+    const last = stops[stops.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  }
+
+  /// Opens on the search field: with enough preferences, naming one is faster than finding it.
+  $effect(() => {
+    field?.focus();
+  });
 </script>
 
-<!-- App-level preferences. Per-tool quick settings (pen width/color, highlighter, eraser)
-     live in the palette popouts; this window holds what belongs to no single tool:
-     pressure calibration, undo scope, and motion. Values are clamped again in Rust. -->
-<div class="panel-scrim" role="presentation">
-  <aside class="panel" aria-label="Settings">
-    <div class="heading">
-      <div><span>Local preferences</span><h2>Settings</h2></div>
-      <button class="close" type="button" aria-label="Close settings" onclick={onClose}>×</button>
+{#snippet control(item: SettingItem)}
+  {#if item.control.kind === "toggle"}
+    {@const on = item.control.read(settings)}
+    <button
+      type="button"
+      role="switch"
+      aria-checked={on}
+      aria-label={item.label}
+      class:on
+      class="toggle"
+      onclick={() => apply(item, !on)}
+    ><span></span></button>
+  {:else if item.control.kind === "action"}
+    {@const control = item.control}
+    <button type="button" class="run" onclick={() => control.run(actions)}>{control.buttonLabel}</button>
+  {:else if item.control.kind === "choice"}
+    {@const current = item.control.read(settings)}
+    <div class="choices" role="radiogroup" aria-label={item.label}>
+      {#each item.control.options as option (option.value)}
+        <button
+          type="button"
+          role="radio"
+          class="choice"
+          class:on={option.value === current}
+          aria-checked={option.value === current}
+          title={option.hint}
+          onclick={() => apply(item, option.value)}
+        >{option.label}</button>
+      {/each}
     </div>
+  {:else}
+    {@const value = item.control.read(settings)}
+    <div class="slider">
+      <input
+        type="range"
+        min={item.control.min}
+        max={item.control.max}
+        step={item.control.step}
+        {value}
+        aria-label={item.label}
+        oninput={(event) => apply(item, Number(event.currentTarget.value))}
+      />
+      <output>{item.control.format(value)}</output>
+    </div>
+  {/if}
+{/snippet}
 
-    <section aria-labelledby="settings-pressure">
-      <p class="hint">Stroke sizes and colors are on the palette bar — one tap, no submenu. This window holds pressure, calibration, and app behavior.</p>
-      <h3 id="settings-pressure">Pressure calibration</h3>
-      <label class="choice">
-        <input
-          type="checkbox"
-          checked={settings.pressureEnabled}
-          onchange={(event) =>
-            onChange({ ...settings, pressureEnabled: event.currentTarget.checked })}
-        />
-        <span><strong>Use stylus pressure</strong><em>Disable for uniform-width strokes across all pressure-sensitive pens</em></span>
-      </label>
-      <div class="row">
-        <label>
-          <span>Curve</span>
-          <input
-            type="range"
-            min="0.25"
-            max="3"
-            step="0.05"
-            value={settings.calibration.curve}
-            aria-label="Pressure response curve"
-            oninput={(event) =>
-              updateCalibration({ curve: Number(event.currentTarget.value) })}
-          />
-          <output>{settings.calibration.curve.toFixed(2)}</output>
-        </label>
+{#snippet setting(item: SettingItem, where?: string)}
+  <div class="setting" class:stacked={item.control.kind !== "toggle"}>
+    <div class="words">
+      <span class="name">{item.label}</span>
+      {#if where}<span class="where">{where}</span>{/if}
+      {#if item.hint}<span class="hint">{item.hint}</span>{/if}
+    </div>
+    {@render control(item)}
+  </div>
+{/snippet}
+
+<div class="panel-scrim" role="presentation">
+  <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+  <div
+    bind:this={panel}
+    class="panel"
+    role="dialog"
+    aria-modal="true"
+    tabindex="-1"
+    aria-label="Settings"
+    onkeydown={keydown}
+  >
+    <header>
+      <div class="subject">
+        <span class="eyebrow">Local preferences</span>
+        <strong>Settings</strong>
       </div>
-      <div class="row">
-        <label>
-          <span>Smoothing</span>
-          <input
-            type="range"
-            min="0"
-            max="0.8"
-            step="0.05"
-            value={settings.calibration.smoothing}
-            aria-label="Stroke smoothing"
-            oninput={(event) =>
-              updateCalibration({ smoothing: Number(event.currentTarget.value) })}
-          />
-          <output>{settings.calibration.smoothing.toFixed(2)}</output>
-        </label>
+
+      <label class="search">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7" /><path d="m20 20-3.6-3.6" /></svg>
+        <input
+          bind:this={field}
+          bind:value={query}
+          type="search"
+          placeholder="Search settings"
+          aria-label="Search settings"
+          spellcheck="false"
+        />
+      </label>
+
+      <button type="button" class="close" aria-label="Close settings" onclick={onClose}>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18" /></svg>
+      </button>
+    </header>
+
+    <div class="body">
+      <!-- Categories rather than a longer column: reaching a preference should not mean
+           scrolling past every preference that was added before it. -->
+      <div class="nav" role="tablist" aria-label="Setting categories" aria-orientation="vertical">
+        {#each SETTING_GROUPS as entry (entry.id)}
+          <button
+            type="button"
+            role="tab"
+            class:on={!searching && entry.id === groupId}
+            aria-selected={!searching && entry.id === groupId}
+            tabindex={entry.id === groupId ? 0 : -1}
+            onkeydown={moveWithin}
+            onclick={() => {
+              query = "";
+              groupId = entry.id;
+            }}
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d={entry.icon} /></svg>
+            {entry.title}
+            <span class="tally">{entry.items.length}</span>
+          </button>
+        {/each}
       </div>
-    </section>
 
-    <section aria-labelledby="settings-undo">
-      <h3 id="settings-undo">Undo</h3>
-      <div class="choice-row" role="radiogroup" aria-labelledby="settings-undo">
-        <label class="choice">
-          <input
-            type="radio"
-            name="undo-scope"
-            value="page"
-            checked={settings.undoScope === "page"}
-            onchange={() => onChange({ ...settings, undoScope: "page" })}
-          />
-          <span><strong>Current page</strong><em>Undo affects the page in view</em></span>
-        </label>
-        <label class="choice">
-          <input
-            type="radio"
-            name="undo-scope"
-            value="notebook"
-            checked={settings.undoScope === "notebook"}
-            onchange={() => onChange({ ...settings, undoScope: "notebook" })}
-          />
-          <span><strong>Whole notebook</strong><em>Undo the most recent change anywhere</em></span>
-        </label>
+      <div class="pane">
+        {#if searching}
+          <div class="pane-head">
+            <h2>{hits.length} {hits.length === 1 ? "result" : "results"}</h2>
+          </div>
+          {#if hits.length}
+            <div class="settings">
+              {#each hits as hit (hit.item.id)}
+                {@render setting(hit.item, hit.group.title)}
+              {/each}
+            </div>
+          {:else}
+            <p class="empty">
+              Nothing matches &ldquo;{query}&rdquo;. Nib, width and colour are on the palette
+              rather than in here.
+            </p>
+          {/if}
+        {:else}
+          <div class="pane-head">
+            <h2>{group.title}</h2>
+            {#if group.blurb}<p class="blurb">{group.blurb}</p>{/if}
+          </div>
+          <div class="settings">
+            {#each group.items as item (item.id)}
+              {@render setting(item)}
+            {/each}
+          </div>
+        {/if}
       </div>
-    </section>
-
-    <section aria-labelledby="settings-page-text">
-      <h3 id="settings-page-text">Page text</h3>
-      <label class="choice">
-        <input
-          type="checkbox"
-          checked={settings.pageTextLineWrap}
-          onchange={(event) =>
-            onChange({ ...settings, pageTextLineWrap: event.currentTarget.checked })}
-        />
-        <span
-          ><strong>Wrap long editor lines</strong><em
-            >Keeps prose visible without adding line breaks to the Typst source (Alt+Z)</em
-          ></span
-        >
-      </label>
-      <label class="choice">
-        <input
-          type="checkbox"
-          checked={settings.pageTextBaselineGrid}
-          onchange={(event) =>
-            onChange({ ...settings, pageTextBaselineGrid: event.currentTarget.checked })}
-        />
-        <span
-          ><strong>Snap blocks to paper rhythm</strong><em
-            >Headings and display equations reserve whole paper rows</em
-          ></span
-        >
-      </label>
-    </section>
-
-    <section aria-labelledby="settings-packages">
-      <h3 id="settings-packages">Typst packages</h3>
-      <label class="choice">
-        <input
-          type="checkbox"
-          checked={settings.remotePackages}
-          onchange={(event) =>
-            onChange({ ...settings, remotePackages: event.currentTarget.checked })}
-        />
-        <span
-          ><strong>Download packages from Typst Universe</strong><em
-            >Fetches an imported package the first time you use it, then keeps it on this device.
-            Packages you already have keep working offline either way.</em
-          ></span
-        >
-      </label>
-    </section>
-
-    <section aria-labelledby="settings-motion">
-      <h3 id="settings-motion">Motion</h3>
-      <div class="row">
-        <label>
-          <span>Touch glide</span>
-          <input
-            type="range"
-            min="0"
-            max="4"
-            step="0.1"
-            value={settings.touchGlide}
-            aria-label="Touch glide after releasing a one-finger pan"
-            oninput={(event) =>
-              onChange({ ...settings, touchGlide: Number(event.currentTarget.value) })}
-          />
-          <output>{Math.round(settings.touchGlide * 50)}%</output>
-        </label>
-      </div>
-      <label class="choice">
-        <input
-          type="checkbox"
-          checked={settings.reducedMotion}
-          onchange={(event) =>
-            onChange({ ...settings, reducedMotion: event.currentTarget.checked })}
-        />
-        <span><strong>Reduce motion</strong><em>Skip smooth scrolling and animated transitions</em></span>
-      </label>
-    </section>
-  </aside>
+    </div>
+  </div>
 </div>
 
 <style>
   .panel-scrim {
-    position: absolute;
+    position: fixed;
+    z-index: 80;
     inset: 0;
-    z-index: 35;
     display: grid;
-    justify-items: end;
-    background: rgb(10 12 15 / 45%);
+    background: rgb(10 12 15 / 55%);
+    place-items: center;
+    animation: scrim-in 140ms ease-out;
+  }
+
+  @keyframes scrim-in {
+    from { opacity: 0; }
   }
 
   .panel {
-    width: min(380px, 100%);
-    height: 100%;
-    overflow: auto;
-    padding: 18px 20px 26px;
-    border-left: 1px solid rgb(255 255 255 / 10%);
-    background: #1b1e24;
-    color: #e9ebee;
-  }
-
-  .heading {
     display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    margin-bottom: 14px;
+    width: min(760px, calc(100vw - 32px));
+    height: min(520px, calc(100vh - 80px));
+    flex-direction: column;
+    border: 1px solid var(--edge);
+    border-radius: var(--radius-lg);
+    background: var(--surround);
+    box-shadow: 0 30px 70px rgb(0 0 0 / 55%);
+    color: var(--text);
+    overflow: hidden;
+    animation: panel-in 150ms cubic-bezier(0.2, 0.7, 0.3, 1);
   }
 
-  .heading span {
-    color: #6a727c;
-    font-size: 11px;
-    letter-spacing: 0.08em;
+  @keyframes panel-in {
+    from { opacity: 0; transform: translateY(-8px) scale(0.985); }
+  }
+
+  header {
+    display: flex;
+    flex: none;
+    align-items: center;
+    padding: 12px 12px 12px 20px;
+    border-bottom: 1px solid var(--edge-soft);
+    background: var(--panel);
+    gap: 14px;
+  }
+
+  .subject { display: flex; min-width: 0; flex-direction: column; }
+  .subject strong { font-size: var(--text-lg); font-weight: 600; }
+
+  .eyebrow {
+    color: var(--quiet);
+    font-size: var(--text-xs);
+    letter-spacing: 0.14em;
     text-transform: uppercase;
   }
 
-  h2 {
-    margin: 2px 0 0;
-    font-size: 17px;
+  .search {
+    display: flex;
+    height: var(--control);
+    flex: 1;
+    align-items: center;
+    max-width: 300px;
+    margin-left: auto;
+    padding: 0 10px;
+    border: 1px solid var(--edge);
+    border-radius: var(--radius);
+    background: var(--surround);
+    color: var(--muted);
+    gap: 8px;
+    transition: border-color 120ms ease;
   }
+
+  .search:focus-within { border-color: var(--blueprint); }
+
+  .search svg {
+    width: var(--icon-dense);
+    height: var(--icon-dense);
+    flex: none;
+    fill: none;
+    stroke: currentColor;
+    stroke-linecap: round;
+    stroke-width: var(--stroke-dense);
+  }
+
+  .search input {
+    width: 100%;
+    border: 0;
+    background: transparent;
+    color: var(--text);
+    font: inherit;
+    font-size: var(--text-md);
+    outline: none;
+  }
+
+  .search input::placeholder { color: var(--quiet); }
 
   .close {
-    width: 28px;
-    height: 28px;
-    border: 1px solid rgb(255 255 255 / 12%);
-    border-radius: 8px;
+    display: grid;
+    width: var(--control);
+    height: var(--control);
+    flex: none;
+    border: 0;
+    border-radius: var(--radius);
     background: transparent;
-    color: #aeb5be;
-    font-size: 16px;
+    color: var(--muted);
     cursor: pointer;
+    place-items: center;
   }
 
-  .close:hover {
-    background: rgb(255 255 255 / 6%);
-    color: #e9ebee;
+  .close:hover { background: var(--wash); color: var(--text); }
+
+  .close svg {
+    width: var(--icon-dense);
+    height: var(--icon-dense);
+    fill: none;
+    stroke: currentColor;
+    stroke-linecap: round;
+    stroke-width: var(--stroke-dense);
   }
 
-  section {
-    padding: 14px 0;
-    border-top: 1px solid rgb(255 255 255 / 8%);
+  .body { display: flex; min-height: 0; flex: 1; }
+
+  .nav {
+    display: flex;
+    width: 190px;
+    flex: none;
+    flex-direction: column;
+    padding: 12px;
+    border-right: 1px solid var(--edge-soft);
+    gap: 2px;
+    overflow-y: auto;
   }
 
-  h3 {
-    margin: 0 0 10px;
-    color: #aeb5be;
-    font-size: 12px;
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
+  .nav button {
+    display: flex;
+    height: var(--control);
+    align-items: center;
+    padding: 0 10px;
+    border: 0;
+    border-radius: var(--radius);
+    background: transparent;
+    color: var(--muted);
+    font: inherit;
+    font-size: var(--text-md);
+    text-align: left;
+    cursor: pointer;
+    gap: 10px;
+    transition: background 120ms ease, color 120ms ease;
   }
 
-  .hint {
-    margin: 0 0 14px;
-    color: #6a727c;
-    font-size: 12px;
+  .nav button:hover { background: var(--wash); color: var(--text); }
+  .nav button.on { background: rgb(76 141 240 / 16%); color: var(--text); }
+
+  .nav svg {
+    width: var(--icon-dense);
+    height: var(--icon-dense);
+    flex: none;
+    fill: none;
+    stroke: currentColor;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    stroke-width: var(--stroke-dense);
+  }
+
+  .tally {
+    margin-left: auto;
+    color: var(--quiet);
+    font-size: var(--text-xs);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .pane {
+    min-width: 0;
+    flex: 1;
+    padding: 18px 22px 22px;
+    overflow-y: auto;
+  }
+
+  .pane-head { margin-bottom: 14px; }
+  .pane-head h2 { margin: 0; font-size: var(--text-lg); font-weight: 600; }
+
+  .blurb {
+    max-width: 46ch;
+    margin: 6px 0 0;
+    color: var(--muted);
+    font-size: var(--text-sm);
     line-height: 1.5;
   }
 
-  .row {
+  .settings { display: flex; flex-direction: column; }
+
+  .setting {
     display: flex;
-    align-items: center;
-    gap: 12px;
-    margin-bottom: 10px;
+    align-items: flex-start;
+    justify-content: space-between;
+    padding: 14px 0;
+    border-top: 1px solid var(--edge-soft);
+    gap: 20px;
   }
 
-  label {
+  .setting:first-child { border-top: 0; padding-top: 4px; }
+
+  /* A slider or a set of choices needs the width, so it drops under its own label rather than
+     fighting the description for the same line. */
+  .setting.stacked { flex-direction: column; gap: 10px; }
+
+  .words { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
+  .name { font-size: var(--text-md); }
+
+  .where {
+    color: var(--quiet);
+    font-size: var(--text-xs);
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    order: -1;
+  }
+
+  .hint {
+    max-width: 52ch;
+    color: var(--muted);
+    font-size: var(--text-sm);
+    line-height: 1.5;
+  }
+
+  .toggle {
+    position: relative;
+    width: 38px;
+    height: 22px;
+    flex: none;
+    margin-top: 2px;
+    padding: 0;
+    border: 0;
+    border-radius: var(--radius-pill);
+    background: rgb(255 255 255 / 14%);
+    cursor: pointer;
+    transition: background 140ms ease;
+  }
+
+  .toggle span {
+    position: absolute;
+    top: 3px;
+    left: 3px;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: var(--muted);
+    transition: transform 140ms ease, background 140ms ease;
+  }
+
+  .toggle.on { background: var(--blueprint); }
+  .toggle.on span { background: #fff; transform: translateX(16px); }
+
+  /* An action is not a preference, so it is a button rather than a control with a state. */
+  .run {
+    height: var(--control);
+    flex: none;
+    padding: 0 14px;
+    border: 1px solid var(--edge);
+    border-radius: var(--radius);
+    background: transparent;
+    color: var(--text);
+    font: inherit;
+    font-size: var(--text-sm);
+    cursor: pointer;
+    transition: background 120ms ease;
+  }
+
+  .run:hover { background: var(--wash); }
+
+  .choices {
     display: flex;
-    flex: 1;
-    align-items: center;
-    gap: 8px;
-    font-size: 12px;
-    color: #aeb5be;
-  }
-
-  label > span {
-    flex: none;
-    width: 68px;
-  }
-
-  input[type="range"] {
-    flex: 1;
-    accent-color: #4c8df0;
-  }
-
-  output {
-    flex: none;
-    width: 52px;
-    color: #e9ebee;
-    font-variant-numeric: tabular-nums;
-    font-size: 11.5px;
-    text-align: right;
-  }
-
-  .choice-row {
-    display: grid;
-    gap: 8px;
+    align-self: stretch;
+    gap: 6px;
   }
 
   .choice {
-    display: flex;
-    align-items: flex-start;
-    gap: 10px;
-    padding: 9px 11px;
-    border: 1px solid rgb(255 255 255 / 10%);
-    border-radius: 9px;
+    height: var(--control);
+    flex: 1;
+    border: 1px solid var(--edge);
+    border-radius: var(--radius);
+    background: transparent;
+    color: var(--muted);
+    font: inherit;
+    font-size: var(--text-sm);
     cursor: pointer;
+    transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
   }
 
-  .choice:hover {
-    background: rgb(255 255 255 / 4%);
+  .choice:hover { background: var(--wash); color: var(--text); }
+
+  .choice.on {
+    border-color: rgb(76 141 240 / 60%);
+    background: rgb(76 141 240 / 16%);
+    color: var(--text);
   }
 
-  .choice input {
-    margin-top: 2px;
-    accent-color: #4c8df0;
+  .slider {
+    display: flex;
+    align-self: stretch;
+    align-items: center;
+    gap: 12px;
   }
 
-  .choice span {
-    display: grid;
-    gap: 2px;
-    width: auto;
+  .slider input { flex: 1; accent-color: var(--blueprint); }
+
+  .slider output {
+    min-width: 46px;
+    color: var(--text);
+    font-size: var(--text-sm);
+    font-variant-numeric: tabular-nums;
+    text-align: right;
   }
 
-  .choice strong {
-    color: #e9ebee;
-    font-size: 12.5px;
-    font-weight: 600;
+  .empty {
+    max-width: 46ch;
+    margin: 0;
+    color: var(--muted);
+    font-size: var(--text-sm);
+    line-height: 1.55;
   }
 
-  .choice em {
-    color: #6a727c;
-    font-size: 11.5px;
-    font-style: normal;
+  button:focus-visible,
+  .search:focus-within { outline: none; }
+
+  .nav button:focus-visible,
+  .close:focus-visible,
+  .toggle:focus-visible,
+  .choice:focus-visible,
+  .run:focus-visible,
+  .slider input:focus-visible {
+    outline: 2px solid var(--blueprint-light);
+    outline-offset: 1px;
+  }
+
+  @media (max-width: 720px) {
+    .nav { width: 62px; padding: 12px 8px; }
+    .nav button { justify-content: center; padding: 0; font-size: 0; gap: 0; }
+    .nav .tally { display: none; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .panel-scrim,
+    .panel { animation: none; }
+
+    .toggle,
+    .toggle span,
+    .nav button,
+    .choice,
+    .search { transition: none; }
   }
 </style>

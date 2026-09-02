@@ -46,3 +46,20 @@ export function nearestPaletteDock(
       : { dock: "bottom" as const, distance: height - y };
   return horizontal.distance <= vertical.distance ? horizontal.dock : vertical.dock;
 }
+
+/** Keep the compact palette transport puck centred under the pointer and inside the workspace. */
+export function paletteTransportPosition(
+  pointerX: number,
+  pointerY: number,
+  workspaceWidth: number,
+  workspaceHeight: number,
+  size: number,
+  margin = 8,
+): { x: number; y: number } {
+  const maximumX = Math.max(workspaceWidth - size - margin, margin);
+  const maximumY = Math.max(workspaceHeight - size - margin, margin);
+  return {
+    x: Math.min(Math.max(pointerX - size / 2, margin), maximumX),
+    y: Math.min(Math.max(pointerY - size / 2, margin), maximumY),
+  };
+}
