@@ -16,8 +16,8 @@ export const DEFAULT_PRESSURE_CALIBRATION: PressureCalibration = {
   smoothing: 0.2,
 };
 
-export type PointerRole = "draw" | "erase" | "lasso" | "select" | "ignore";
-export type InkTool = "pen" | "highlighter" | "eraser" | "lasso" | "select";
+export type PointerRole = "draw" | "shape" | "erase" | "lasso" | "select" | "ignore";
+export type InkTool = "pen" | "highlighter" | "shape" | "eraser" | "lasso" | "select";
 export type PointerMapping = {
   eraserButton: number;
   eraserButtonsMask: number;
@@ -45,7 +45,11 @@ export function pointerRole(
   tool: InkTool,
   mapping: PointerMapping = DEFAULT_POINTER_MAPPING,
 ): PointerRole {
-  if (pointer.pointerType === "touch") return "ignore";
+  // Touch belongs to viewport navigation, and that has to be decided before anything else: an
+  // eraser held while a finger rests on the page must still pan, not erase. The shape tool is
+  // the single exception, because it promises direct finger construction and needs no second
+  // finger or hidden modifier to mean it.
+  if (pointer.pointerType === "touch") return tool === "shape" ? "shape" : "ignore";
   if (
     tool === "eraser" ||
     (pointer.pointerType === "pen" &&
@@ -54,6 +58,7 @@ export function pointerRole(
   ) {
     return "erase";
   }
+  if (tool === "shape") return "shape";
   if (tool === "lasso") return "lasso";
   if (tool === "select") return "select";
   if (pointer.pointerType === "pen") return "draw";

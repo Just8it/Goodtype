@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { PageBackground, Stroke } from "../model";
+  import type { PageBackground, ShapeStyle, Stroke } from "../model";
   import PaperLayer from "../page/PaperLayer.svelte";
   import type { StrokePerformance } from "../ink/metrics";
   import type { TypstCompileResult } from "../editor/typst";
@@ -12,9 +12,18 @@
   } from "../ink/pipeline";
   import ImageObject from "./ImageObject.svelte";
   import InkSurface from "./InkSurface.svelte";
+  import ShapeObject from "./ShapeObject.svelte";
   import PageText from "./PageText.svelte";
   import TypstBlock from "./TypstBlock.svelte";
-  import type { BlockView, ImageView, PageTypstView, TypstTransform } from "./pageView";
+  import type { ShapeDraft, ShapeKind } from "../shape/geometry";
+  import type {
+    BlockView,
+    ImageView,
+    PageTypstView,
+    ShapeEditCommit,
+    ShapeView,
+    TypstTransform,
+  } from "./pageView";
 
   // The one page renderer. `interactive` is the only difference between the page being edited
   // and the pages above and below it, so a page keeps its rendered blocks — and its painted
@@ -24,6 +33,7 @@
     blocks = [],
     pageTypst = null,
     images = [],
+    shapes = [],
     results = {},
     strokes = [],
     newStrokeZIndex = 1_000_001,
@@ -46,11 +56,22 @@
     taper = 0,
     opacity = 1,
     straighten = false,
+    shapeKind = "line",
+    shapeStyle = {
+      strokeColor: "#16212b",
+      strokeWidthPt: 2,
+      fillColor: null,
+      opacity: 1,
+    },
+    shapeConstrain = false,
+    drawAndHoldShapes = true,
     eraseRadiusPt = 8,
     calibration = DEFAULT_PRESSURE_CALIBRATION,
     directObjectInput = false,
     selectedBlockId = null,
     selectedImageId = null,
+    selectedShapeId = null,
+    editingShapeId = null,
     onCompile,
     onSourceChange,
     onTransform,
@@ -59,7 +80,12 @@
     onSelectImage,
     onMoveImage,
     onScaleImage,
+    onSelectShape,
+    onChangeShape,
+    onEditShape,
     onStrokeFinalized,
+    onShapeFinalized,
+    onInkShapeRecognized,
     onStrokesChange,
     onSelectionChange,
     onStrokeMetrics,
@@ -67,6 +93,7 @@
     blocks?: BlockView[];
     pageTypst?: PageTypstView | null;
     images?: ImageView[];
+    shapes?: ShapeView[];
     results?: Record<string, TypstCompileResult | null>;
     strokes?: Stroke[];
     newStrokeZIndex?: number;
@@ -93,11 +120,17 @@
     taper?: number;
     opacity?: number;
     straighten?: boolean;
+    shapeKind?: ShapeKind;
+    shapeStyle?: ShapeStyle;
+    shapeConstrain?: boolean;
+    drawAndHoldShapes?: boolean;
     eraseRadiusPt?: number;
     calibration?: PressureCalibration;
     directObjectInput?: boolean;
     selectedBlockId?: string | null;
     selectedImageId?: string | null;
+    selectedShapeId?: string | null;
+    editingShapeId?: string | null;
     onCompile: (
       id: string,
       request: {
@@ -114,7 +147,12 @@
     onSelectImage?: (id: string) => void;
     onMoveImage?: (id: string, position: { x: number; y: number }) => void;
     onScaleImage?: (id: string, scale: number) => void;
+    onSelectShape?: (id: string) => void;
+    onChangeShape?: (shape: ShapeView, commit?: ShapeEditCommit) => void;
+    onEditShape?: (id: string, editing: boolean) => void;
     onStrokeFinalized?: (stroke: Stroke) => void;
+    onShapeFinalized?: (shape: ShapeDraft) => void;
+    onInkShapeRecognized?: (stroke: Stroke, shape: ShapeDraft) => void;
     onStrokesChange?: (strokes: Stroke[]) => void;
     onSelectionChange?: (ids: string[]) => void;
     onStrokeMetrics?: (metrics: StrokePerformance) => void;
@@ -197,12 +235,30 @@
       onScale={(scale) => onScaleImage?.(image.id, scale)}
     />
   {/each}
+  {#each shapes as shape (shape.id)}
+    <ShapeObject
+      {shape}
+      selected={interactive && selectedShapeId === shape.id}
+      editing={interactive && editingShapeId === shape.id}
+      {pageWidthPt}
+      {pageHeightPt}
+      {zoom}
+      {toPageDelta}
+      onSelect={interactive ? () => onSelectShape?.(shape.id) : undefined}
+      onChange={interactive ? (next, commit) => onChangeShape?.(next, commit) : undefined}
+      onEditingChange={interactive ? (editing) => onEditShape?.(shape.id, editing) : undefined}
+    />
+  {/each}
 </div>
 <div class:object-input={directObjectInput} class="ink-layer">
   <InkSurface
     {strokes}
     {newStrokeZIndex}
-    objectZIndices={[...blocks.map((block) => block.zIndex), ...images.map((image) => image.zIndex)]}
+    objectZIndices={[
+      ...blocks.map((block) => block.zIndex),
+      ...images.map((image) => image.zIndex),
+      ...shapes.map((shape) => shape.zIndex),
+    ]}
     {selectedStrokeIds}
     {pageWidthPt}
     {pageHeightPt}
@@ -214,9 +270,15 @@
     {taper}
     {opacity}
     {straighten}
+    {shapeKind}
+    {shapeStyle}
+    {shapeConstrain}
+    {drawAndHoldShapes}
     {eraseRadiusPt}
     {calibration}
     onStrokeFinalized={(stroke) => onStrokeFinalized?.(stroke)}
+    onShapeFinalized={(shape) => onShapeFinalized?.(shape)}
+    onInkShapeRecognized={(stroke, shape) => onInkShapeRecognized?.(stroke, shape)}
     onStrokesChange={(next) => onStrokesChange?.(next)}
     onSelectionChange={(next) => onSelectionChange?.(next)}
     onStrokeMetrics={(metrics) => onStrokeMetrics?.(metrics)}

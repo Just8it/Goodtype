@@ -1,0 +1,79 @@
+{
+  "schemaVersion": 2,
+  "id": "page-001",
+  "revision": 1,
+  "geometry": { "widthPt": 595, "heightPt": 842 },
+  "background": { "kind": "plain", "color": "#ffffff" },
+  "objects": [
+    {
+      "type": "shape",
+      "id": "shape-line",
+      "x": 48,
+      "y": 80,
+      "rotation": 0,
+      "scale": 1,
+      "zIndex": 1,
+      "readingOrder": 0,
+      "groupId": null,
+      "createdAt": "2026-09-03T08:00:00Z",
+      "modifiedAt": "2026-09-03T08:00:00Z",
+      "geometry": { "kind": "line", "start": { "x": 0, "y": 0 }, "end": { "x": 160, "y": 40 } },
+      "style": { "strokeColor": "#16212b", "strokeWidthPt": 1.6, "fillColor": null, "opacity": 1 }
+    },
+    {
+      "type": "shape",
+      "id": "shape-rectangle",
+      "x": 48,
+      "y": 160,
+      "rotation": 0,
+      "scale": 1,
+      "zIndex": 2,
+      "readingOrder": 1,
+      "groupId": null,
+      "createdAt": "2026-09-03T08:00:00Z",
+      "modifiedAt": "2026-09-03T08:00:00Z",
+      "geometry": { "kind": "rectangle", "widthPt": 160, "heightPt": 90, "cornerRadiusPt": 4 },
+      "style": { "strokeColor": "#16212b", "strokeWidthPt": 1.6, "fillColor": "#16212b24", "opacity": 1 }
+    },
+    {
+      "type": "shape",
+      "id": "shape-ellipse",
+      "x": 250,
+      "y": 160,
+      "rotation": 0,
+      "scale": 1,
+      "zIndex": 3,
+      "readingOrder": 2,
+      "groupId": null,
+      "createdAt": "2026-09-03T08:00:00Z",
+      "modifiedAt": "2026-09-03T08:00:00Z",
+      "geometry": { "kind": "ellipse", "widthPt": 110, "heightPt": 90 },
+      "style": { "strokeColor": "#206acb", "strokeWidthPt": 2, "fillColor": null, "opacity": 1 }
+    },
+    {
+      "type": "shape",
+      "id": "shape-spline",
+      "x": 48,
+      "y": 320,
+      "rotation": 0,
+      "scale": 1,
+      "zIndex": 4,
+      "readingOrder": 3,
+      "groupId": null,
+      "createdAt": "2026-09-03T08:00:00Z",
+      "modifiedAt": "2026-09-03T08:00:00Z",
+      "geometry": {
+        "kind": "spline",
+        "closed": false,
+        "nodes": [
+          { "point": { "x": 0, "y": 50 }, "handleIn": null, "handleOut": { "x": 30, "y": -45 } },
+          { "point": { "x": 90, "y": 10 }, "handleIn": { "x": -30, "y": 0 }, "handleOut": { "x": 30, "y": 0 } },
+          { "point": { "x": 180, "y": 55 }, "handleIn": { "x": -30, "y": -45 }, "handleOut": null }
+        ]
+      },
+      "style": { "strokeColor": "#16212b", "strokeWidthPt": 1.6, "fillColor": null, "opacity": 1 }
+    }
+  ],
+  "readingOrder": ["shape-line", "shape-rectangle", "shape-ellipse", "shape-spline"],
+  "inkLayers": [{ "id": "ink-layer-001", "path": "ink/page-001-layer-001.json" }]
+}

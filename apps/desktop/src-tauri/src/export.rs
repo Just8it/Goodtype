@@ -1,7 +1,7 @@
 use goodtype_core::{PageObject, storage};
 use goodtype_typst::export::{
-    ExportImage, ExportPage, ExportPoint, ExportStroke, ExportTransform, ExportTypstBlock,
-    export_pages,
+    ExportImage, ExportPage, ExportPoint, ExportShape, ExportStroke, ExportTransform,
+    ExportTypstBlock, export_pages,
 };
 
 use crate::notebook::{NotebookHistories, with_notebook};
@@ -62,6 +62,7 @@ fn export_page_from_bundle(
     let mut blocks = Vec::new();
     let mut page_typst = None;
     let mut images = Vec::new();
+    let mut shapes = Vec::new();
     for (order, object) in bundle.page.objects.iter().enumerate() {
         match object {
             PageObject::Typst {
@@ -98,6 +99,20 @@ fn export_page_from_bundle(
                 rotation_degrees: fields.rotation,
                 z_index: fields.z_index,
                 order,
+            }),
+            PageObject::Shape {
+                fields,
+                geometry,
+                style,
+            } => shapes.push(ExportShape {
+                x: fields.x,
+                y: fields.y,
+                rotation_degrees: fields.rotation,
+                scale: fields.scale,
+                z_index: fields.z_index,
+                order,
+                geometry: geometry.clone(),
+                style: style.clone(),
             }),
             _ => {}
         }
@@ -149,6 +164,7 @@ fn export_page_from_bundle(
         page_typst,
         blocks,
         strokes,
+        shapes,
         images,
     })
 }

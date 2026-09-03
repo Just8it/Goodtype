@@ -1,6 +1,6 @@
 <script lang="ts">
   type Props = {
-    subject: "ink" | "image" | "Typst block";
+    subject: "ink" | "image" | "shape" | "Typst block";
     left: number;
     top: number;
     ready: boolean;
@@ -10,6 +10,7 @@
     onDelete?: () => void;
     grouped?: boolean;
     onGroup?: () => void;
+    onConvert?: () => void;
     element?: HTMLElement;
   };
 
@@ -24,6 +25,7 @@
     onDelete,
     grouped = false,
     onGroup,
+    onConvert,
     element = $bindable(),
   }: Props = $props();
 </script>
@@ -84,6 +86,19 @@
           <path d="m8 16 8-8"></path>
         </svg>
       {/if}
+    </button>
+  {/if}
+  {#if onConvert}
+    <button
+      type="button"
+      title="Convert selected ink to an editable shape"
+      aria-label="Convert selected ink to an editable shape"
+      onclick={onConvert}
+    >
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M4 17.5 9.5 5 14 16l3-8 3 9.5"></path>
+        <path d="m17 14 3 3-3 3"></path>
+      </svg>
     </button>
   {/if}
   {#if onDelete}

@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { Point } from "../geometry/coordinates";
   import { boundedRasterScale, screenToPage } from "../geometry/coordinates";
-  import type { Stroke, StrokePoint } from "../model";
+  import type { ShapeStyle, Stroke, StrokePoint } from "../model";
   import {
     maximumSampleGap,
     type StrokePerformance,
@@ -20,6 +20,14 @@
   import { outlinePoints } from "../ink/outline";
   import { paintStrata } from "../ink/paint";
   import { straightenStroke } from "../ink/straighten";
+  import {
+    shapeFromDrag,
+    shapePath,
+    splineFromPoints,
+    type ShapeDraft,
+    type ShapeKind,
+  } from "../shape/geometry";
+  import { recognizeHeldShape } from "../shape/recognize";
   import {
     eraseStrokeAt,
     hitStroke,
@@ -49,10 +57,16 @@
     opacity?: number;
     /** Snap an almost-straight stroke to the line it was aiming for, on release. */
     straighten?: boolean;
+    shapeKind?: ShapeKind;
+    shapeStyle?: ShapeStyle;
+    shapeConstrain?: boolean;
+    drawAndHoldShapes?: boolean;
     eraseRadiusPt?: number;
     calibration?: PressureCalibration;
     pointerMapping?: PointerMapping;
     onStrokeFinalized?: (stroke: Stroke) => void;
+    onShapeFinalized?: (shape: ShapeDraft) => void;
+    onInkShapeRecognized?: (stroke: Stroke, shape: ShapeDraft) => void;
     onStrokesChange?: (strokes: Stroke[]) => void;
     onSelectionChange?: (strokeIds: string[]) => void;
     onStrokeMetrics?: (metrics: StrokePerformance) => void;
@@ -73,10 +87,21 @@
     taper = 0,
     opacity = 1,
     straighten = false,
+    shapeKind = "line",
+    shapeStyle = {
+      strokeColor: "#16212b",
+      strokeWidthPt: 2,
+      fillColor: null,
+      opacity: 1,
+    },
+    shapeConstrain = false,
+    drawAndHoldShapes = true,
     eraseRadiusPt = 8,
     calibration = DEFAULT_PRESSURE_CALIBRATION,
     pointerMapping = DEFAULT_POINTER_MAPPING,
     onStrokeFinalized,
+    onShapeFinalized,
+    onInkShapeRecognized,
     onStrokesChange,
     onSelectionChange,
     onStrokeMetrics,
@@ -101,6 +126,16 @@
         strokeTool: "pen" | "highlighter";
         startedAt: number;
         feedbackMs: number | null;
+        holdAnchor: Point;
+        shapePreview: ShapeDraft | null;
+      }
+    | {
+        kind: "shape";
+        pointerId: number;
+        start: Point;
+        points: StrokePoint[];
+        constrain: boolean;
+        preview: ShapeDraft | null;
       }
     | { kind: "lasso"; pointerId: number; points: Point[] }
     | {
@@ -124,7 +159,11 @@
       };
 
   let gesture: Gesture | null = null;
+  let holdTimer: ReturnType<typeof setTimeout> | undefined;
+  let splineFrame: number | undefined;
   const MAX_IMMEDIATE_CANVAS_PIXELS = 6_000_000;
+  const SHAPE_HOLD_MS = 500;
+  const SHAPE_HOLD_DRIFT_PT = 4;
 
   $effect(() => {
     // Reads `strokes`, never `localStrokes`: now that the local copy is reactive, reading it here
@@ -226,12 +265,28 @@
         strokeTool: tool === "highlighter" ? "highlighter" : "pen",
         startedAt: performance.now(),
         feedbackMs: null,
+        holdAnchor: pagePoint(event),
+        shapePreview: null,
       };
       gesture = drawGesture;
+      armHoldPreview(drawGesture);
       redrawImmediate();
       requestAnimationFrame(() => {
         drawGesture.feedbackMs = performance.now() - drawGesture.startedAt;
       });
+      return;
+    }
+    if (role === "shape") {
+      const point = sample(event);
+      gesture = {
+        kind: "shape",
+        pointerId: event.pointerId,
+        start: point,
+        points: [point],
+        constrain: shapeConstrain || event.shiftKey,
+        preview: null,
+      };
+      redrawImmediate();
       return;
     }
     if (role === "lasso") {
@@ -293,6 +348,19 @@
       for (const next of events.length > 0 ? events : [event]) {
         gesture.points.push(sample(next));
       }
+      updateHoldPreview(gesture);
+    } else if (gesture.kind === "shape") {
+      const events = event.getCoalescedEvents?.() ?? [];
+      for (const next of events.length > 0 ? events : [event]) {
+        gesture.points.push(sample(next));
+      }
+      gesture.constrain = shapeConstrain || event.shiftKey;
+      // A line, rectangle or ellipse is two points of arithmetic and can follow the pointer
+      // exactly. A spline is a curve fit over every sample so far, which is far too much to
+      // repeat per pointer event on a pen reporting hundreds a second — so it re-fits once a
+      // frame, and is fitted exactly once more on release, which is the one that gets stored.
+      if (shapeKind === "spline") requestSplinePreview(gesture);
+      else gesture.preview = shapeDraft(gesture);
     } else if (gesture.kind === "lasso") {
       gesture.points.push(pagePoint(event));
     } else if (gesture.kind === "erase") {
@@ -327,32 +395,20 @@
         gesture.points.concat(sample(event)),
         calibration.smoothing,
       );
-      const points = quantizePoints(straighten ? straightenStroke(smoothed) : smoothed);
-      const stroke: Stroke = {
-        id: crypto.randomUUID(),
-        zIndex: newStrokeZIndex,
-        tool: gesture.strokeTool,
-        color,
-        widthPt: liveWidthPt(gesture.strokeTool),
-        // Resolved from the nib now and carried with the stroke, so reopening the notebook or
-        // exporting it never has to guess these back from the tool.
-        pressure,
-        taper,
-        opacity,
-        groupId: null,
-        points,
-        transform: {
-          translateX: 0,
-          translateY: 0,
-          scaleX: 1,
-          scaleY: 1,
-          rotation: 0,
-        },
-      };
-      localStrokes = [...localStrokes, stroke];
-      strokeCount = localStrokes.length;
-      status = `Added ${stroke.tool} stroke`;
-      onStrokeFinalized?.(stroke);
+      const heldShape = gesture.shapePreview;
+      const points = quantizePoints(
+        heldShape ? smoothed : straighten ? straightenStroke(smoothed) : smoothed,
+      );
+      const stroke = completedStroke(gesture.strokeTool, points);
+      if (heldShape && onInkShapeRecognized) {
+        status = `Converted held ink to ${heldShape.geometry.kind}`;
+        onInkShapeRecognized(stroke, heldShape);
+      } else {
+        localStrokes = [...localStrokes, stroke];
+        strokeCount = localStrokes.length;
+        status = `Added ${stroke.tool} stroke`;
+        onStrokeFinalized?.(stroke);
+      }
       onStrokeMetrics?.({
         sampleCount: points.length,
         maxSampleGapMs: maximumSampleGap(points),
@@ -360,6 +416,19 @@
           gesture.feedbackMs ?? performance.now() - gesture.startedAt,
         commitMs: performance.now() - commitStartedAt,
       });
+    } else if (gesture.kind === "shape") {
+      const finalGesture = {
+        ...gesture,
+        points: [...gesture.points, sample(event)],
+        constrain: shapeConstrain || event.shiftKey,
+      };
+      const draft = shapeDraft(finalGesture);
+      if (draft) {
+        status = `Added ${draft.geometry.kind}`;
+        onShapeFinalized?.(draft);
+      } else {
+        status = "Shape was too small to add";
+      }
     } else if (gesture.kind === "lasso") {
       setSelection(selectStrokesInLasso(localStrokes, gesture.points.concat(pagePoint(event))));
     } else if (gesture.kind === "erase") {
@@ -402,6 +471,8 @@
   }
 
   function finishPointer(pointerId: number): void {
+    clearHoldTimer();
+    clearSplineFrame();
     gesture = null;
     eraserPressed = false;
     if (surface?.hasPointerCapture(pointerId)) surface.releasePointerCapture(pointerId);
@@ -482,15 +553,19 @@
     if (!context || !immediateCanvas) return;
     context.clearRect(0, 0, pageWidthPt, pageHeightPt);
     if (gesture?.kind === "draw") {
-      drawPoints(
-        context,
-        gesture.points,
-        color,
-        liveWidthPt(gesture.strokeTool),
-        pressure,
-        taper,
-        opacity,
-      );
+      if (gesture.shapePreview) drawShapePreview(context, gesture.shapePreview);
+      else
+        drawPoints(
+          context,
+          gesture.points,
+          color,
+          liveWidthPt(gesture.strokeTool),
+          pressure,
+          taper,
+          opacity,
+        );
+    } else if (gesture?.kind === "shape" && gesture.preview) {
+      drawShapePreview(context, gesture.preview);
     } else if (gesture?.kind === "lasso") {
       context.save();
       context.strokeStyle = "#206acb";
@@ -546,6 +621,116 @@
     return strokeTool === "highlighter" ? widthPt * 3 : widthPt;
   }
 
+  function completedStroke(
+    strokeTool: "pen" | "highlighter",
+    points: StrokePoint[],
+  ): Stroke {
+    return {
+      id: crypto.randomUUID(),
+      zIndex: newStrokeZIndex,
+      tool: strokeTool,
+      color,
+      widthPt: liveWidthPt(strokeTool),
+      pressure,
+      taper,
+      opacity,
+      groupId: null,
+      points,
+      transform: {
+        translateX: 0,
+        translateY: 0,
+        scaleX: 1,
+        scaleY: 1,
+        rotation: 0,
+      },
+    };
+  }
+
+  function shapeDraft(
+    active: Extract<Gesture, { kind: "shape" }>,
+  ): ShapeDraft | null {
+    if (shapeKind === "spline") {
+      return splineFromPoints(active.points, shapeStyle, 1.5 / Math.max(zoom, 0.1));
+    }
+    return shapeFromDrag(
+      shapeKind,
+      active.start,
+      active.points.at(-1) ?? active.start,
+      shapeStyle,
+      active.constrain,
+    );
+  }
+
+  function armHoldPreview(active: Extract<Gesture, { kind: "draw" }>): void {
+    clearHoldTimer();
+    if (!drawAndHoldShapes || active.strokeTool !== "pen") return;
+    holdTimer = setTimeout(() => {
+      if (gesture !== active) return;
+      active.shapePreview = recognizeHeldShape(
+        smoothPoints(active.points, calibration.smoothing),
+        shapeStyle,
+      )?.draft ?? null;
+      if (active.shapePreview) {
+        status = `Release to use ${active.shapePreview.geometry.kind}; continue drawing to keep ink`;
+        redrawImmediate();
+      }
+    }, SHAPE_HOLD_MS);
+  }
+
+  function updateHoldPreview(active: Extract<Gesture, { kind: "draw" }>): void {
+    const point = active.points.at(-1);
+    if (!point) return;
+    if (Math.hypot(point.x - active.holdAnchor.x, point.y - active.holdAnchor.y) <= SHAPE_HOLD_DRIFT_PT / zoom) return;
+    active.holdAnchor = point;
+    active.shapePreview = null;
+    armHoldPreview(active);
+  }
+
+  function clearHoldTimer(): void {
+    if (holdTimer) clearTimeout(holdTimer);
+    holdTimer = undefined;
+  }
+
+  function requestSplinePreview(active: Extract<Gesture, { kind: "shape" }>): void {
+    if (splineFrame !== undefined) return;
+    splineFrame = requestAnimationFrame(() => {
+      splineFrame = undefined;
+      if (gesture !== active) return;
+      active.preview = shapeDraft(active);
+      redrawImmediate();
+    });
+  }
+
+  function clearSplineFrame(): void {
+    if (splineFrame !== undefined) cancelAnimationFrame(splineFrame);
+    splineFrame = undefined;
+  }
+
+  function drawShapePreview(
+    context: CanvasRenderingContext2D,
+    draft: ShapeDraft,
+  ): void {
+    context.save();
+    context.translate(draft.x, draft.y);
+    context.rotate((draft.rotation * Math.PI) / 180);
+    context.strokeStyle = draft.style.strokeColor;
+    context.lineWidth = Math.max(draft.style.strokeWidthPt, 0.5 / zoom);
+    context.lineCap = "round";
+    context.lineJoin = "round";
+    context.globalAlpha = draft.style.opacity;
+    const path = new Path2D(shapePath(draft.geometry));
+    const closed =
+      draft.geometry.kind === "rectangle" ||
+      draft.geometry.kind === "ellipse" ||
+      (draft.geometry.kind === "spline" && draft.geometry.closed);
+    if (closed && draft.style.fillColor) {
+      context.fillStyle = draft.style.fillColor;
+      context.fill(path);
+    }
+    context.stroke(path);
+    context.restore();
+  }
+
   function toCanvasPoint(point: Point): Point {
     return point;
   }
@@ -575,6 +760,7 @@
   bind:this={surface}
   class="ink-surface"
   class:eraser-active={tool === "eraser"}
+  class:shape-active={tool === "shape"}
   style:width={`${pageWidthPt}px`}
   style:height={`${pageHeightPt}px`}
   role="button"
@@ -661,6 +847,10 @@
 
   .ink-surface.eraser-active {
     cursor: none;
+  }
+
+  .ink-surface.shape-active {
+    cursor: crosshair;
   }
 
   canvas,

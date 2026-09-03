@@ -92,6 +92,24 @@ export type Page = {
   inkLayers: InkLayerReference[];
 };
 
+/// The oldest notebook this build still reads and writes.
+export const MIN_SUPPORTED_SCHEMA_VERSION = 1;
+/// Shapes are what version 2 added. Mirrors `SHAPE_SCHEMA_VERSION` in goodtype-core.
+export const SHAPE_SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 2;
+
+/**
+ * The version a page's content obliges its notebook to be written at.
+ *
+ * A notebook is not upgraded for being opened, nor for being saved after an unrelated edit: it
+ * rises only when it stores something the new version introduced. The store applies the same
+ * rule on commit and is the authority; this keeps the snapshot the app builds agreeing with it.
+ */
+export function requiredSchemaVersion(objects: readonly PageObject[]): number {
+  return objects.some((object) => object.type === "shape")
+    ? SHAPE_SCHEMA_VERSION
+    : MIN_SUPPORTED_SCHEMA_VERSION;
+}
 export const DEFAULT_INK_Z_INDEX = 1_000_000;
 
 export type InkLayerReference = { id: string; path: string };
@@ -107,6 +125,28 @@ export type ObjectFields = {
   groupId: string | null;
   createdAt: string;
   modifiedAt: string;
+};
+
+export type ShapePoint = { x: number; y: number };
+
+/** Bézier handles are vectors relative to the knot, matching the canonical Rust model. */
+export type BezierNode = {
+  point: ShapePoint;
+  handleIn: ShapePoint | null;
+  handleOut: ShapePoint | null;
+};
+
+export type ShapeGeometry =
+  | { kind: "line"; start: ShapePoint; end: ShapePoint }
+  | { kind: "rectangle"; widthPt: number; heightPt: number; cornerRadiusPt: number }
+  | { kind: "ellipse"; widthPt: number; heightPt: number }
+  | { kind: "spline"; nodes: BezierNode[]; closed: boolean };
+
+export type ShapeStyle = {
+  strokeColor: string;
+  strokeWidthPt: number;
+  fillColor: string | null;
+  opacity: number;
 };
 
 export type PageObject =
@@ -140,6 +180,11 @@ export type PageObject =
       type: "ink_group";
       inkLayerId: string;
       strokeIds: string[];
+    })
+  | (ObjectFields & {
+      type: "shape";
+      geometry: ShapeGeometry;
+      style: ShapeStyle;
     })
   | (ObjectFields & { type: "group"; childIds: string[] });
 

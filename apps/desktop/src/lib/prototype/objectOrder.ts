@@ -10,7 +10,12 @@ type VisualEntry = {
 };
 
 function isVisualObject(object: PageObject): boolean {
-  return object.type === "typst" || object.type === "image" || object.type === "pdf_material";
+  return (
+    object.type === "typst" ||
+    object.type === "image" ||
+    object.type === "pdf_material" ||
+    object.type === "shape"
+  );
 }
 
 function entries(page: Page, strokes: Stroke[]): VisualEntry[] {

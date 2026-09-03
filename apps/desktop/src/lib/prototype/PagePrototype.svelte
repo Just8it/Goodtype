@@ -42,11 +42,13 @@
   import { placeFloatingToolbar, type ViewRect } from "../geometry/placement";
   import {
     DEFAULT_INK_Z_INDEX,
+    SCHEMA_VERSION,
     type NotebookManifest,
     type PageBackground,
     type PageGeometry,
     type PageObject,
     type PagePosition,
+    type ShapeStyle,
     type PageTemplate,
     type Stroke,
   } from "../model";
@@ -79,11 +81,13 @@
     moveSelected,
     scaleSelected,
     selectionBounds,
+    transformedPoint,
     toolAfterSelection,
   } from "../ink/selection";
   import ColorPanel from "./ColorPanel.svelte";
   import WidthPanel from "./WidthPanel.svelte";
   import ToolCard from "./ToolCard.svelte";
+  import ShapeCard from "./ShapeCard.svelte";
   import PageSurface from "./PageSurface.svelte";
   import OverflowMenu from "../workspace/OverflowMenu.svelte";
   import { populated, type MenuSection } from "../workspace/menu";
@@ -110,12 +114,17 @@
     imageViewsFromSnapshot,
     mimeForPath,
     pageTypstViewFromSnapshot,
+    shapeViewsFromSnapshot,
     strokesFromSnapshot,
     type BlockView,
     type ImageView,
     type PageTypstView,
+    type ShapeEditCommit,
+    type ShapeView,
     type TypstTransform,
   } from "./pageView";
+  import type { ShapeDraft } from "../shape/geometry";
+  import { recognizeHeldShape } from "../shape/recognize";
   import { createCommitTimer } from "./commitTimer";
   import { blankNotebookSnapshot } from "./newNotebook";
   import { createInkCommitter, type InkCommitter } from "./inkCommitter";
@@ -181,6 +190,7 @@
     result: TypstCompileResult | null;
   };
   type ImageState = ImageView;
+  type ShapeState = ShapeView;
   type PaletteDrag = {
     pointerId: number;
     size: number;
@@ -259,7 +269,10 @@
   ]);
   let pageTypst = $state<PageTypstState | null>(null);
   let images = $state<ImageState[]>([]);
+  let shapes = $state.raw<ShapeState[]>([]);
   let selectedImageId = $state<string | null>(null);
+  let selectedShapeId = $state<string | null>(null);
+  let editingShapeId = $state<string | null>(null);
   let mixedGroup = $state<ManagedMixedGroup | null>(null);
   let selectedTypstId = $state<string | null>(null);
   let directObjectInput = $state(false);
@@ -388,9 +401,13 @@
       if (typstBlocks.some((block) => block.id === target)) {
         selectedTypstId = target;
         selectedImageId = null;
+        selectedShapeId = null;
+        editingShapeId = null;
       } else if (pageTypst?.id === target) {
         selectedTypstId = null;
         selectedImageId = null;
+        selectedShapeId = null;
+        editingShapeId = null;
       }
     } else if (sideEditorPageText) {
       sideEditorBlockId = null;
@@ -508,9 +525,11 @@
     anchor: number;
     view?: "main" | "add-colour";
   } | null>(null);
+  let shapeCard = $state<{ anchor: number } | null>(null);
 
   function closeToolCard() {
     toolCard = null;
+    shapeCard = null;
   }
 
   /// First press selects the tool; pressing the one already held opens its card — the same
@@ -536,6 +555,16 @@
     }
   }
 
+  function selectOrOpenShape(tile: HTMLElement) {
+    if (tool !== "shape") {
+      closeToolCard();
+      activateTool("shape");
+      return;
+    }
+    shapeCard = shapeCard ? null : { anchor: swatchAnchor(tile) };
+    toolCard = null;
+  }
+
   function selectPlainTool(activate: () => void) {
     closeToolCard();
     activate();
@@ -545,6 +574,12 @@
   /// the card points at the thing whose settings it carries wherever the button happens to be.
   function openCardForHeldTool(view: "main" | "add-colour" = "main") {
     const tile = document.querySelector<HTMLElement>(".instrument-palette .tool-tile.active");
+    if (tool === "shape") {
+      toolCard = null;
+      shapeCard = { anchor: tile ? swatchAnchor(tile) : 0 };
+      return;
+    }
+    shapeCard = null;
     toolCard = {
       kind: tool === "highlighter" ? "highlighter" : "pen",
       slot: tool === "highlighter" ? 1 : penPreset,
@@ -557,6 +592,7 @@
     "pen-1": (tile) => selectOrOpenTool("pen", 1, tile),
     "pen-2": (tile) => selectOrOpenTool("pen", 2, tile),
     highlighter: (tile) => selectOrOpenTool("highlighter", 1, tile),
+    shape: selectOrOpenShape,
     eraser: selectEraser,
     lasso: () => selectPlainTool(() => activateTool("lasso")),
     "page-text": () => selectPlainTool(openPageText),
@@ -565,7 +601,7 @@
 
   function activePaletteCommand(): PaletteCommand {
     if (tool === "pen") return penPreset === 1 ? "pen-1" : "pen-2";
-    if (tool === "highlighter" || tool === "eraser") return tool;
+    if (tool === "highlighter" || tool === "shape" || tool === "eraser") return tool;
     return "lasso";
   }
 
@@ -574,13 +610,17 @@
     ...(editingPageText ? (["page-text"] as const) : []),
   ]);
   const expandedPaletteCommand = $derived<PaletteCommand | null>(
-    toolCard ? activePaletteCommand() : null,
+    toolCard || shapeCard ? activePaletteCommand() : null,
   );
 
   /// Which quick controls the pocket carries for the tool in hand. Absent for tools that have
   /// nothing to set, so the rail shrinks back to bare tiles rather than showing an empty tray.
   const paletteContext = $derived<"ink" | "eraser" | null>(
-    tool === "pen" || tool === "highlighter" ? "ink" : tool === "eraser" ? "eraser" : null,
+    tool === "pen" || tool === "highlighter" || tool === "shape"
+      ? "ink"
+      : tool === "eraser"
+        ? "eraser"
+        : null,
   );
 
   function swatchAnchor(chip: HTMLElement): number {
@@ -735,6 +775,7 @@
   $effect(() => {
     const selected = selectedObjectId() || selectedStrokeIds.length > 0 || groupedStrokeIds.length > 0;
     void images;
+    void shapes;
     void strokes;
     void zoom;
     void activePageId;
@@ -945,7 +986,7 @@
   function buildSnapshot(): NotebookSnapshot {
     const now = new Date().toISOString();
     const manifest = notebookManifest ?? {
-      schemaVersion: 1,
+      schemaVersion: SCHEMA_VERSION,
       id: `notebook-${Date.now().toString(36)}`,
       title: notebookTitle,
       pages: [{ id: activePageId, path: "pages/page-001.json", geometry: activeGeometry }],
@@ -991,6 +1032,7 @@
           }
         : null,
       images,
+      shapes,
       sharedStyle: manifest.sharedStylePath
         ? { path: manifest.sharedStylePath, source: sharedStyleSource }
         : null,
@@ -1041,6 +1083,9 @@
     createdAt = snapshot.manifest.createdAt;
     strokes = snapshot.inkLayers[0]?.strokes ?? [];
     selectedStrokeIds = [];
+    shapes = shapeViewsFromSnapshot(snapshot);
+    selectedShapeId = null;
+    editingShapeId = null;
 
     typstBlocks = snapshot.page.objects
       .filter(
@@ -1539,6 +1584,7 @@
     ];
     pageTypst = null;
     strokes = [];
+    shapes = [];
     selectedStrokeIds = [];
     groupedStrokeIds = [];
     revokeImageUrl();
@@ -1552,6 +1598,8 @@
       : null;
     selectedTypstId = null;
     selectedImageId = null;
+    selectedShapeId = null;
+    editingShapeId = null;
     mixedGroup = null;
     queueCommit("Cleared page");
   }
@@ -1591,7 +1639,11 @@
       ...(selected
         ? [
             {
-              title: selectedImageId ? "Selected image" : "Selected Typst",
+              title: selectedImageId
+                ? "Selected image"
+                : selectedShapeId
+                  ? "Selected shape"
+                  : "Selected Typst",
               entries: [
                 { kind: "action" as const, id: "object-back", label: "Send behind everything", icon: "M4 12l8 4 8-4M4 8l8-4 8 4-8 4z", disabled: !canMoveVisual(-1), onSelect: () => changeVisualOrder("back") },
                 { kind: "action" as const, id: "object-front", label: "Bring in front of everything", icon: "M4 12l8-4 8 4-8 4zM4 16l8 4 8-4", disabled: !canMoveVisual(1), onSelect: () => changeVisualOrder("front") },
@@ -1677,6 +1729,8 @@
         ? hit.objectId
         : null;
       selectedImageId = null;
+      selectedShapeId = null;
+      editingShapeId = null;
       status = `Found on page ${hit.pageNumber}`;
     }
   }
@@ -2046,11 +2100,13 @@
         },
         result: null,
         zIndex: nextVisualZIndex(),
-        readingOrder: typstBlocks.length + images.length,
+        readingOrder: nextReadingOrder(),
       },
     ];
     selectedTypstId = id;
     selectedImageId = null;
+    selectedShapeId = null;
+    editingShapeId = null;
     status = "Created a new Typst block";
     queueCommit("Created Typst block");
   }
@@ -2061,7 +2117,18 @@
       ...(activeSnapshot?.page.objects.map((object) => object.zIndex) ?? []),
       ...typstBlocks.map((block) => block.zIndex),
       ...images.map((image) => image.zIndex),
+      ...shapes.map((shape) => shape.zIndex),
       ...strokes.map((stroke) => stroke.zIndex ?? DEFAULT_INK_Z_INDEX),
+    ) + 1;
+  }
+
+  function nextReadingOrder(): number {
+    return Math.max(
+      -1,
+      ...(pageTypst ? [pageTypst.readingOrder] : []),
+      ...typstBlocks.map((block) => block.readingOrder),
+      ...images.map((image) => image.readingOrder),
+      ...shapes.map((shape) => shape.readingOrder),
     ) + 1;
   }
 
@@ -2143,6 +2210,7 @@
   const TOOL_NAMES: Record<InkTool, string> = {
     pen: "Pen",
     highlighter: "Highlighter",
+    shape: "Shape",
     eraser: "Eraser",
     lasso: "Lasso",
     select: "Ink selection",
@@ -2162,6 +2230,8 @@
       updateInkSelection([]);
       selectedTypstId = null;
       selectedImageId = null;
+      selectedShapeId = null;
+      editingShapeId = null;
     }
     status = `${next === "pen" ? `Pen ${penPreset}` : TOOL_NAMES[next]} active`;
   }
@@ -2332,26 +2402,43 @@
     ) {
       return;
     }
+    if (tool === "shape") {
+      directObjectInput = false;
+      return;
+    }
     if (event.pointerType === "pen" && !keepsSelection(tool)) {
       directObjectInput = false;
       return;
     }
     const object = document
       .elementsFromPoint(event.clientX, event.clientY)
-      .map((element) => element.closest<HTMLElement>(".typst-block, .image-object"))
+      .map((element) => element.closest<HTMLElement>(".typst-block, .image-object, .shape-object"))
       .find((element) => element && workspace?.contains(element));
     directObjectInput = Boolean(object);
     if (event.type !== "pointerdown") return;
+    const objectId =
+      object?.dataset.objectId ??
+      object?.querySelector<HTMLElement>("[data-object-id]")?.dataset.objectId ??
+      null;
     selectedTypstId = object?.classList.contains("typst-block")
-      ? object.dataset.objectId ?? null
+      ? objectId
       : null;
     selectedImageId = object?.classList.contains("image-object")
-      ? object.dataset.objectId ?? null
+      ? objectId
       : null;
+    selectedShapeId = object?.classList.contains("shape-object")
+      ? objectId
+      : null;
+    if (selectedImageId || selectedShapeId) updateInkSelection([]);
+    if (selectedShapeId !== editingShapeId) editingShapeId = null;
     if (object && event.target instanceof Element && event.target.closest(".ink-surface")) {
       event.preventDefault();
       event.stopPropagation();
-      status = selectedTypstId ? "Typst block selected" : "Image selected";
+      status = selectedTypstId
+        ? "Typst block selected"
+        : selectedImageId
+          ? "Image selected"
+          : "Shape selected";
     }
   }
 
@@ -2366,13 +2453,15 @@
       (event.pointerType === "pen" && !keepsSelection(tool)) ||
       (event.target instanceof Element &&
         event.target.closest(
-          ".typst-block, .image-object, .typst-size-control, .selection-actions, .overflow-menu, [data-preserve-selection]",
+          ".typst-block, .image-object, .shape-object, .typst-size-control, .selection-actions, .overflow-menu, [data-preserve-selection]",
         ))
     ) {
       return;
     }
     selectedTypstId = null;
     selectedImageId = null;
+    selectedShapeId = null;
+    editingShapeId = null;
   }
 
   /**
@@ -2434,6 +2523,11 @@
       event.target.closest(".selection-actions, .page-number button")
     ) return;
     routeObjectPointer(event);
+    if (
+      tool === "shape" &&
+      event.target instanceof Element &&
+      event.target.closest(".ink-surface")
+    ) return;
     if (event.pointerType !== "touch") return;
     touchPoints.set(event.pointerId, { x: event.clientX, y: event.clientY });
     if (touchPoints.size === 1 && !directObjectInput && pageViewport && workspace) {
@@ -2699,6 +2793,14 @@
       status = "Removed the image from this page; the original file is kept";
       return true;
     }
+    if (selectedShapeId) {
+      shapes = shapes.filter((shape) => shape.id !== selectedShapeId);
+      selectedShapeId = null;
+      editingShapeId = null;
+      queueCommit("Deleted shape");
+      status = "Deleted the shape";
+      return true;
+    }
     if (selectedStrokeIds.length > 0) {
       const removed = new Set(selectedStrokeIds);
       updateInkSelection([]);
@@ -2737,6 +2839,15 @@
           : image,
       );
       scheduleInkCommit("Moved image");
+      return true;
+    }
+    if (selectedShapeId) {
+      shapes = shapes.map((shape) =>
+        shape.id === selectedShapeId
+          ? { ...shape, x: shape.x + dx, y: shape.y + dy }
+          : shape,
+      );
+      scheduleInkCommit("Moved shape");
       return true;
     }
     if (selectedStrokeIds.length > 0) {
@@ -2791,6 +2902,7 @@
     const existingIds = new Set([
       ...typstBlocks.map((block) => block.id),
       ...images.map((image) => image.id),
+      ...shapes.map((shape) => shape.id),
       ...(activeSnapshot?.page.objects.map((object) => object.id) ?? []),
     ]);
     let number = images.length + 1;
@@ -2807,10 +2919,12 @@
       heightPt: Math.max(1, dimensions.height * fit),
       scale: 1,
       zIndex: nextVisualZIndex(),
-      readingOrder: typstBlocks.length + images.length,
+      readingOrder: nextReadingOrder(),
     }];
     selectedImageId = id;
     selectedTypstId = null;
+    selectedShapeId = null;
+    editingShapeId = null;
     status = "Pasted one original image";
     queueCommit("Pasted image");
   }
@@ -2830,7 +2944,10 @@
     inkCommitTimer.cancel();
     inkPending = false;
     if (!tauriAvailable || !root || transactionFailed) return;
-    const snapshot = buildSnapshot();
+    enqueueSnapshot(label, buildSnapshot());
+  }
+
+  function enqueueSnapshot(label: string, snapshot: NotebookSnapshot) {
     pendingTransactions += 1;
     transactionQueue = transactionQueue
       .then(async () => {
@@ -2912,6 +3029,107 @@
     if (sideEditorOpen) sideEditor?.focus();
   }
 
+  function currentShapeStyle(): ShapeStyle {
+    const strokeColor = settings.penPresets[penPreset - 1]?.color ?? "#1e232b";
+    return {
+      strokeColor,
+      strokeWidthPt: settings.penPresets[penPreset - 1]?.widthPt ?? 1.6,
+      fillColor: settings.shapeFill ? `${strokeColor}24` : null,
+      opacity: 1,
+    };
+  }
+
+  function shapeView(draft: ShapeDraft, overrides: Partial<ShapeView> = {}): ShapeView {
+    return {
+      id: crypto.randomUUID(),
+      x: draft.x,
+      y: draft.y,
+      rotation: draft.rotation,
+      scale: 1,
+      zIndex: nextVisualZIndex(),
+      readingOrder: nextReadingOrder(),
+      geometry: draft.geometry,
+      style: draft.style,
+      ...overrides,
+    };
+  }
+
+  function addShape(draft: ShapeDraft) {
+    const added = shapeView(draft);
+    shapes = [...shapes, added];
+    status = `Added ${draft.geometry.kind}; shape tool stays active`;
+    queueCommit(`Added ${draft.geometry.kind}`);
+  }
+
+  /**
+   * A held pen mark is committed once as raw ink and once as its promoted shape. That creates
+   * an honest undo boundary: one Undo restores the exact samples instead of approximating them
+   * from the fitted geometry.
+   */
+  function promoteHeldInk(stroke: Stroke, draft: ShapeDraft) {
+    inkCommitTimer.cancel();
+    inkPending = false;
+    const originalStrokes = strokes;
+    const originalShapes = shapes;
+    strokes = [...originalStrokes, stroke];
+    const rawSnapshot = buildSnapshot();
+    strokes = originalStrokes;
+    shapes = [
+      ...originalShapes,
+      shapeView(draft, { zIndex: stroke.zIndex ?? DEFAULT_INK_Z_INDEX }),
+    ];
+    const shapeSnapshot = buildSnapshot();
+    if (tauriAvailable && root && !transactionFailed) {
+      enqueueSnapshot(`Added ${stroke.tool} stroke`, rawSnapshot);
+      enqueueSnapshot(`Converted held ink to ${draft.geometry.kind}`, shapeSnapshot);
+    }
+    status = `Converted held ink to ${draft.geometry.kind}; Undo restores the original stroke`;
+  }
+
+  function convertSelectedInkToShape() {
+    if (selectedStrokeIds.length !== 1) return;
+    const stroke = strokes.find((candidate) => candidate.id === selectedStrokeIds[0]);
+    if (!stroke || stroke.groupId) {
+      status = "Ungroup this ink before converting it to a shape";
+      return;
+    }
+    const style: ShapeStyle = {
+      strokeColor: stroke.color,
+      strokeWidthPt: stroke.widthPt,
+      fillColor: null,
+      opacity: stroke.opacity,
+    };
+    const draft = recognizeHeldShape(
+      stroke.points.map((point) => ({ ...point, ...transformedPoint(stroke, point) })),
+      style,
+    )?.draft;
+    if (!draft) {
+      status = "That stroke is not close enough to a line, rectangle, ellipse, or simple curve";
+      return;
+    }
+    strokes = strokes.filter((candidate) => candidate.id !== stroke.id);
+    shapes = [
+      ...shapes,
+      shapeView(draft, {
+        zIndex: stroke.zIndex ?? DEFAULT_INK_Z_INDEX,
+        readingOrder: nextReadingOrder(),
+      }),
+    ];
+    updateInkSelection([]);
+    queueCommit(`Converted ink to ${draft.geometry.kind}`);
+    status = `Converted ink to ${draft.geometry.kind}`;
+  }
+
+  /// A finished drag is one decision and is written straight away. A held arrow or bracket key
+  /// is one continuous adjustment, and settles first so a nudge across the page is a single undo
+  /// step rather than one transaction per repeat.
+  function changeShape(next: ShapeView, commit: ShapeEditCommit = "now") {
+    if (!shapes.some((shape) => shape.id === next.id)) return;
+    shapes = shapes.map((shape) => (shape.id === next.id ? next : shape));
+    if (commit === "settled") scheduleInkCommit("Updated shape");
+    else queueCommit("Updated shape");
+  }
+
   function changeImage(id: string, next: Partial<Pick<ImageState, "x" | "y" | "scale">>) {
     if (!images.some((image) => image.id === id)) return;
     images = images.map((image) => (image.id === id ? { ...image, ...next } : image));
@@ -2919,7 +3137,7 @@
   }
 
   function selectedObjectId(): string | null {
-    return selectedTypstId ?? selectedImageId;
+    return selectedTypstId ?? selectedImageId ?? selectedShapeId;
   }
 
   function canMoveVisual(direction: -1 | 1): boolean {
@@ -3039,6 +3257,12 @@
       return object
         ? { ...image, zIndex: object.zIndex, readingOrder: object.readingOrder }
         : image;
+    });
+    shapes = shapes.map((shape) => {
+      const object = fields.get(shape.id);
+      return object
+        ? { ...shape, zIndex: object.zIndex, readingOrder: object.readingOrder }
+        : shape;
     });
     queueCommit(label);
   }
@@ -3235,7 +3459,7 @@
       toggleSideEditor();
       return;
     }
-    if (event.key === "Escape" && toolCard) {
+    if (event.key === "Escape" && (toolCard || shapeCard)) {
       event.preventDefault();
       closeToolCard();
       return;
@@ -3252,6 +3476,8 @@
       metricsOpen = false;
       selectedTypstId = null;
       selectedImageId = null;
+      selectedShapeId = null;
+      editingShapeId = null;
       directObjectInput = false;
       return;
     }
@@ -3270,6 +3496,12 @@
       return;
     }
     if (!event.ctrlKey && !event.metaKey && !event.altKey) {
+      if (event.key === "Enter" && selectedShapeId) {
+        event.preventDefault();
+        editingShapeId = editingShapeId === selectedShapeId ? null : selectedShapeId;
+        status = editingShapeId ? "Editing shape anchor points" : "Shape selected";
+        return;
+      }
       if (event.key === "Delete" || event.key === "Backspace") {
         if (deleteSelection()) event.preventDefault();
         return;
@@ -3293,7 +3525,8 @@
         "3": () => activateTool("highlighter"),
         "4": () => activateTool("eraser"),
         "5": () => activateTool("lasso"),
-        "6": addTypstBlock,
+        "6": () => activateTool("shape"),
+        t: addTypstBlock,
       };
       if (shortcuts[event.key]) {
         event.preventDefault();
@@ -3568,6 +3801,7 @@
     if (tool === "pen") return nibDetail(settings.penPresets[penPreset - 1]);
     if (tool === "highlighter") return nibDetail(settings.highlighter);
     if (tool === "eraser") return "whole strokes";
+    if (tool === "shape") return settings.shapeKind.replace("ellipse", "circle · ellipse");
     if (tool === "lasso" || tool === "select") return `${selectedStrokeIds.length} selected`;
     return "";
   }
@@ -3902,6 +4136,7 @@
                       ? activePageTypstView
                       : pageTypstViewFromSnapshot(entry.snapshot!)}
                     images={active ? activeImageViews : imageViewsFromSnapshot(entry.snapshot!, assetUrls(entry.id))}
+                    shapes={active ? shapes : shapeViewsFromSnapshot(entry.snapshot!)}
                     results={active ? activeResults : (neighborResults[entry.id] ?? {})}
                     strokes={active ? strokes : neighborStrokesFor(entry)}
                     newStrokeZIndex={active
@@ -3926,11 +4161,17 @@
                     taper={inkTaper()}
                     opacity={inkOpacity()}
                     straighten={inkStraighten()}
+                    shapeKind={settings.shapeKind}
+                    shapeStyle={currentShapeStyle()}
+                    shapeConstrain={settings.shapeConstrain}
+                    drawAndHoldShapes={settings.drawAndHoldShapes}
                     eraseRadiusPt={ERASER_RADIUS_PT[settings.eraserSize]}
                     calibration={settings.calibration}
                     directObjectInput={active && directObjectInput}
                     selectedBlockId={active ? selectedTypstId : null}
                     selectedImageId={active ? selectedImageId : null}
+                    selectedShapeId={active ? selectedShapeId : null}
+                    editingShapeId={active ? editingShapeId : null}
                     onCompile={(id, request) =>
                       active
                         ? compileTypst(id, request)
@@ -3940,18 +4181,36 @@
                     onSelectBlock={(id) => {
                       selectedTypstId = id;
                       selectedImageId = null;
+                      selectedShapeId = null;
+                      editingShapeId = null;
                     }}
                     onDeselectBlock={() => (selectedTypstId = null)}
                     onSelectImage={(id) => {
                       selectedImageId = id;
                       selectedTypstId = null;
+                      selectedShapeId = null;
+                      editingShapeId = null;
                     }}
                     onMoveImage={(id, position) => changeImage(id, position)}
                     onScaleImage={(id, scale) => changeImage(id, { scale })}
+                    onSelectShape={(id) => {
+                      selectedShapeId = id;
+                      selectedImageId = null;
+                      selectedTypstId = null;
+                      updateInkSelection([]);
+                    }}
+                    onChangeShape={active ? changeShape : undefined}
+                    onEditShape={(id, editing) => {
+                      selectedShapeId = id;
+                      editingShapeId = editing ? id : null;
+                      status = editing ? "Editing shape anchor points" : "Shape selected";
+                    }}
                     onStrokeFinalized={(stroke) =>
                       active
                         ? addStroke(stroke)
                         : commitNeighborInk(entry.id, [...neighborStrokesFor(entry), stroke], "Added ink")}
+                    onShapeFinalized={active ? addShape : undefined}
+                    onInkShapeRecognized={active ? promoteHeldInk : undefined}
                     onStrokesChange={(next) =>
                       active
                         ? changeStrokes(next, "Updated ink")
@@ -4001,6 +4260,26 @@
         style:top={paletteDrag ? `${paletteY}px` : null}
         aria-label="Canvas tools"
       >
+        {#if shapeCard}
+          <div class="palette-panel-anchor card" style:--anchor={`${shapeCard.anchor}px`}>
+            <ShapeCard
+              dock={paletteDock}
+              kind={settings.shapeKind}
+              fill={settings.shapeFill}
+              constrain={settings.shapeConstrain}
+              drawAndHold={settings.drawAndHoldShapes}
+              strokeColor={currentShapeStyle().strokeColor}
+              strokeWidthPt={currentShapeStyle().strokeWidthPt}
+              onKindChange={(shapeKind) => changeSettings({ ...settings, shapeKind })}
+              onFillChange={(shapeFill) => changeSettings({ ...settings, shapeFill })}
+              onConstrainChange={(shapeConstrain) =>
+                changeSettings({ ...settings, shapeConstrain })}
+              onDrawAndHoldChange={(drawAndHoldShapes) =>
+                changeSettings({ ...settings, drawAndHoldShapes })}
+              onClose={closeToolCard}
+            />
+          </div>
+        {/if}
         {#if toolCard && toolCardPreset}
           <div class="palette-panel-anchor card" style:--anchor={`${toolCard.anchor}px`}>
             <ToolCard
@@ -4112,12 +4391,13 @@
             : selectedTypstId
               ? groupSelectedInk
               : undefined}
+          onConvert={selectedStrokeIds.length === 1 ? convertSelectedInkToShape : undefined}
           onDelete={selectedStrokeIds.length > 0 ? () => void deleteSelection() : undefined}
         />
-      {:else if selectedImageId || selectedTypstId}
+      {:else if selectedImageId || selectedTypstId || selectedShapeId}
         <SelectionActions
           bind:element={selectionToolbarElement}
-          subject={selectedImageId ? "image" : "Typst block"}
+          subject={selectedImageId ? "image" : selectedShapeId ? "shape" : "Typst block"}
           left={selectionToolbarPosition.left}
           top={selectionToolbarPosition.top}
           ready={selectionToolbarPosition.ready}

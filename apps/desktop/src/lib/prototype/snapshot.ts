@@ -1,14 +1,16 @@
-import type {
-  InkLayer,
-  NotebookManifest,
-  Page,
-  PageBackground,
-  PageGeometry,
-  PageObject,
-  Stroke,
+import {
+  MIN_SUPPORTED_SCHEMA_VERSION,
+  requiredSchemaVersion,
+  type InkLayer,
+  type NotebookManifest,
+  type Page,
+  type PageBackground,
+  type PageGeometry,
+  type PageObject,
+  type Stroke,
 } from "../model";
 import type { NotebookSnapshot } from "../ipc/types";
-import type { BlockView, ImageView, PageTypstView } from "./pageView";
+import type { BlockView, ImageView, PageTypstView, ShapeView } from "./pageView";
 
 export type EditableTypst = BlockView & {
   measuredWidthPt: number;
@@ -39,6 +41,7 @@ type Projection = {
   typst: EditableTypst[];
   pageTypst: EditablePageTypst | null;
   images: EditableImage[];
+  shapes: ShapeView[];
   sharedStyle: { path: string; source: string } | null;
   mixedGroup: ManagedMixedGroup | null;
   groupedStrokeIds: string[];
@@ -57,6 +60,7 @@ export function projectSnapshot(input: Projection): NotebookSnapshot {
   const basePage = input.base?.page;
   const typstById = new Map(input.typst.map((block) => [block.id, block]));
   const imageById = new Map(input.images.map((image) => [image.id, image]));
+  const shapeById = new Map(input.shapes.map((shape) => [shape.id, shape]));
   const oldObjects = basePage?.objects ?? [];
   const oldById = new Map(oldObjects.map((object) => [object.id, object]));
   const emitted = new Set<string>();
@@ -86,6 +90,13 @@ export function projectSnapshot(input: Projection): NotebookSnapshot {
       objects.push(patchImage(object, image, input.now));
       continue;
     }
+    if (object.type === "shape") {
+      const shape = shapeById.get(object.id);
+      if (!shape) continue;
+      emitted.add(object.id);
+      objects.push(patchShape(object, shape, input.now));
+      continue;
+    }
 
     // PDF material, independent ink groups, and general groups are not represented by the
     // current controls. Preserving them is the difference between "not editable yet" and data
@@ -107,6 +118,11 @@ export function projectSnapshot(input: Projection): NotebookSnapshot {
     if (emitted.has(image.id)) continue;
     emitted.add(image.id);
     objects.push(newImage(image, input.now));
+  }
+  for (const shape of input.shapes) {
+    if (emitted.has(shape.id)) continue;
+    emitted.add(shape.id);
+    objects.push(newShape(shape, input.now));
   }
 
   if (input.mixedGroup?.active) {
@@ -187,8 +203,16 @@ export function projectSnapshot(input: Projection): NotebookSnapshot {
     return order === undefined ? object : { ...object, readingOrder: order };
   });
 
+  // Never below what this page needs, never above what the notebook already is: a shape raises
+  // the notebook to version 2, and everything else leaves an older notebook exactly as it found
+  // it. `commit_notebook` applies the same rule and has the last word.
+  const schemaVersion = Math.max(
+    input.manifest.schemaVersion ?? MIN_SUPPORTED_SCHEMA_VERSION,
+    requiredSchemaVersion(objects),
+  );
+
   const page: Page = {
-    schemaVersion: basePage?.schemaVersion ?? 1,
+    schemaVersion,
     id: input.pageId,
     revision: input.revision,
     geometry: input.geometry,
@@ -202,6 +226,7 @@ export function projectSnapshot(input: Projection): NotebookSnapshot {
   };
 
   const inkLayers = mergeInkLayers(
+    schemaVersion,
     input.base?.inkLayers ?? [],
     input.inkLayerId,
     input.pageId,
@@ -232,7 +257,7 @@ export function projectSnapshot(input: Projection): NotebookSnapshot {
   });
 
   return {
-    manifest: { ...input.manifest, modifiedAt: input.now },
+    manifest: { ...input.manifest, schemaVersion, modifiedAt: input.now },
     page,
     blocks,
     // Originals already exist on disk. The store resolves them and rejects a missing reference.
@@ -308,6 +333,25 @@ function patchImage(
   };
 }
 
+function patchShape(
+  object: Extract<PageObject, { type: "shape" }>,
+  shape: ShapeView,
+  now: string,
+): Extract<PageObject, { type: "shape" }> {
+  return {
+    ...object,
+    x: shape.x,
+    y: shape.y,
+    rotation: shape.rotation,
+    scale: shape.scale,
+    zIndex: shape.zIndex,
+    readingOrder: shape.readingOrder,
+    modifiedAt: now,
+    geometry: shape.geometry,
+    style: shape.style,
+  };
+}
+
 function newTypst(
   block: EditableTypst,
   mixedGroup: ManagedMixedGroup | null,
@@ -364,6 +408,19 @@ function newImage(
   };
 }
 
+function newShape(shape: ShapeView, now: string): Extract<PageObject, { type: "shape" }> {
+  return {
+    ...newFields(shape.id, shape.readingOrder, shape.zIndex, null, now),
+    type: "shape",
+    x: shape.x,
+    y: shape.y,
+    rotation: shape.rotation,
+    scale: shape.scale,
+    geometry: shape.geometry,
+    style: shape.style,
+  };
+}
+
 function newFields(
   id: string,
   readingOrder: number,
@@ -386,13 +443,18 @@ function newFields(
 }
 
 function mergeInkLayers(
+  schemaVersion: number,
   existing: InkLayer[],
   activeId: string,
   pageId: string,
   strokes: Stroke[],
 ): InkLayer[] {
   if (existing.length === 0) {
-    return [{ schemaVersion: 1, id: activeId, pageId, strokes }];
+    return [{ schemaVersion, id: activeId, pageId, strokes }];
   }
-  return existing.map((layer) => (layer.id === activeId ? { ...layer, strokes } : layer));
+  return existing.map((layer) => ({
+    ...layer,
+    schemaVersion,
+    ...(layer.id === activeId ? { strokes } : {}),
+  }));
 }

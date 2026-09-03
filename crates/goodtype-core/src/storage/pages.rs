@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     IdRemap, InkLayer, InkLayerReference, NotebookManifest, Page, PageBackground, PageGeometry,
-    PageReference, SCHEMA_VERSION, SourceRole, layout,
+    PageReference, SourceRole, layout,
 };
 
 use super::{
@@ -203,6 +203,8 @@ pub fn create_page(
 ) -> Result<NotebookSnapshot, StorageError> {
     let mut guard = ManifestGuard::open_resolved(selected_root, modified_at)?;
     let root = guard.root().to_path_buf();
+    // A page added to a version-1 notebook is a version-1 page. One notebook, one version.
+    let schema_version = guard.manifest.schema_version;
     let manifest = &mut guard.manifest;
 
     let FreshPage {
@@ -232,7 +234,7 @@ pub fn create_page(
     );
     manifest.modified_at = modified_at.to_owned();
     let page = Page {
-        schema_version: SCHEMA_VERSION,
+        schema_version,
         id: id.clone(),
         revision: 1,
         geometry,
@@ -254,7 +256,7 @@ pub fn create_page(
         blocks: Vec::new(),
         assets: Vec::new(),
         ink_layers: vec![InkLayer {
-            schema_version: SCHEMA_VERSION,
+            schema_version,
             id: ink_id,
             page_id: id,
             strokes: Vec::new(),
@@ -282,6 +284,7 @@ pub fn import_pdf_pages(
 
     let mut guard = ManifestGuard::open_resolved(selected_root, modified_at)?;
     let root = guard.root().to_path_buf();
+    let schema_version = guard.manifest.schema_version;
     let insert_at = match position {
         PagePosition::Last => guard.manifest.pages.len(),
         PagePosition::Before { page_id } => neighbour_index(&guard.manifest, page_id)?,
@@ -305,7 +308,7 @@ pub fn import_pdf_pages(
             },
         );
         let page = Page {
-            schema_version: SCHEMA_VERSION,
+            schema_version,
             id: id.clone(),
             revision: 1,
             geometry: geometry.clone(),
@@ -324,7 +327,7 @@ pub fn import_pdf_pages(
             page,
             page_path,
             InkLayer {
-                schema_version: SCHEMA_VERSION,
+                schema_version,
                 id: ink_id,
                 page_id: id,
                 strokes: Vec::new(),
@@ -480,7 +483,7 @@ pub fn duplicate_page(
         .map_err(invalid_error)?;
 
     let page = Page {
-        schema_version: SCHEMA_VERSION,
+        schema_version: source.page.schema_version,
         id: new_id.clone(),
         revision: 1,
         geometry: source.page.geometry.clone(),
@@ -772,7 +775,8 @@ fn structure_result(
 #[cfg(test)]
 mod tests {
     use crate::{
-        PageBackground, PageGeometry, PageObject,
+        MIN_SUPPORTED_SCHEMA_VERSION, PageBackground, PageGeometry, PageObject, SCHEMA_VERSION,
+        ShapeGeometry, ShapePoint, ShapeStyle,
         storage::{fixtures::*, *},
     };
     use std::path::Path;
@@ -849,6 +853,13 @@ mod tests {
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/notebooks/multipage");
 
         let first = open_notebook(&fixture).unwrap();
+        // Opening does not upgrade: a version-1 notebook is still version 1 in hand.
+        assert_eq!(first.manifest.schema_version, MIN_SUPPORTED_SCHEMA_VERSION);
+        assert_eq!(first.page.schema_version, MIN_SUPPORTED_SCHEMA_VERSION);
+        assert_eq!(
+            first.ink_layers[0].schema_version,
+            MIN_SUPPORTED_SCHEMA_VERSION
+        );
         assert_eq!(first.manifest.pages.len(), 3);
         assert_eq!(first.page.id, "page-001");
         assert_eq!(first.ink_layers[0].strokes.len(), 1);
@@ -865,6 +876,108 @@ mod tests {
         assert_eq!(
             hits.iter().map(|hit| hit.page_number).collect::<Vec<_>>(),
             [1, 3]
+        );
+    }
+
+    #[test]
+    fn opens_version_two_shape_fixture() {
+        let fixture =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/notebooks/shape-v2");
+        let snapshot = open_notebook(&fixture).unwrap();
+        assert_eq!(snapshot.manifest.schema_version, SCHEMA_VERSION);
+        assert_eq!(snapshot.page.objects.len(), 4);
+        assert!(
+            snapshot
+                .page
+                .objects
+                .iter()
+                .all(|object| matches!(object, PageObject::Shape { .. }))
+        );
+    }
+
+    /// A version-1 notebook survives ordinary editing as a version-1 notebook, and rises to
+    /// version 2 on the commit that actually gives it a shape — not before, and not for being
+    /// opened. Older builds keep reading it until the user genuinely uses the new feature.
+    #[test]
+    fn a_notebook_rises_to_version_two_only_when_it_gains_a_shape() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("notebook");
+        let mut snapshot = snapshot();
+        snapshot.manifest.schema_version = MIN_SUPPORTED_SCHEMA_VERSION;
+        snapshot.page.schema_version = MIN_SUPPORTED_SCHEMA_VERSION;
+        for layer in &mut snapshot.ink_layers {
+            layer.schema_version = MIN_SUPPORTED_SCHEMA_VERSION;
+        }
+        create_notebook(&root, &snapshot).unwrap();
+
+        let mut history = NotebookHistory::default();
+        let mut edited = observe_notebook(&root, &mut history).unwrap();
+        edited.page.background = PageBackground::Plain {
+            color: "#fffdf7".into(),
+        };
+        let saved = commit_notebook(&root, &mut history, edited)
+            .unwrap()
+            .snapshot;
+        assert_eq!(saved.manifest.schema_version, MIN_SUPPORTED_SCHEMA_VERSION);
+        assert_eq!(saved.page.schema_version, MIN_SUPPORTED_SCHEMA_VERSION);
+        assert_eq!(
+            open_notebook(&root).unwrap().manifest.schema_version,
+            MIN_SUPPORTED_SCHEMA_VERSION
+        );
+
+        let mut with_shape = observe_notebook(&root, &mut history).unwrap();
+        let reading_order = u32::try_from(with_shape.page.reading_order.len()).unwrap();
+        with_shape.page.objects.push(PageObject::Shape {
+            fields: fields("shape-1", reading_order),
+            geometry: ShapeGeometry::Line {
+                start: ShapePoint { x: 0.0, y: 0.0 },
+                end: ShapePoint { x: 60.0, y: 20.0 },
+            },
+            style: ShapeStyle {
+                stroke_color: "#16212b".into(),
+                stroke_width_pt: 1.6,
+                fill_color: None,
+                opacity: 1.0,
+            },
+        });
+        with_shape.page.reading_order.push("shape-1".into());
+        let upgraded = commit_notebook(&root, &mut history, with_shape)
+            .unwrap()
+            .snapshot;
+        assert_eq!(upgraded.manifest.schema_version, SCHEMA_VERSION);
+        assert_eq!(upgraded.page.schema_version, SCHEMA_VERSION);
+        assert_eq!(upgraded.ink_layers[0].schema_version, SCHEMA_VERSION);
+
+        let reopened = open_notebook(&root).unwrap();
+        assert_eq!(reopened.manifest.schema_version, SCHEMA_VERSION);
+    }
+
+    /// A page added to a version-1 notebook is a version-1 page: one notebook, one version.
+    #[test]
+    fn a_page_added_to_a_version_one_notebook_stays_version_one() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("notebook");
+        let mut snapshot = snapshot();
+        snapshot.manifest.schema_version = MIN_SUPPORTED_SCHEMA_VERSION;
+        snapshot.page.schema_version = MIN_SUPPORTED_SCHEMA_VERSION;
+        for layer in &mut snapshot.ink_layers {
+            layer.schema_version = MIN_SUPPORTED_SCHEMA_VERSION;
+        }
+        create_notebook(&root, &snapshot).unwrap();
+
+        let added = create_page(
+            &root,
+            "2026-09-03T09:00:00Z",
+            &PagePosition::Last,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(added.manifest.schema_version, MIN_SUPPORTED_SCHEMA_VERSION);
+        assert_eq!(added.page.schema_version, MIN_SUPPORTED_SCHEMA_VERSION);
+        assert_eq!(
+            added.ink_layers[0].schema_version,
+            MIN_SUPPORTED_SCHEMA_VERSION
         );
     }
 

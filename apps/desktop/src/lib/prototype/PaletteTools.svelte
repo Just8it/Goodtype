@@ -41,6 +41,16 @@
     {:else if definition.id === "eraser"}
       <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="12" width="13" height="7" rx="1.6" transform="rotate(-38 10 15)"></rect><path d="M9 21h11"></path></svg>
       <span class="eraser-tool-state" class:medium={settings.eraserSize === "medium"} class:large={settings.eraserSize === "large"} aria-hidden="true"></span>
+    {:else if definition.id === "shape"}
+      {#if settings.shapeKind === "line"}
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 18 19 6"></path><circle cx="5" cy="18" r="1.5"></circle><circle cx="19" cy="6" r="1.5"></circle></svg>
+      {:else if settings.shapeKind === "rectangle"}
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4.5" y="5.5" width="15" height="13" rx="1.5"></rect></svg>
+      {:else if settings.shapeKind === "ellipse"}
+        <svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="12" rx="8" ry="6.5"></ellipse></svg>
+      {:else}
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 17C7 5 13 5 20 14"></path><circle cx="4" cy="17" r="1.4"></circle><circle cx="20" cy="14" r="1.4"></circle></svg>
+      {/if}
     {:else if definition.id === "lasso"}
       <svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="10" rx="8" ry="6" stroke-dasharray="3 2.6"></ellipse><path d="M9 16c0 2 1 4 3 4"></path><circle cx="12" cy="20" r="1.4"></circle></svg>
     {:else if definition.id === "page-text"}

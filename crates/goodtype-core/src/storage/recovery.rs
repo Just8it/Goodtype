@@ -163,6 +163,8 @@ fn read_candidate_intent(root: &Path, file_name: &str) -> Result<RecoveryIntent,
     if intent.version != 1 {
         return invalid("unsupported recovery intent version");
     }
+    validate_snapshot_versions(&intent.previous)?;
+    validate_snapshot_versions(&intent.candidate)?;
     Ok(intent)
 }
 

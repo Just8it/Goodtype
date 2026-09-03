@@ -11,8 +11,9 @@ use std::{
 };
 
 use crate::{
-    NotebookManifest, Page, PageBackground, PageObject, PageReference, SCHEMA_VERSION, SourceRef,
-    SourceRole, layout, nonnegative, positive, valid_page_dimension,
+    MIN_SUPPORTED_SCHEMA_VERSION, NotebookManifest, Page, PageBackground, PageObject,
+    PageReference, SCHEMA_VERSION, SHAPE_SCHEMA_VERSION, SourceRef, SourceRole, layout,
+    nonnegative, positive, valid_page_dimension,
 };
 
 use super::{
@@ -21,13 +22,25 @@ use super::{
     paths::*,
 };
 
-pub(crate) fn validate_manifest(manifest: &NotebookManifest) -> Result<(), StorageError> {
-    if manifest.schema_version != SCHEMA_VERSION {
-        return Err(StorageError::InvalidNotebook(format!(
-            "unsupported schema version {}",
-            manifest.schema_version
-        )));
+/// The schema version a page's content obliges its notebook to be written at.
+///
+/// A notebook is not upgraded for being opened, nor for being saved after an unrelated edit. It
+/// rises to a version only when it actually stores something that version introduced, so a
+/// version-1 notebook stays readable by an older build right up until it gains its first shape.
+pub(crate) fn required_schema_version(page: &Page) -> u32 {
+    if page
+        .objects
+        .iter()
+        .any(|object| matches!(object, PageObject::Shape { .. }))
+    {
+        SHAPE_SCHEMA_VERSION
+    } else {
+        MIN_SUPPORTED_SCHEMA_VERSION
     }
+}
+
+pub(crate) fn validate_manifest(manifest: &NotebookManifest) -> Result<(), StorageError> {
+    supported_version(manifest.schema_version, "schema")?;
     if manifest.pages.is_empty() {
         return invalid("notebook must contain at least one page");
     }
@@ -47,6 +60,63 @@ pub(crate) fn validate_manifest(manifest: &NotebookManifest) -> Result<(), Stora
         validate_relative(style)?;
     }
     Ok(())
+}
+
+/// Raise a snapshot to the version its own content requires, and stamp that version through the
+/// page and its ink layers so the notebook stays internally consistent.
+///
+/// Only ever upwards: a page that loses its last shape does not drag the notebook back down,
+/// because a sibling page this snapshot cannot see may still hold one.
+pub(crate) fn raise_schema_version(snapshot: &mut NotebookSnapshot) {
+    let version = snapshot
+        .manifest
+        .schema_version
+        .max(required_schema_version(&snapshot.page));
+    snapshot.manifest.schema_version = version;
+    snapshot.page.schema_version = version;
+    for layer in &mut snapshot.ink_layers {
+        layer.schema_version = version;
+    }
+}
+
+/// One notebook, one version: the manifest states it, and the page and its ink layers must agree.
+///
+/// Checked on the way in as well as the way out, because a snapshot that arrives with mismatched
+/// versions is corrupt whether it came from disk, from a recovery intent, or from the app.
+pub(crate) fn validate_snapshot_versions(snapshot: &NotebookSnapshot) -> Result<(), StorageError> {
+    let version = snapshot.manifest.schema_version;
+    supported_version(version, "schema")?;
+    if snapshot.page.schema_version != version {
+        return Err(StorageError::InvalidNotebook(format!(
+            "page schema version {} does not match notebook version {version}",
+            snapshot.page.schema_version
+        )));
+    }
+    for layer in &snapshot.ink_layers {
+        if layer.schema_version != version {
+            return Err(StorageError::InvalidNotebook(format!(
+                "ink schema version {} does not match notebook version {version}",
+                layer.schema_version
+            )));
+        }
+    }
+    let required = required_schema_version(&snapshot.page);
+    if version < required {
+        return Err(StorageError::InvalidNotebook(format!(
+            "this page needs schema version {required}, but the notebook is version {version}"
+        )));
+    }
+    Ok(())
+}
+
+fn supported_version(version: u32, subject: &str) -> Result<(), StorageError> {
+    if (MIN_SUPPORTED_SCHEMA_VERSION..=SCHEMA_VERSION).contains(&version) {
+        Ok(())
+    } else {
+        Err(StorageError::InvalidNotebook(format!(
+            "unsupported {subject} version {version}"
+        )))
+    }
 }
 
 pub(crate) fn validate_manifest_files(
@@ -79,12 +149,7 @@ pub(crate) fn validate_snapshot(
     prepare_target(root, layout::MANIFEST)?;
     let page_reference = page_reference(&snapshot.manifest, &snapshot.page.id)?;
     prepare_target(root, &page_reference.path)?;
-    if snapshot.page.schema_version != SCHEMA_VERSION {
-        return Err(StorageError::InvalidNotebook(format!(
-            "unsupported page schema version {}",
-            snapshot.page.schema_version
-        )));
-    }
+    validate_snapshot_versions(snapshot)?;
     validate_page_content(snapshot)?;
     json_bytes(&snapshot.page, true, MAX_JSON_BYTES)?;
     for layer in &snapshot.ink_layers {

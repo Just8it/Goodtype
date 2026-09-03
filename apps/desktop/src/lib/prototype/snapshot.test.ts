@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { NotebookSnapshot } from "../ipc/types";
-import type { ObjectFields, PageObject, Stroke } from "../model";
+import type { NotebookManifest, ObjectFields, PageObject, Stroke } from "../model";
 import { projectSnapshot } from "./snapshot";
 
 const now = "2026-07-28T12:00:00Z";
@@ -141,6 +141,24 @@ describe("projectSnapshot", () => {
           readingOrder: 1,
         },
       ],
+      shapes: [
+        {
+          id: "shape-a",
+          x: 90,
+          y: 110,
+          rotation: 0,
+          scale: 1,
+          zIndex: 8,
+          readingOrder: 3,
+          geometry: { kind: "ellipse", widthPt: 70, heightPt: 40 },
+          style: {
+            strokeColor: "#16212b",
+            strokeWidthPt: 1.6,
+            fillColor: null,
+            opacity: 1,
+          },
+        },
+      ],
       sharedStyle: { path: "shared.typ", source: "#let" },
       mixedGroup: null,
       groupedStrokeIds: [],
@@ -154,8 +172,82 @@ describe("projectSnapshot", () => {
       createdAt: "2026-01-01T00:00:00Z",
       altText: "updated",
     });
+    expect(projected.page.objects.find((object) => object.id === "shape-a")).toMatchObject({
+      type: "shape",
+      x: 90,
+      geometry: { kind: "ellipse", widthPt: 70, heightPt: 40 },
+    });
     expect(projected.inkLayers[0].strokes.map(({ id }) => id)).toEqual(["new"]);
-    expect(projected.inkLayers[1]).toEqual(base.inkLayers[1]);
+    expect(projected.manifest.schemaVersion).toBe(2);
+    expect(projected.page.schemaVersion).toBe(2);
+    expect(projected.inkLayers[1]).toEqual({ ...base.inkLayers[1], schemaVersion: 2 });
     expect(projected.blocks.find(({ path }) => path === "shared.typ")).toEqual(base.blocks[0]);
+  });
+});
+
+describe("schema version follows content, not the act of saving", () => {
+  const emptyProjection = (manifest: NotebookManifest) => ({
+    base: null,
+    manifest,
+    pageId: "page-001",
+    revision: 1,
+    geometry: { widthPt: 595, heightPt: 842 },
+    background: { kind: "plain" as const, color: "#ffffff" },
+    inkLayerId: "ink-001",
+    inkLayerPath: "ink/page-001-layer-001.json",
+    strokes: [],
+    typst: [],
+    pageTypst: null,
+    images: [],
+    shapes: [],
+    sharedStyle: null,
+    mixedGroup: null,
+    groupedStrokeIds: [],
+    now: "2026-09-03T00:00:00Z",
+  });
+
+  const manifest: NotebookManifest = {
+    schemaVersion: 1,
+    id: "notebook-1",
+    title: "Older notebook",
+    pages: [
+      { id: "page-001", path: "pages/page-001.json", geometry: { widthPt: 595, heightPt: 842 } },
+    ],
+    defaultPage: {
+      geometry: { widthPt: 595, heightPt: 842 },
+      background: { kind: "plain", color: "#ffffff" },
+    },
+    sharedStylePath: null,
+    createdAt: "2026-01-01T00:00:00Z",
+    modifiedAt: "2026-01-01T00:00:00Z",
+  };
+
+  it("leaves a version-1 notebook at version 1 when nothing needs more", () => {
+    const projected = projectSnapshot(emptyProjection(manifest));
+    expect(projected.manifest.schemaVersion).toBe(1);
+    expect(projected.page.schemaVersion).toBe(1);
+    expect(projected.inkLayers[0].schemaVersion).toBe(1);
+  });
+
+  it("raises it the moment the page holds a shape", () => {
+    const projected = projectSnapshot({
+      ...emptyProjection(manifest),
+      shapes: [
+        {
+          id: "shape-a",
+          x: 10,
+          y: 10,
+          rotation: 0,
+          scale: 1,
+          zIndex: 1,
+          readingOrder: 0,
+          geometry: { kind: "ellipse", widthPt: 40, heightPt: 20 },
+          style: { strokeColor: "#16212b", strokeWidthPt: 1.6, fillColor: null, opacity: 1 },
+        },
+      ],
+    });
+    expect(projected.manifest.schemaVersion).toBe(2);
+    expect(projected.page.schemaVersion).toBe(2);
+    expect(projected.inkLayers[0].schemaVersion).toBe(2);
   });
 });

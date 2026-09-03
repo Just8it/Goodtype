@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{nonnegative, positive};
+use crate::{ShapeGeometry, ShapeStyle, nonnegative, positive};
 
 /// Where a file an object owns lives, and how the store may treat it.
 ///
@@ -150,6 +150,12 @@ pub enum PageObject {
         ink_layer_id: String,
         stroke_ids: Vec<String>,
     },
+    Shape {
+        #[serde(flatten)]
+        fields: ObjectFields,
+        geometry: ShapeGeometry,
+        style: ShapeStyle,
+    },
     Group {
         #[serde(flatten)]
         fields: ObjectFields,
@@ -165,6 +171,7 @@ impl PageObject {
             | Self::Image { fields, .. }
             | Self::PdfMaterial { fields, .. }
             | Self::InkGroup { fields, .. }
+            | Self::Shape { fields, .. }
             | Self::Group { fields, .. } => fields,
         }
     }
@@ -176,6 +183,7 @@ impl PageObject {
             | Self::Image { fields, .. }
             | Self::PdfMaterial { fields, .. }
             | Self::InkGroup { fields, .. }
+            | Self::Shape { fields, .. }
             | Self::Group { fields, .. } => fields,
         }
     }
@@ -200,7 +208,7 @@ impl PageObject {
                 role: SourceRole::Reference,
                 path: source_path,
             }),
-            Self::InkGroup { .. } | Self::Group { .. } => None,
+            Self::InkGroup { .. } | Self::Shape { .. } | Self::Group { .. } => None,
         }
     }
 
@@ -216,6 +224,7 @@ impl PageObject {
             Self::Image { .. }
             | Self::PdfMaterial { .. }
             | Self::InkGroup { .. }
+            | Self::Shape { .. }
             | Self::Group { .. } => None,
         }
     }
@@ -264,6 +273,12 @@ impl PageObject {
                 if !positive(*source_width_pt) || !positive(*source_height_pt) {
                     return Err("PDF dimensions must be finite and positive");
                 }
+            }
+            Self::Shape {
+                geometry, style, ..
+            } => {
+                geometry.validate()?;
+                style.validate()?;
             }
             Self::InkGroup { .. } | Self::Group { .. } => {}
         }
@@ -336,6 +351,13 @@ impl PageObject {
                     .iter()
                     .map(|id| remap.stroke(id))
                     .collect::<Result<Vec<_>, _>>()?,
+            },
+            Self::Shape {
+                geometry, style, ..
+            } => Self::Shape {
+                fields,
+                geometry: geometry.clone(),
+                style: style.clone(),
             },
             Self::Group { child_ids, .. } => Self::Group {
                 fields,

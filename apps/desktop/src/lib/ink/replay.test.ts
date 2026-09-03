@@ -34,6 +34,19 @@ describe("deterministic pen replay", () => {
     expect(pointerRole({ pointerType: "touch", button: 0, buttons: 1 }, "pen")).toBe(
       "ignore",
     );
+    expect(pointerRole({ pointerType: "touch", button: 0, buttons: 1 }, "shape")).toBe(
+      "shape",
+    );
+    // The shape tool is the only thing a finger may drive. A resting palm must never erase.
+    expect(pointerRole({ pointerType: "touch", button: 0, buttons: 1 }, "eraser")).toBe(
+      "ignore",
+    );
+    expect(pointerRole({ pointerType: "touch", button: 0, buttons: 1 }, "lasso")).toBe(
+      "ignore",
+    );
+    expect(pointerRole({ pointerType: "mouse", button: 0, buttons: 1 }, "shape")).toBe(
+      "shape",
+    );
     expect(pointerRole({ pointerType: "pen", button: 5, buttons: 32 }, "pen")).toBe(
       "erase",
     );

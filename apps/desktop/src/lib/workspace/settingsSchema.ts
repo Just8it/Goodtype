@@ -125,6 +125,17 @@ export const SETTING_GROUPS: SettingGroup[] = [
           }),
         },
       },
+      {
+        id: "drawAndHoldShapes",
+        label: "Draw and hold for shapes",
+        hint: "Pause at the end of a deliberate line or form to make it editable",
+        keywords: ["shape", "circle", "rectangle", "straighten", "quick shape"],
+        control: {
+          kind: "toggle",
+          read: (settings) => settings.drawAndHoldShapes,
+          write: (settings, value) => ({ ...settings, drawAndHoldShapes: value }),
+        },
+      },
     ],
   },
   {

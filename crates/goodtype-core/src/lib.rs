@@ -4,12 +4,19 @@ pub mod layout;
 pub mod object;
 pub mod outline;
 pub mod paths;
+pub mod shape;
 pub mod storage;
 pub mod template;
 
 pub use object::{IdRemap, ObjectFields, PageObject, SourceRef, SourceRole};
+pub use shape::{BezierNode, ShapeGeometry, ShapePoint, ShapeStyle};
 
-pub const SCHEMA_VERSION: u32 = 1;
+/// The oldest notebook this build still reads and writes.
+pub const MIN_SUPPORTED_SCHEMA_VERSION: u32 = 1;
+/// Shapes are what version 2 added. A notebook that stores none stays at version 1, and stays
+/// openable by a build that predates them.
+pub const SHAPE_SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 2;
 /// Legacy strokes painted above movable objects. Missing version-1 values keep that look.
 pub const DEFAULT_INK_Z_INDEX: i32 = 1_000_000;
 
@@ -241,13 +248,13 @@ mod tests {
     #[test]
     fn minimal_open_notebook_references_point_based_content() {
         let manifest: NotebookManifest = load("goodtype.json");
-        assert_eq!(manifest.schema_version, SCHEMA_VERSION);
+        assert_eq!(manifest.schema_version, MIN_SUPPORTED_SCHEMA_VERSION);
         assert_eq!(manifest.pages[0].path, "pages/page-001.json");
         assert!(fixture_path(&manifest.pages[0].path).is_file());
         assert!(fixture_path(manifest.shared_style_path.as_deref().unwrap()).is_file());
 
         let page: Page = load(&manifest.pages[0].path);
-        assert_eq!(page.schema_version, SCHEMA_VERSION);
+        assert_eq!(page.schema_version, MIN_SUPPORTED_SCHEMA_VERSION);
         assert_eq!(
             (page.geometry.width_pt, page.geometry.height_pt),
             (595.0, 842.0)
@@ -283,7 +290,7 @@ mod tests {
         let ink: InkLayer = load(&page.ink_layers[0].path);
         assert_eq!(
             (ink.schema_version, ink.page_id.as_str()),
-            (SCHEMA_VERSION, "page-001")
+            (MIN_SUPPORTED_SCHEMA_VERSION, "page-001")
         );
         assert_eq!(ink.strokes[0].group_id.as_deref(), Some("ink-group-001"));
         assert_eq!(ink.strokes[0].z_index, DEFAULT_INK_Z_INDEX);

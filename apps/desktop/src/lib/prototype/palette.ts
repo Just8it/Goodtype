@@ -4,6 +4,7 @@ export type PaletteCommand =
   | "pen-1"
   | "pen-2"
   | "highlighter"
+  | "shape"
   | "eraser"
   | "lasso"
   | "page-text"
@@ -14,7 +15,7 @@ export type PaletteTool = {
   label: string;
   title: string;
   dividerBefore?: boolean;
-  context?: "ink" | "eraser";
+  context?: "ink" | "shape" | "eraser";
   action?: boolean;
 };
 
@@ -24,6 +25,7 @@ export const PALETTE_TOOLS: readonly PaletteTool[] = [
   { id: "pen-1", label: "Pen 1", title: "Pen 1 (1) — press again for settings", context: "ink" },
   { id: "pen-2", label: "Pen 2", title: "Pen 2 (2) — press again for settings", context: "ink" },
   { id: "highlighter", label: "Highlighter", title: "Highlighter (3) — press again for settings", context: "ink" },
+  { id: "shape", label: "Shapes", title: "Shapes (6) — press again to choose a shape", context: "shape" },
   { id: "eraser", label: "Eraser", title: "Erase whole strokes (4) — press again for size", context: "eraser" },
   { id: "lasso", label: "Lasso select", title: "Select ink with lasso (5)", dividerBefore: true },
   { id: "page-text", label: "Page text", title: "Page text", dividerBefore: true },

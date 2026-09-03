@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { PressureCalibration } from "./ink/pipeline";
+import type { ShapeKind } from "./shape/geometry";
 
 /**
  * A pen slot on the palette. The two tiles are assignable slots, not fixed pens: pick a type
@@ -111,6 +112,11 @@ export type AppSettings = {
   highlighterOpacity: number;
   highlighterStraighten: boolean;
   highlighterBehindInk: boolean;
+  /** Explicit shape tool preferences; canonical shapes carry their own resolved style. */
+  shapeKind: ShapeKind;
+  shapeFill: boolean;
+  shapeConstrain: boolean;
+  drawAndHoldShapes: boolean;
   eraserSize: EraserSize;
   calibration: PressureCalibration;
   undoScope: UndoScope;
@@ -145,6 +151,10 @@ export const DEFAULT_SETTINGS: AppSettings = {
   highlighterOpacity: 0.6,
   highlighterStraighten: false,
   highlighterBehindInk: true,
+  shapeKind: "line",
+  shapeFill: false,
+  shapeConstrain: false,
+  drawAndHoldShapes: true,
   eraserSize: "medium",
   calibration: { minimum: 0, maximum: 1, curve: 1, smoothing: 0.2 },
   undoScope: "page",

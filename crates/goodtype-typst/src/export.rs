@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use goodtype_core::{
-    PageBackground, PageGeometry,
+    PageBackground, PageGeometry, ShapeGeometry, ShapePoint, ShapeStyle,
     outline::{OutlineOptions, OutlinePoint, outline_points},
     template::{Area, Edge, TemplateElement, TemplateShape, resolve},
 };
@@ -27,6 +27,7 @@ pub struct ExportPage {
     pub page_typst: Option<String>,
     pub blocks: Vec<ExportTypstBlock>,
     pub strokes: Vec<ExportStroke>,
+    pub shapes: Vec<ExportShape>,
     pub images: Vec<ExportImage>,
 }
 
@@ -87,6 +88,18 @@ pub struct ExportImage {
     pub rotation_degrees: f64,
     pub z_index: i32,
     pub order: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExportShape {
+    pub x: f64,
+    pub y: f64,
+    pub rotation_degrees: f64,
+    pub scale: f64,
+    pub z_index: i32,
+    pub order: usize,
+    pub geometry: ShapeGeometry,
+    pub style: ShapeStyle,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -217,6 +230,12 @@ fn compile_pdf(
                 ink_svg_for(page, stratum.strokes.iter().copied()).into_bytes(),
             ));
         }
+        for (index, stratum) in shape_strata(page).iter().enumerate() {
+            overlay.push((
+                format!("shape-{page_index}-{index}.svg"),
+                shape_svg(page, &stratum.shapes).into_bytes(),
+            ));
+        }
     }
 
     crate::embedded::export_pdf(
@@ -248,6 +267,7 @@ fn validate_page(root: &Path, page: &ExportPage) -> Result<(), ExportError> {
     valid_positive_dimension(page.height_pt, "page height")?;
     if page.blocks.len()
         + page.strokes.len()
+        + page.shapes.len()
         + page.images.len()
         + usize::from(page.page_typst.is_some())
         > MAX_PAGE_ITEMS
@@ -374,6 +394,23 @@ fn validate_page(root: &Path, page: &ExportPage) -> Result<(), ExportError> {
             ));
         }
     }
+    for shape in &page.shapes {
+        valid_position(shape.x, shape.y)?;
+        valid_positive_dimension(shape.scale, "shape scale")?;
+        if !shape.rotation_degrees.is_finite() {
+            return Err(ExportError::InvalidPage(
+                "non-finite shape rotation".to_owned(),
+            ));
+        }
+        shape
+            .geometry
+            .validate()
+            .map_err(|message| ExportError::InvalidPage(message.to_owned()))?;
+        shape
+            .style
+            .validate()
+            .map_err(|message| ExportError::InvalidPage(message.to_owned()))?;
+    }
     Ok(())
 }
 
@@ -467,7 +504,9 @@ fn generated_typst_source(page: &ExportPage, page_index: usize) -> String {
         ));
     }
     let strata = ink_strata(page);
-    let mut objects = Vec::with_capacity(page.blocks.len() + page.images.len() + strata.len());
+    let shapes = shape_strata(page);
+    let mut objects =
+        Vec::with_capacity(page.blocks.len() + page.images.len() + shapes.len() + strata.len());
     for (index, block) in page.blocks.iter().enumerate() {
         objects.push((
             block.z_index,
@@ -500,6 +539,16 @@ fn generated_typst_source(page: &ExportPage, page_index: usize) -> String {
             ),
         ));
     }
+    for (index, stratum) in shapes.iter().enumerate() {
+        objects.push((
+            stratum.z_index,
+            stratum.order,
+            format!(
+                "#place(top + left)[#image(\"shape-{page_index}-{index}.svg\", width: {}pt, height: {}pt)]\n",
+                page.width_pt, page.height_pt
+            ),
+        ));
+    }
     for (index, stratum) in strata.iter().enumerate() {
         objects.push((
             stratum.z_index,
@@ -529,6 +578,7 @@ fn ink_strata(page: &ExportPage) -> Vec<InkStratum<'_>> {
         .iter()
         .map(|block| block.z_index)
         .chain(page.images.iter().map(|image| image.z_index))
+        .chain(page.shapes.iter().map(|shape| shape.z_index))
         .collect();
     boundaries.sort_unstable();
     let mut strokes: Vec<(usize, &ExportStroke)> = page.strokes.iter().enumerate().collect();
@@ -849,6 +899,140 @@ fn ink_svg_for<'a>(
     svg
 }
 
+/// Shapes that sit next to each other in the stack, with no block, image, or ink between them.
+///
+/// Ink already groups this way, and for the same reason: one overlay per run keeps the number of
+/// generated files proportional to how interleaved the page actually is rather than to how many
+/// marks are on it, while still letting anything layered between two shapes come out between them.
+struct ShapeStratum<'a> {
+    z_index: i32,
+    order: usize,
+    shapes: Vec<&'a ExportShape>,
+}
+
+fn shape_strata(page: &ExportPage) -> Vec<ShapeStratum<'_>> {
+    let mut boundaries: Vec<i32> = page
+        .blocks
+        .iter()
+        .map(|block| block.z_index)
+        .chain(page.images.iter().map(|image| image.z_index))
+        .chain(page.strokes.iter().map(|stroke| stroke.z_index))
+        .collect();
+    boundaries.sort_unstable();
+    let mut shapes: Vec<&ExportShape> = page.shapes.iter().collect();
+    shapes.sort_by_key(|shape| (shape.z_index, shape.order));
+
+    let mut groups: Vec<(usize, ShapeStratum<'_>)> = Vec::new();
+    for shape in shapes {
+        let band = boundaries.partition_point(|boundary| *boundary <= shape.z_index);
+        if groups
+            .last()
+            .is_some_and(|(last_band, _)| *last_band == band)
+        {
+            groups.last_mut().unwrap().1.shapes.push(shape);
+        } else {
+            groups.push((
+                band,
+                ShapeStratum {
+                    z_index: shape.z_index,
+                    order: shape.order,
+                    shapes: vec![shape],
+                },
+            ));
+        }
+    }
+    groups.into_iter().map(|(_, stratum)| stratum).collect()
+}
+
+fn shape_svg(page: &ExportPage, shapes: &[&ExportShape]) -> String {
+    let elements = shapes
+        .iter()
+        .map(|shape| shape_element(shape))
+        .collect::<String>();
+    format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{}pt" height="{}pt" viewBox="0 0 {} {}">{elements}</svg>"#,
+        page.width_pt, page.height_pt, page.width_pt, page.height_pt
+    )
+}
+
+fn shape_element(shape: &ExportShape) -> String {
+    let fill = shape.style.fill_color.as_deref().unwrap_or("none");
+    let transform = format!(
+        "translate({} {}) rotate({}) scale({})",
+        shape.x, shape.y, shape.rotation_degrees, shape.scale
+    );
+    let common = format!(
+        r#"stroke="{}" stroke-width="{}" stroke-linecap="round" stroke-linejoin="round" opacity="{}" transform="{}""#,
+        shape.style.stroke_color, shape.style.stroke_width_pt, shape.style.opacity, transform,
+    );
+    match &shape.geometry {
+        ShapeGeometry::Line { start, end } => format!(
+            r#"<line x1="{}" y1="{}" x2="{}" y2="{}" fill="none" {common}/>"#,
+            start.x, start.y, end.x, end.y,
+        ),
+        ShapeGeometry::Rectangle {
+            width_pt,
+            height_pt,
+            corner_radius_pt,
+        } => format!(
+            r#"<rect width="{width_pt}" height="{height_pt}" rx="{corner_radius_pt}" fill="{fill}" {common}/>"#,
+        ),
+        ShapeGeometry::Ellipse {
+            width_pt,
+            height_pt,
+        } => format!(
+            r#"<ellipse cx="{}" cy="{}" rx="{}" ry="{}" fill="{fill}" {common}/>"#,
+            width_pt / 2.0,
+            height_pt / 2.0,
+            width_pt / 2.0,
+            height_pt / 2.0,
+        ),
+        ShapeGeometry::Spline { nodes, closed } => {
+            let fill = if *closed { fill } else { "none" };
+            format!(
+                r#"<path d="{}" fill="{}" {common}/>"#,
+                spline_path(nodes, *closed),
+                fill,
+            )
+        }
+    }
+}
+
+fn spline_path(nodes: &[goodtype_core::BezierNode], closed: bool) -> String {
+    let Some(first) = nodes.first() else {
+        return String::new();
+    };
+    let mut path = format!("M {} {}", first.point.x, first.point.y);
+    for pair in nodes.windows(2) {
+        append_curve(&mut path, &pair[0], &pair[1]);
+    }
+    if closed && nodes.len() > 2 {
+        append_curve(&mut path, nodes.last().unwrap(), first);
+        path.push_str(" Z");
+    }
+    path
+}
+
+fn append_curve(
+    path: &mut String,
+    from: &goodtype_core::BezierNode,
+    to: &goodtype_core::BezierNode,
+) {
+    let control_one = offset_point(from.point, from.handle_out);
+    let control_two = offset_point(to.point, to.handle_in);
+    path.push_str(&format!(
+        " C {} {} {} {} {} {}",
+        control_one.x, control_one.y, control_two.x, control_two.y, to.point.x, to.point.y,
+    ));
+}
+
+fn offset_point(point: ShapePoint, handle: Option<ShapePoint>) -> ShapePoint {
+    handle.map_or(point, |offset| ShapePoint {
+        x: point.x + offset.x,
+        y: point.y + offset.y,
+    })
+}
+
 fn transformed_point(point: ExportPoint, transform: ExportTransform) -> ExportPoint {
     let x = point.x * transform.scale_x;
     let y = point.y * transform.scale_y;
@@ -914,6 +1098,7 @@ mod tests {
                     rotation_degrees: 0.0,
                 },
             }],
+            shapes: vec![],
             images: vec![],
         }
     }
@@ -972,6 +1157,98 @@ mod tests {
             above.find("block-0-0.typ").unwrap() < above.find("ink-0-0.svg").unwrap(),
             "higher ink must be emitted after the block: {above}"
         );
+    }
+
+    #[test]
+    fn exports_editable_shapes_as_vector_overlays() {
+        let mut page = page();
+        page.shapes.push(ExportShape {
+            x: 40.0,
+            y: 50.0,
+            rotation_degrees: 12.0,
+            scale: 1.25,
+            z_index: 4,
+            order: 2,
+            geometry: ShapeGeometry::Rectangle {
+                width_pt: 80.0,
+                height_pt: 44.0,
+                corner_radius_pt: 4.0,
+            },
+            style: ShapeStyle {
+                stroke_color: "#16212b".to_owned(),
+                stroke_width_pt: 1.6,
+                fill_color: Some("#16212b24".to_owned()),
+                opacity: 1.0,
+            },
+        });
+
+        let source = generated_typst_source(&page, 0);
+        let svg = shape_svg(&page, &[&page.shapes[0]]);
+        assert!(source.contains("#image(\"shape-0-0.svg\""), "{source}");
+        assert!(
+            svg.contains(r#"<rect width="80" height="44" rx="4""#),
+            "{svg}"
+        );
+        assert!(svg.contains(r##"fill="#16212b24""##), "{svg}");
+        assert!(
+            svg.contains(r#"translate(40 50) rotate(12) scale(1.25)"#),
+            "{svg}"
+        );
+    }
+
+    /// Neighbouring shapes share one overlay; a block layered between two of them splits the run,
+    /// so what comes out of the PDF is stacked the way the page is.
+    #[test]
+    fn shapes_share_an_overlay_until_something_is_layered_between_them() {
+        let rectangle = |z_index: i32, order: usize| ExportShape {
+            x: 10.0,
+            y: 10.0,
+            rotation_degrees: 0.0,
+            scale: 1.0,
+            z_index,
+            order,
+            geometry: ShapeGeometry::Rectangle {
+                width_pt: 20.0,
+                height_pt: 10.0,
+                corner_radius_pt: 0.0,
+            },
+            style: ShapeStyle {
+                stroke_color: "#16212b".to_owned(),
+                stroke_width_pt: 1.0,
+                fill_color: None,
+                opacity: 1.0,
+            },
+        };
+
+        let mut page = page();
+        page.blocks.clear();
+        page.strokes.clear();
+        page.shapes = vec![rectangle(1, 0), rectangle(2, 1), rectangle(3, 2)];
+        let strata = shape_strata(&page);
+        assert_eq!(strata.len(), 1, "nothing sits between them");
+        assert_eq!(strata[0].shapes.len(), 3);
+        assert_eq!(
+            shape_svg(&page, &strata[0].shapes).matches("<rect").count(),
+            3
+        );
+
+        page.images.push(ExportImage {
+            relative_path: "assets/image.png".to_owned(),
+            x: 0.0,
+            y: 0.0,
+            width_pt: 10.0,
+            height_pt: 10.0,
+            scale: 1.0,
+            rotation_degrees: 0.0,
+            z_index: 2,
+            order: 9,
+        });
+        let split = shape_strata(&page);
+        assert_eq!(split.len(), 2, "the image divides the run");
+        // An equal z-index puts the shape after the object, matching how ink is stratified and
+        // how the screen stacks them, so the image lands under the two shapes that share its z.
+        assert_eq!(split[0].shapes.len(), 1);
+        assert_eq!(split[1].shapes.len(), 2);
     }
 
     #[test]
@@ -1251,6 +1528,7 @@ mod tests {
             page_typst: None,
             blocks: vec![],
             strokes: vec![],
+            shapes: vec![],
             images: vec![],
         };
 

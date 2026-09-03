@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 2,
+  "id": "notebook-shape-v2",
+  "title": "Shape fixture",
+  "pages": [
+    {
+      "id": "page-001",
+      "path": "pages/page-001.json",
+      "geometry": { "widthPt": 595, "heightPt": 842 }
+    }
+  ],
+  "defaultPage": {
+    "geometry": { "widthPt": 595, "heightPt": 842 },
+    "background": { "kind": "plain", "color": "#ffffff" }
+  },
+  "sharedStylePath": null,
+  "createdAt": "2026-09-03T08:00:00Z",
+  "modifiedAt": "2026-09-03T08:00:00Z"
+}

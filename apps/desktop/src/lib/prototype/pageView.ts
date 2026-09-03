@@ -1,4 +1,4 @@
-import type { PageObject, Stroke } from "../model";
+import type { PageObject, ShapeGeometry, ShapeStyle, Stroke } from "../model";
 
 // One view model for a page, shared by every renderer. Before this existed, the active page and
 // its neighbours each derived objects, sources, and asset URLs their own way, which is what let
@@ -40,6 +40,27 @@ export type ImageView = {
   zIndex: number;
   readingOrder: number;
 };
+
+export type ShapeView = {
+  id: string;
+  x: number;
+  y: number;
+  rotation: number;
+  scale: number;
+  zIndex: number;
+  readingOrder: number;
+  geometry: ShapeGeometry;
+  style: ShapeStyle;
+};
+
+/**
+ * How a shape edit should reach the store.
+ *
+ * A finished pointer gesture is one decision and earns a commit of its own. A held arrow key is
+ * a single continuous adjustment, and writing a full snapshot per repeat would flood both the
+ * transaction queue and the undo stack with steps nobody wants to step back through.
+ */
+export type ShapeEditCommit = "now" | "settled";
 
 type StoredFile = { path: string; bytes: number[] };
 
@@ -123,6 +144,25 @@ export function imageViewsFromSnapshot(
         },
       ];
     });
+}
+
+export function shapeViewsFromSnapshot(snapshot: SnapshotLike): ShapeView[] {
+  return snapshot.page.objects
+    .filter(
+      (object): object is Extract<PageObject, { type: "shape" }> =>
+        object.type === "shape",
+    )
+    .map((object) => ({
+      id: object.id,
+      x: object.x,
+      y: object.y,
+      rotation: object.rotation,
+      scale: object.scale,
+      zIndex: object.zIndex,
+      readingOrder: object.readingOrder,
+      geometry: object.geometry,
+      style: object.style,
+    }));
 }
 
 export function strokesFromSnapshot(snapshot: SnapshotLike): Stroke[] {

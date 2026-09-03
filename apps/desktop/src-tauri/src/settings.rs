@@ -35,6 +35,12 @@ pub struct AppSettings {
     pub highlighter_opacity: f64,
     pub highlighter_straighten: bool,
     pub highlighter_behind_ink: bool,
+    /// Last explicit shape tool and its small, app-local drawing preferences.
+    pub shape_kind: String,
+    pub shape_fill: bool,
+    pub shape_constrain: bool,
+    /// Pen shortcut: pause at the end of a deliberate mark to promote it into a shape.
+    pub draw_and_hold_shapes: bool,
     pub eraser_size: String,
     pub calibration: PressureCalibration,
     pub undo_scope: UndoScope,
@@ -125,6 +131,10 @@ impl Default for AppSettings {
             highlighter_opacity: 0.6,
             highlighter_straighten: false,
             highlighter_behind_ink: true,
+            shape_kind: "line".into(),
+            shape_fill: false,
+            shape_constrain: false,
+            draw_and_hold_shapes: true,
             eraser_size: "medium".into(),
             calibration: PressureCalibration {
                 minimum: 0.0,
@@ -237,6 +247,12 @@ fn sanitize(mut settings: AppSettings) -> AppSettings {
     }
     if !matches!(settings.eraser_size.as_str(), "small" | "medium" | "large") {
         settings.eraser_size = defaults.eraser_size;
+    }
+    if !matches!(
+        settings.shape_kind.as_str(),
+        "line" | "rectangle" | "ellipse" | "spline"
+    ) {
+        settings.shape_kind = defaults.shape_kind;
     }
     settings.calibration.minimum = clamp(settings.calibration.minimum, 0.0, 0.99, 0.0);
     settings.calibration.maximum = clamp(

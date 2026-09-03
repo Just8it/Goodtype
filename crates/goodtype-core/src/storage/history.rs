@@ -9,7 +9,8 @@ use std::path::Path;
 use serde::Serialize;
 
 use super::{
-    HISTORY_LIMIT, NotebookSnapshot, StorageError, invalid_error, pages::*, paths::*, write::*,
+    HISTORY_LIMIT, NotebookSnapshot, StorageError, invalid_error, pages::*, paths::*,
+    validate::raise_schema_version, write::*,
 };
 
 #[derive(Debug, Default)]
@@ -132,6 +133,11 @@ pub fn commit_notebook(
     if requested_modified_at > snapshot.manifest.modified_at {
         snapshot.manifest.modified_at = requested_modified_at;
     }
+    // A notebook rises to the version its content needs and never merely for being edited, so
+    // this is the one place that can decide it: it holds both the notebook as it exists on disk
+    // and the page about to be written. The manifest states the version and the page and its ink
+    // layers move with it, so a partially upgraded notebook is not representable.
+    raise_schema_version(&mut snapshot);
     snapshot.page.revision = current.page.revision + 1;
     let (saved, fingerprint) = save_and_return(&root, &current, &snapshot)?;
     history.advance(current, &saved, fingerprint);
