@@ -20,6 +20,9 @@ export type ShapeDraft = {
 export type ShapeBounds = { left: number; top: number; right: number; bottom: number };
 
 export const MIN_SHAPE_SIZE_PT = 4;
+/// The store will not accept a closed curve with fewer knots than this, and it would not enclose
+/// anything anyway.
+export const MIN_CLOSED_SPLINE_NODES = 3;
 const MAX_SPLINE_NODES = 256;
 
 export function shapePath(geometry: ShapeGeometry): string {
@@ -125,27 +128,39 @@ export function splineFromPoints(
   input: readonly Point[],
   style: ShapeStyle,
   tolerancePt = 1.5,
+  closed = false,
 ): ShapeDraft | null {
   const sampled = deduplicate(input);
   if (sampled.length < 2 || travelledDistance(sampled) < MIN_SHAPE_SIZE_PT) return null;
-  const simplified = evenlyCap(simplify(sampled, Math.max(tolerancePt, 0.25)), MAX_SPLINE_NODES);
+  // A ring's last sample is the first one again; keeping both would leave a zero-length segment
+  // where the curve closes on itself.
+  const open = closed && sampled.length > 2 && distance(sampled[0], sampled[sampled.length - 1]) < tolerancePt
+    ? sampled.slice(0, -1)
+    : sampled;
+  const simplified = evenlyCap(simplify(open, Math.max(tolerancePt, 0.25)), MAX_SPLINE_NODES);
   const bounds = pointsBounds(simplified);
   const local = simplified.map((point) => ({ x: point.x - bounds.left, y: point.y - bounds.top }));
+  // A closed curve is a ring with no ends, so every knot takes its tangent from the neighbours
+  // it actually has — the last one's next is the first. Leaving the end knots straight, as an
+  // open curve does, would put a visible corner where the two ends meet.
+  const ring = closed && local.length >= MIN_CLOSED_SPLINE_NODES;
   const nodes = local.map((point, index): BezierNode => {
-    const previous = local[Math.max(index - 1, 0)];
-    const next = local[Math.min(index + 1, local.length - 1)];
+    const previous = local[ring ? (index - 1 + local.length) % local.length : Math.max(index - 1, 0)];
+    const next = local[ring ? (index + 1) % local.length : Math.min(index + 1, local.length - 1)];
     const tangent = { x: (next.x - previous.x) / 6, y: (next.y - previous.y) / 6 };
+    const first = !ring && index === 0;
+    const last = !ring && index === local.length - 1;
     return {
       point,
-      handleIn: index === 0 ? null : { x: -tangent.x, y: -tangent.y },
-      handleOut: index === local.length - 1 ? null : tangent,
+      handleIn: first ? null : { x: -tangent.x, y: -tangent.y },
+      handleOut: last ? null : tangent,
     };
   });
   return {
     x: bounds.left,
     y: bounds.top,
     rotation: 0,
-    geometry: { kind: "spline", nodes, closed: false },
+    geometry: { kind: "spline", nodes, closed: ring },
     style,
   };
 }

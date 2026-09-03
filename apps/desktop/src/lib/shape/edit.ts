@@ -1,12 +1,11 @@
 import type { Point } from "../geometry/coordinates";
 import type { ShapeGeometry, ShapePoint } from "../model";
 import type { ShapeView } from "../prototype/pageView";
-import { MIN_SHAPE_SIZE_PT, shapeBounds } from "./geometry";
+import { MIN_CLOSED_SPLINE_NODES, MIN_SHAPE_SIZE_PT, shapeBounds } from "./geometry";
 
 /// Shift-rotation lands on the same twelfth-turn grid a constrained line snaps to.
 const ROTATION_SNAP_DEGREES = 15;
 const MIN_OPEN_SPLINE_NODES = 2;
-const MIN_CLOSED_SPLINE_NODES = 3;
 
 export type ShapeAnchor =
   | "line-start"

@@ -27,7 +27,7 @@
     type ShapeDraft,
     type ShapeKind,
   } from "../shape/geometry";
-  import { recognizeHeldShape } from "../shape/recognize";
+  import { closedOutline, recognizeHeldShape } from "../shape/recognize";
   import {
     eraseStrokeAt,
     hitStroke,
@@ -650,7 +650,11 @@
     active: Extract<Gesture, { kind: "shape" }>,
   ): ShapeDraft | null {
     if (shapeKind === "spline") {
-      return splineFromPoints(active.points, shapeStyle, 1.5 / Math.max(zoom, 0.1));
+      // Ending a freehand curve back where it began closes it, by the same rule that decides
+      // whether a held mark was a ring — so a loop drawn deliberately and a loop recognised
+      // from ink come out as the same shape.
+      const { outline, closed } = closedOutline(active.points);
+      return splineFromPoints(outline, shapeStyle, 1.5 / Math.max(zoom, 0.1), closed);
     }
     return shapeFromDrag(
       shapeKind,
