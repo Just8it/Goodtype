@@ -54,9 +54,18 @@ export function selectStrokesInLasso(strokes: Stroke[], polygon: Point[]): strin
     .map((stroke) => stroke.id);
 }
 
-export function hitStroke(strokes: Stroke[], point: Point, radius: number): Stroke | null {
+/** Which strokes a hit may land on; the eraser narrows this to highlighter sweeps on request. */
+export type StrokeFilter = (stroke: Stroke) => boolean;
+
+export function hitStroke(
+  strokes: Stroke[],
+  point: Point,
+  radius: number,
+  reaches: StrokeFilter = () => true,
+): Stroke | null {
   for (let strokeIndex = strokes.length - 1; strokeIndex >= 0; strokeIndex -= 1) {
     const stroke = strokes[strokeIndex];
+    if (!reaches(stroke)) continue;
     const points = stroke.points.map((sample) => transformedPoint(stroke, sample));
     const hitRadius =
       Math.max(radius, (stroke.widthPt * Math.max(stroke.transform.scaleX, stroke.transform.scaleY)) / 2);
@@ -77,8 +86,9 @@ export function eraseStrokeAt(
   strokes: Stroke[],
   point: Point,
   radius: number,
+  reaches: StrokeFilter = () => true,
 ): Stroke[] {
-  const hit = hitStroke(strokes, point, radius);
+  const hit = hitStroke(strokes, point, radius, reaches);
   return hit ? strokes.filter((stroke) => stroke.id !== hit.id) : strokes;
 }
 
@@ -174,18 +184,23 @@ function distanceToSegment(point: Point, start: Point, end: Point): number {
  * Only an automatic hand-over is reversed. Picking a tool by hand is a decision, and clearing a
  * selection must not undo it.
  */
-export type LassoHandover = { tool: InkTool; handedOver: boolean };
+export type LassoHandover = { tool: InkTool; returnTo: InkTool | null };
 
+/**
+ * A selection made while a brush is in hand came from the pen's side button acting as a lasso.
+ * It hands over to the selection tool the same way, and gives the brush back when it empties.
+ */
 export function toolAfterSelection(
   tool: InkTool,
   selectedCount: number,
-  handedOver: boolean,
+  returnTo: InkTool | null,
 ): LassoHandover {
-  if (selectedCount > 0 && tool === "lasso") return { tool: "select", handedOver: true };
-  if (selectedCount === 0 && handedOver && tool === "select") {
-    return { tool: "lasso", handedOver: false };
+  if (selectedCount > 0 && !keepsSelection(tool)) return { tool: "select", returnTo: tool };
+  if (selectedCount > 0 && tool === "lasso") return { tool: "select", returnTo: "lasso" };
+  if (selectedCount === 0 && returnTo && tool === "select") {
+    return { tool: returnTo, returnTo: null };
   }
-  return { tool, handedOver };
+  return { tool, returnTo };
 }
 
 /**

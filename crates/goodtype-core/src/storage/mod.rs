@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{InkLayer, NotebookManifest, Page};
 
-mod files;
+pub mod files;
 mod history;
 mod pages;
 mod paths;
@@ -39,6 +39,7 @@ pub use recovery::{
     restore_recovery_candidate,
 };
 pub use search::{SearchHit, search_notebook};
+pub(crate) use validate::validate_ink_layer;
 pub use write::{
     list_typst_styles, read_pdf_reference, remove_typst_style, store_pasted_image,
     store_pdf_reference, write_typst_style,
@@ -56,6 +57,8 @@ pub(crate) const MAX_INK_STROKES_PER_LAYER: usize = 20_000;
 pub(crate) const MAX_INK_POINTS_PER_LAYER: usize = 750_000;
 pub(crate) const MAX_RECOVERY_BYTES: usize = 192 * 1024 * 1024;
 pub(crate) const HISTORY_LIMIT: usize = 100;
+/// Per undo or redo stack. A large ink page must not multiply without a memory ceiling.
+pub(crate) const HISTORY_BYTES_LIMIT: usize = 128 * 1024 * 1024;
 pub(crate) const RECOVERY_CANDIDATE_LIMIT: usize = 10;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

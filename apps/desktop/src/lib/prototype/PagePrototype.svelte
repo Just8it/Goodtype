@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy, onMount, tick } from "svelte";
+  import { flushSync, onDestroy, onMount, tick } from "svelte";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import {
     commitNotebook,
@@ -51,6 +51,7 @@
     type ShapeStyle,
     type PageTemplate,
     type Stroke,
+    type StrokePattern,
   } from "../model";
   import {
     TYPST_IDLE_DEBOUNCE_MS,
@@ -75,7 +76,7 @@
     summarizeMetric,
     type StrokePerformance,
   } from "../ink/metrics";
-  import type { InkTool } from "../ink/pipeline";
+  import { DEFAULT_POINTER_MAPPING, type InkTool, type PointerMapping } from "../ink/pipeline";
   import {
     keepsSelection,
     moveSelected,
@@ -86,11 +87,18 @@
   } from "../ink/selection";
   import ColorPanel from "./ColorPanel.svelte";
   import WidthPanel from "./WidthPanel.svelte";
+  import PaletteEditor from "./PaletteEditor.svelte";
   import ToolCard from "./ToolCard.svelte";
   import ShapeCard from "./ShapeCard.svelte";
   import PageSurface from "./PageSurface.svelte";
   import OverflowMenu from "../workspace/OverflowMenu.svelte";
   import { populated, type MenuSection } from "../workspace/menu";
+  import {
+    chromeLayout,
+    nearestHistoryCorner,
+    type ChromeArea,
+    type HistoryCorner,
+  } from "./chromeLayout";
   import AddPageMenu from "../workspace/AddPageMenu.svelte";
   import type { AddPageGroup, AddPageSource, AddPageWhere } from "../workspace/addPage";
   import { templatePreviewSvg } from "../page/template";
@@ -148,9 +156,18 @@
     addWidth as addRowWidth,
     canRemoveWidth,
     editWidth as editRowWidth,
+    movePattern,
+    moveSpacing,
+    patternForWidth,
+    prunePatterns,
+    pruneSpacings,
     removeWidth as removeRowWidth,
+    spacingForWidth,
+    withWidthPattern,
+    withWidthSpacing,
     WIDTH_BOUNDS_MM,
   } from "./widths";
+  import ConfirmDialog from "../workspace/ConfirmDialog.svelte";
   import ConflictDialog from "../workspace/ConflictDialog.svelte";
   import RecoveryDialog from "../workspace/RecoveryDialog.svelte";
   import SearchOverlay from "../workspace/SearchOverlay.svelte";
@@ -163,6 +180,7 @@
     loadSettings,
     saveSettings,
     ERASER_RADIUS_PT,
+    HIGHLIGHTER_TAPER,
     MAX_SWATCHES,
     MAX_WIDTHS,
     MM_PER_PT,
@@ -240,7 +258,7 @@
   let activeSnapshot = $state<NotebookSnapshot | null>(null);
   let activePageId = $state("page-001");
   let activeInkLayerId = $state(INK_LAYER_ID);
-  let activeInkLayerPath = $state("ink/page-001-layer-001.json");
+  let activeInkLayerPath = $state("ink/page-001-layer-001.ink");
   /** The paper under the active page, kept so committing does not overwrite it. */
   let activeBackground = $state<PageBackground>({ kind: "plain", color: "#ffffff" });
   /** The active page's own size. Same reason: committing used to write one fixed geometry back. */
@@ -277,7 +295,8 @@
   let selectedTypstId = $state<string | null>(null);
   let directObjectInput = $state(false);
   /** True while the selection tool is only active because the lasso handed over to it. */
-  let lassoHandedOver = $state(false);
+  /** The tool a selection hand-over gives back once the selection empties. */
+  let selectionReturnTo = $state<InkTool | null>(null);
   let strokeMetrics = $state<StrokePerformance[]>([]);
   let compileMs = $state<number | null>(null);
   let zoomFrameMs = $state<number | null>(null);
@@ -299,6 +318,9 @@
   let typstDirty = $state(false);
   let pendingNeighborPages = $state(new Set<string>());
   let workspace = $state<HTMLElement>();
+  let workspaceChrome = $state<HTMLElement>();
+  let paletteElement = $state<HTMLElement>();
+  let historyElement = $state<HTMLElement>();
   let pageViewport = $state<HTMLElement>();
   let pageFrame = $state<HTMLElement>();
   const savePending = $derived(
@@ -513,23 +535,45 @@
   let paletteX = $state(24);
   let paletteY = $state(96);
   let paletteDock = $state<PaletteDock>("bottom");
+  let historyCorner = $state<HistoryCorner>("auto");
+  let historyDrag = $state<{ pointerId: number; size: number } | null>(null);
+  let historyX = $state(0);
+  let historyY = $state(0);
+  /// Where each piece of canvas chrome sits. Derived from the dock in one place, so the palette
+  /// and the controls around it cannot be given the same corner.
+  let chromeCrowded = $state(false);
+  const chrome = $derived(chromeLayout(paletteDock, historyCorner, chromeCrowded));
   let paletteDrag = $state<PaletteDrag | null>(null);
   let penPreset = $state<1 | 2>(1);
-  /// Open colour editor: `index` is the swatch being edited, or -1 when adding a new one.
-  /// The tool's card. `anchor` is the tapped tile's centre within the palette, so the card opens
-  /// where the writer was already looking. Widths and colours are edited inside it, which is why
-  /// the palette no longer carries a colour or width popout of its own.
+  // Tool-specific behaviour, anchored to the selected tool.
   let toolCard = $state<{
     kind: "pen" | "highlighter";
     slot: number;
     anchor: number;
-    view?: "main" | "add-colour";
   } | null>(null);
   let shapeCard = $state<{ anchor: number } | null>(null);
+  let paletteEditor = $state<{ kind: "width" | "color"; index: number; anchor: HTMLElement; adding?: boolean } | null>(null);
+
+  function closePaletteEditor() {
+    const anchor = paletteEditor?.anchor;
+    const kind = paletteEditor?.kind;
+    paletteEditor = null;
+    void tick().then(() => {
+      const fallback = paletteElement?.querySelector<HTMLElement>(kind === "width" ? ".widths button.current" : ".colors button.current");
+      (anchor?.isConnected ? anchor : fallback)?.focus();
+    });
+  }
+
+  function openPaletteEditor(kind: "width" | "color", index: number, anchor: HTMLElement, adding = false) {
+    const same = paletteEditor?.kind === kind && paletteEditor.anchor === anchor;
+    closeToolCard();
+    if (!same) paletteEditor = { kind, index, anchor, adding };
+  }
 
   function closeToolCard() {
     toolCard = null;
     shapeCard = null;
+    paletteEditor = null;
   }
 
   /// First press selects the tool; pressing the one already held opens its card — the same
@@ -543,6 +587,7 @@
       else activateTool("highlighter");
       return;
     }
+    paletteEditor = null;
     toolCard = toolCard ? null : { kind, slot, anchor: swatchAnchor(tile) };
   }
 
@@ -556,6 +601,7 @@
   }
 
   function selectOrOpenShape(tile: HTMLElement) {
+    paletteEditor = null;
     if (tool !== "shape") {
       closeToolCard();
       activateTool("shape");
@@ -572,7 +618,8 @@
 
   /// Opened from the pocket rather than from a tile. It still anchors to the held tool's tile, so
   /// the card points at the thing whose settings it carries wherever the button happens to be.
-  function openCardForHeldTool(view: "main" | "add-colour" = "main") {
+  function openCardForHeldTool() {
+    paletteEditor = null;
     const tile = document.querySelector<HTMLElement>(".instrument-palette .tool-tile.active");
     if (tool === "shape") {
       toolCard = null;
@@ -584,7 +631,6 @@
       kind: tool === "highlighter" ? "highlighter" : "pen",
       slot: tool === "highlighter" ? 1 : penPreset,
       anchor: tile ? swatchAnchor(tile) : 0,
-      view,
     };
   }
 
@@ -622,6 +668,18 @@
         ? "eraser"
         : null,
   );
+
+  /**
+   * CSS grid line pair, e.g. `1 / 2`.
+   *
+   * Only applied while the element is parked. An absolutely positioned grid child that still names
+   * a grid area is positioned *within that area* rather than within the grid, so a puck being
+   * carried would measure its offsets from whichever cell it had been assigned — and the cell
+   * moves as the drop target changes, which sends it off the canvas and under the clip.
+   */
+  function gridSpan(start: number, end: number): string {
+    return `${start} / ${end}`;
+  }
 
   function swatchAnchor(chip: HTMLElement): number {
     const bar = chip.closest(".instrument-palette");
@@ -756,6 +814,7 @@
     if (metricsTimer) clearTimeout(metricsTimer);
     if (selectionToolbarFrame) cancelAnimationFrame(selectionToolbarFrame);
     if (touchInertiaFrame) cancelAnimationFrame(touchInertiaFrame);
+    if (pendingZoomFrame) cancelAnimationFrame(pendingZoomFrame);
     removeCloseListener?.();
     window.removeEventListener("keydown", historyShortcut);
     window.removeEventListener("resize", scheduleSelectionToolbar);
@@ -788,6 +847,7 @@
   async function initialize() {
     settings = await loadSettings(tauriAvailable);
     paletteDock = settings.paletteDock;
+    historyCorner = settings.historyCorner;
     if (!tauriAvailable) {
       root = "Browser preview (persistence and real Typst compilation require Tauri)";
       applySnapshot(buildSnapshot());
@@ -1066,7 +1126,7 @@
     delete neighborStrokes[snapshot.page.id];
     const activeInk = snapshot.page.inkLayers[0];
     activeInkLayerId = activeInk?.id ?? `${activePageId}-ink-001`;
-    activeInkLayerPath = activeInk?.path ?? `ink/${activePageId}-layer-001.json`;
+    activeInkLayerPath = activeInk?.path ?? `ink/${activePageId}-layer-001.ink`;
     // Carried through so `buildSnapshot` can put them back. It used to write a hardcoded white
     // A4 page, which meant the first stroke on a template erased the paper it was drawn on and
     // flattened any page that was not A4.
@@ -1496,6 +1556,7 @@
   function changeSettings(next: AppSettings) {
     settings = next;
     paletteDock = next.paletteDock;
+    historyCorner = next.historyCorner;
     const version = ++settingsVersion;
     if (settingsSaveTimer) clearTimeout(settingsSaveTimer);
     settingsSaveTimer = setTimeout(() => {
@@ -1530,17 +1591,18 @@
     }
   }
 
+  /** The page number a pending delete asks about; null while nothing is being asked. */
+  let confirmingPageDelete = $state<number | null>(null);
+
   async function deleteActivePage() {
     moreOpen = false;
     if (!tauriAvailable || !(await persist())) return;
-    const pageNumber = activePageNumber();
-    if (
-      !window.confirm(
-        `Delete page ${pageNumber}? Its files are kept for recovery, but it leaves this notebook.`,
-      )
-    ) {
-      return;
-    }
+    confirmingPageDelete = activePageNumber();
+  }
+
+  async function confirmDeleteActivePage() {
+    const deletedNumber = confirmingPageDelete;
+    confirmingPageDelete = null;
     busy = true;
     try {
       const result = await deletePage(root, activePageId, new Date().toISOString());
@@ -1549,7 +1611,7 @@
       recordStructureAction();
       await tick();
       scrollToPage(result.snapshot.page.id);
-      status = `Deleted page ${pageNumber}`;
+      status = `Deleted page ${deletedNumber}`;
     } catch (error) {
       status = `Could not delete the page: ${message(error)}`;
     } finally {
@@ -2202,9 +2264,9 @@
    */
   function updateInkSelection(ids: string[]) {
     selectedStrokeIds = ids;
-    const next = toolAfterSelection(tool, ids.length, lassoHandedOver);
+    const next = toolAfterSelection(tool, ids.length, selectionReturnTo);
     tool = next.tool;
-    lassoHandedOver = next.handedOver;
+    selectionReturnTo = next.returnTo;
   }
 
   const TOOL_NAMES: Record<InkTool, string> = {
@@ -2216,13 +2278,31 @@
     select: "Ink selection",
   };
 
+  /** Where "Eraser goes back to your pen" returns to. Only an eraser picked by hand sets it. */
+  let toolBeforeEraser: { tool: InkTool; preset: 1 | 2 } | null = null;
+
+  const pointerMapping = $derived<PointerMapping>({
+    ...DEFAULT_POINTER_MAPPING,
+    sideButton: settings.penSideButton,
+    fingerDraws: settings.drawWithFinger,
+  });
+
+  /// The pen's eraser end and side button switch to the eraser like the tile does, so all three
+  /// come back here: with the setting on, each erase hands the page back to the tool before it.
+  function returnFromEraser() {
+    if (!settings.eraserReturns || tool !== "eraser" || !toolBeforeEraser) return;
+    const { tool: previous, preset } = toolBeforeEraser;
+    activateTool(previous, previous === "pen" ? preset : undefined);
+  }
+
   function activateTool(next: InkTool, preset?: 1 | 2) {
+    if (next === "eraser" && tool !== "eraser") toolBeforeEraser = { tool, preset: penPreset };
     if (next !== tool || (next === "pen" && preset !== undefined && preset !== penPreset)) {
       closeToolCard();
     }
     if (preset) penPreset = preset;
     tool = next;
-    lassoHandedOver = false;
+    selectionReturnTo = null;
     // A brush owns the page, so anything still selected would sit there showing handles and
     // refusing to move. Dropping it is the honest half of that: the selection is gone because
     // the tool that acted on it is.
@@ -2260,17 +2340,46 @@
     );
   }
 
+  /// Picking a pen chip takes its pattern too: the pattern belongs to that width, not the pen.
   function setActiveWidth(widthPt: number) {
     if (tool === "highlighter") {
       changeSettings({ ...settings, highlighter: { ...settings.highlighter, widthPt } });
     } else {
+      const pattern = patternForWidth(settings.penWidthPatterns, widthPt);
       changeSettings({
         ...settings,
         penPresets: settings.penPresets.map((preset, index) =>
-          index === penPreset - 1 ? { ...preset, widthPt } : preset,
+          index === penPreset - 1 ? { ...preset, widthPt, pattern } : preset,
         ),
       });
     }
+  }
+
+  /// The gap factor of the chip in hand. A custom width off the row has no chip, so it uses 1.
+  function inkPatternSpacing(): number {
+    return tool === "pen" ? spacingForWidth(settings.penWidthSpacings, activeWidth) : 1;
+  }
+
+  function setActiveSpacing(spacing: number) {
+    if (!settings.penWidths.some((width) => Math.abs(width - activeWidth) < 0.001)) return;
+    changeSettings({
+      ...settings,
+      penWidthSpacings: withWidthSpacing(settings.penWidthSpacings, activeWidth, spacing),
+    });
+  }
+
+  /// Sets the pattern of the chip being edited and draws with it, leaving the other widths alone.
+  function setActivePattern(pattern: StrokePattern) {
+    const onRow = settings.penWidths.some((width) => Math.abs(width - activeWidth) < 0.001);
+    changeSettings({
+      ...settings,
+      penWidthPatterns: onRow
+        ? withWidthPattern(settings.penWidthPatterns, activeWidth, pattern)
+        : settings.penWidthPatterns,
+      penPresets: settings.penPresets.map((preset, index) =>
+        index === penPreset - 1 ? { ...preset, pattern } : preset,
+      ),
+    });
   }
 
   /// Point the active tool at a colour, and remember it as recently used. This changes which
@@ -2328,7 +2437,12 @@
     return tool === "highlighter" ? "highlighterWidths" : "penWidths";
   }
 
-  function putWidths(widths: number[], select: number) {
+  function putWidths(
+    widths: number[],
+    select: number,
+    patterns = settings.penWidthPatterns,
+    spacings = settings.penWidthSpacings,
+  ) {
     const key = widthKey();
     if (tool === "highlighter") {
       changeSettings({
@@ -2337,11 +2451,15 @@
         highlighter: { ...settings.highlighter, widthPt: select },
       } as AppSettings);
     } else {
+      const penWidthPatterns = prunePatterns(patterns, widths);
+      const pattern = patternForWidth(penWidthPatterns, select);
       changeSettings({
         ...settings,
         [key]: widths,
+        penWidthPatterns,
+        penWidthSpacings: pruneSpacings(spacings, widths),
         penPresets: settings.penPresets.map((preset, index) =>
-          index === penPreset - 1 ? { ...preset, widthPt: select } : preset,
+          index === penPreset - 1 ? { ...preset, widthPt: select, pattern } : preset,
         ),
       } as AppSettings);
     }
@@ -2360,7 +2478,20 @@
   }
 
   function editWidth(index: number, widthPt: number) {
-    putWidths(editRowWidth(settings[widthKey()], index, widthPt, MAX_WIDTHS), widthPt);
+    const previous = settings[widthKey()][index];
+    const moves = tool !== "highlighter" && previous !== undefined;
+    const patterns = moves
+      ? movePattern(settings.penWidthPatterns, previous, widthPt)
+      : settings.penWidthPatterns;
+    const spacings = moves
+      ? moveSpacing(settings.penWidthSpacings, previous, widthPt)
+      : settings.penWidthSpacings;
+    putWidths(
+      editRowWidth(settings[widthKey()], index, widthPt, MAX_WIDTHS),
+      widthPt,
+      patterns,
+      spacings,
+    );
   }
 
   function removeWidth(index: number) {
@@ -2402,11 +2533,13 @@
     ) {
       return;
     }
-    if (tool === "shape") {
+    // The shape tool builds on the ink surface, and the eraser has to reach it to rub anything
+    // out, so neither hands the pointer to an object under the cursor.
+    if (tool === "shape" || tool === "eraser") {
       directObjectInput = false;
       return;
     }
-    if (event.pointerType === "pen" && !keepsSelection(tool)) {
+    if ((event.pointerType === "pen" || fingerDraws(event)) && !keepsSelection(tool)) {
       directObjectInput = false;
       return;
     }
@@ -2450,7 +2583,7 @@
     // A stylus press mid-stroke is writing, not "deselect" — unless a selection tool is active,
     // where a press on empty page means exactly that.
     if (
-      (event.pointerType === "pen" && !keepsSelection(tool)) ||
+      ((event.pointerType === "pen" || fingerDraws(event)) && !keepsSelection(tool)) ||
       (event.target instanceof Element &&
         event.target.closest(
           ".typst-block, .image-object, .shape-object, .typst-size-control, .selection-actions, .overflow-menu, [data-preserve-selection]",
@@ -2513,7 +2646,29 @@
     return true;
   }
 
+  /**
+   * Palm rejection for finger drawing. A hand resting on the glass while the pen hovers or writes
+   * is a palm, not a finger, so for a moment after any pen activity touch goes back to only
+   * navigating. Hover counts: Windows reports a pen in range as pointer moves with no buttons.
+   */
+  const PALM_REJECTION_MS = 500;
+  let lastPenSeenAt = -Infinity;
+
+  function notePen(event: PointerEvent) {
+    if (event.pointerType === "pen") lastPenSeenAt = event.timeStamp;
+  }
+
+  /** Whether this press is a finger the writer has asked to draw with. */
+  function fingerDraws(event: PointerEvent): boolean {
+    return (
+      settings.drawWithFinger &&
+      event.pointerType === "touch" &&
+      event.timeStamp - lastPenSeenAt > PALM_REJECTION_MS
+    );
+  }
+
   function workspacePointerDown(event: PointerEvent) {
+    notePen(event);
     stopTouchInertia();
     if (beginPan(event)) return;
     // Fixed controls inside the scroll field own their touch. Without this exception the
@@ -2530,6 +2685,15 @@
     ) return;
     if (event.pointerType !== "touch") return;
     touchPoints.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    // A drawing finger is left to the ink surface. Only a second finger is claimed here, and
+    // capturing it for the pinch takes the first away from the surface, which drops that stroke.
+    if (
+      touchPoints.size === 1 &&
+      fingerDraws(event) &&
+      !directObjectInput &&
+      event.target instanceof Element &&
+      event.target.closest(".ink-surface")
+    ) return;
     if (touchPoints.size === 1 && !directObjectInput && pageViewport && workspace) {
       automaticPageFocusLocked = false;
       touchPanStart = {
@@ -2570,6 +2734,7 @@
   }
 
   function workspacePointerMove(event: PointerEvent) {
+    notePen(event);
     if (continuePan(event)) return;
     routeObjectPointer(event);
     if (!touchPoints.has(event.pointerId)) return;
@@ -2676,10 +2841,7 @@
     if (event.button !== 0 || !event.isPrimary || !workspace) return;
     const target = event.currentTarget as HTMLElement;
     const workspaceBounds = workspace.getBoundingClientRect();
-    const token = Number.parseFloat(
-      getComputedStyle(workspace).getPropertyValue("--control-touch"),
-    );
-    const size = Number.isFinite(token) && token > 0 ? token : 44;
+    const size = transportSize();
     const position = paletteTransportPosition(
       event.clientX - workspaceBounds.left,
       event.clientY - workspaceBounds.top,
@@ -2687,8 +2849,9 @@
       workspaceBounds.height,
       size,
     );
-    paletteX = position.x;
-    paletteY = position.y;
+    const offset = transportOffset();
+    paletteX = position.x - offset.x;
+    paletteY = position.y - offset.y;
     closeToolCard();
     target.setPointerCapture(event.pointerId);
     paletteDrag = { pointerId: event.pointerId, size };
@@ -2723,8 +2886,9 @@
       bounds.height,
       paletteDrag.size,
     );
-    paletteX = position.x;
-    paletteY = position.y;
+    const offset = transportOffset();
+    paletteX = position.x - offset.x;
+    paletteY = position.y - offset.y;
     const next = dockUnderPointer(event);
     // Not written to settings yet: a drag that wanders across three edges should leave one
     // preference behind, on release, not three.
@@ -2740,6 +2904,127 @@
     if (next !== settings.paletteDock) {
       changeSettings({ ...settings, paletteDock: next });
     }
+  }
+
+  /**
+   * The pill is its own handle.
+   *
+   * There is nowhere to put a grip on a control this small without it becoming mostly grip, so the
+   * strip between the two buttons is the grip — press anywhere on the pill that is not a button
+   * and it moves. The buttons keep the press for themselves, so undo stays a single tap.
+   */
+  function beginHistoryDrag(event: PointerEvent) {
+    if (event.button !== 0 || !event.isPrimary || !workspace) return;
+    if (event.target instanceof Element && event.target.closest("button")) return;
+    const size = transportSize();
+    carryHistoryTo(event, size);
+    (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+    historyDrag = { pointerId: event.pointerId, size };
+    status = "Moving the undo buttons — release in a corner";
+    event.preventDefault();
+  }
+
+  function moveHistory(event: PointerEvent) {
+    if (!historyDrag || event.pointerId !== historyDrag.pointerId) return;
+    carryHistoryTo(event, historyDrag.size);
+  }
+
+  /// Carry the puck under the pointer and preview the corner it would land in. The corner is
+  /// shown live but not written to settings until release, so one drag leaves one preference.
+  function carryHistoryTo(event: PointerEvent, size: number) {
+    if (!workspace) return;
+    const bounds = workspace.getBoundingClientRect();
+    const x = event.clientX - bounds.left;
+    const y = event.clientY - bounds.top;
+    const position = paletteTransportPosition(x, y, bounds.width, bounds.height, size);
+    const offset = transportOffset();
+    historyX = position.x - offset.x;
+    historyY = position.y - offset.y;
+    historyCorner = nearestHistoryCorner(x, y, bounds.width, bounds.height);
+  }
+
+  /**
+   * Whether an end-docked rail and the history pill can share a row.
+   *
+   * Measured rather than guessed at, because it depends on how wide the side editor has been
+   * pulled out and on how many tools the rail is carrying. `scrollWidth` is the rail's own width
+   * even when the row has squeezed it, so this does not read back a width the pill caused — which
+   * is what would make the pill move away, free up room, and be invited straight back.
+   */
+  $effect(() => {
+    const chromeBox = workspaceChrome;
+    const rail = paletteElement;
+    const pill = historyElement;
+    if (!chromeBox || !rail || !pill) return;
+    const measure = () => {
+      const style = getComputedStyle(chromeBox);
+      const available =
+        chromeBox.clientWidth -
+        (Number.parseFloat(style.paddingLeft) || 0) -
+        (Number.parseFloat(style.paddingRight) || 0);
+      const gap = Number.parseFloat(style.columnGap) || 0;
+      chromeCrowded = rail.scrollWidth + pill.scrollWidth + gap * 2 > available;
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(chromeBox);
+    observer.observe(rail);
+    return () => observer.disconnect();
+  });
+
+  /**
+   * From workspace coordinates to the ones a carried puck is actually positioned in.
+   *
+   * Drop targets are decided across the whole workspace, but the puck is an absolutely positioned
+   * child of the chrome, so its offsets are measured from that element's padding box. Without the
+   * conversion the puck sits a padding's width down and to the right of the pointer carrying it.
+   */
+  function transportOffset(): { x: number; y: number } {
+    if (!workspaceChrome) return { x: 0, y: 0 };
+    const style = getComputedStyle(workspaceChrome);
+    return {
+      x: Number.parseFloat(style.paddingLeft) || 0,
+      y: Number.parseFloat(style.paddingTop) || 0,
+    };
+  }
+
+  /// The touch-sized puck both transports shrink into, read from the same token they are built on.
+  function transportSize(): number {
+    if (!workspace) return 44;
+    const token = Number.parseFloat(
+      getComputedStyle(workspace).getPropertyValue("--control-touch"),
+    );
+    return Number.isFinite(token) && token > 0 ? token : 44;
+  }
+
+  function finishHistoryDrag(event: PointerEvent) {
+    if (!historyDrag || event.pointerId !== historyDrag.pointerId) return;
+    historyDrag = null;
+    status = `Undo buttons moved to the ${chrome.historyCorner.replace("-", " ")}`;
+    if (historyCorner !== settings.historyCorner) {
+      changeSettings({ ...settings, historyCorner });
+    }
+  }
+
+  /// Arrow keys park the pill in a corner, and Backspace hands the decision back to the layout.
+  function moveHistoryWithKeyboard(event: KeyboardEvent) {
+    const vertical = event.key === "ArrowUp" ? "top" : event.key === "ArrowDown" ? "bottom" : null;
+    const horizontal =
+      event.key === "ArrowLeft" ? "left" : event.key === "ArrowRight" ? "right" : null;
+    const reset = event.key === "Backspace" || event.key === "Delete";
+    if (!vertical && !horizontal && !reset) return;
+    event.preventDefault();
+    const current = historyCorner === "auto" ? "top-left" : historyCorner;
+    const [row, column] = current.split("-") as ["top" | "bottom", "left" | "right"];
+    const next: HistoryCorner = reset
+      ? "auto"
+      : (`${vertical ?? row}-${horizontal ?? column}` as HistoryCorner);
+    historyCorner = next;
+    status =
+      next === "auto"
+        ? "Undo buttons follow the palette again"
+        : `Undo buttons moved to the ${next.replace("-", " ")}`;
+    if (next !== settings.historyCorner) changeSettings({ ...settings, historyCorner: next });
   }
 
   function dockPaletteWithKeyboard(event: KeyboardEvent) {
@@ -3029,13 +3314,18 @@
     if (sideEditorOpen) sideEditor?.focus();
   }
 
+  /// Used by the Shapes tool and by draw-and-hold. A held figure keeps the pattern of the pen that
+  /// drew it, so a dotted mark becomes a dotted shape; the Shapes tool has its own choice.
   function currentShapeStyle(): ShapeStyle {
-    const strokeColor = settings.penPresets[penPreset - 1]?.color ?? "#1e232b";
+    const preset = settings.penPresets[penPreset - 1];
+    const strokeColor = preset?.color ?? "#1e232b";
     return {
       strokeColor,
-      strokeWidthPt: settings.penPresets[penPreset - 1]?.widthPt ?? 1.6,
+      strokeWidthPt: preset?.widthPt ?? 1.6,
       fillColor: settings.shapeFill ? `${strokeColor}24` : null,
       opacity: 1,
+      pattern: tool === "shape" ? settings.shapePattern : tool === "pen" ? inkPattern() : "solid",
+      patternSpacing: tool === "shape" ? settings.shapePatternSpacing : inkPatternSpacing(),
     };
   }
 
@@ -3098,10 +3388,13 @@
       strokeWidthPt: stroke.widthPt,
       fillColor: null,
       opacity: stroke.opacity,
+      pattern: stroke.pattern ?? "solid",
+      patternSpacing: stroke.patternSpacing ?? 1,
     };
     const draft = recognizeHeldShape(
       stroke.points.map((point) => ({ ...point, ...transformedPoint(stroke, point) })),
       style,
+      { snapDegrees: settings.shapeConstrain ? 15 : 0 },
     )?.draft;
     if (!draft) {
       status = "That stroke is not close enough to a line, rectangle, ellipse, or simple curve";
@@ -3123,6 +3416,18 @@
   /// A finished drag is one decision and is written straight away. A held arrow or bracket key
   /// is one continuous adjustment, and settles first so a nudge across the page is a single undo
   /// step rather than one transaction per repeat.
+  /// The eraser takes a whole shape, the way it takes a whole stroke.
+  function eraseShape(id: string) {
+    if (!shapes.some((shape) => shape.id === id)) return;
+    shapes = shapes.filter((shape) => shape.id !== id);
+    if (selectedShapeId === id) {
+      selectedShapeId = null;
+      editingShapeId = null;
+    }
+    scheduleInkCommit("Erased shape");
+    status = "Erased the shape";
+  }
+
   function changeShape(next: ShapeView, commit: ShapeEditCommit = "now") {
     if (!shapes.some((shape) => shape.id === next.id)) return;
     shapes = shapes.map((shape) => (shape.id === next.id ? next : shape));
@@ -3754,24 +4059,52 @@
     zoom = clampZoom(next);
   }
 
+  /**
+   * The zoom the next frame will show, with the point that must stay under the cursor or fingers.
+   *
+   * A trackpad delivers several wheel events per frame, and each used to set the zoom, lay out the
+   * whole page stack, and correct the scroll only on the *following* frame. The page was drawn
+   * once at the new size in the old scroll position, which is the jump. Now events only record a
+   * target; one frame applies it, lays out once, and corrects the scroll before anything paints.
+   */
+  let pendingZoom: { zoom: number; clientX: number; clientY: number; fixedPagePoint?: Point } | null =
+    null;
+  let pendingZoomFrame = 0;
+
+  /** Where zoom is heading, so events arriving within one frame build on each other. */
+  function targetZoom() {
+    return pendingZoom?.zoom ?? zoom;
+  }
+
   function zoomAt(next: number, clientX: number, clientY: number, fixedPagePoint?: Point) {
     if (!pageViewport || !pageFrame) return;
     automaticPageFocusLocked = true;
+    pendingZoom = { zoom: clampZoom(next), clientX, clientY, fixedPagePoint };
+    if (!pendingZoomFrame) pendingZoomFrame = requestAnimationFrame(applyPendingZoom);
+  }
+
+  function applyPendingZoom() {
+    pendingZoomFrame = 0;
+    const pending = pendingZoom;
+    pendingZoom = null;
+    if (!pending || !pageViewport || !pageFrame) return;
     const viewport = pageViewport;
     const frame = pageFrame;
     const startedAt = performance.now();
     const before = frame.getBoundingClientRect();
-    const pagePoint = fixedPagePoint ?? {
-      x: (clientX - before.left) / zoom,
-      y: (clientY - before.top) / zoom,
+    const pagePoint = pending.fixedPagePoint ?? {
+      x: (pending.clientX - before.left) / zoom,
+      y: (pending.clientY - before.top) / zoom,
     };
-    zoom = clampZoom(next);
-    requestAnimationFrame(() => {
-      const after = frame.getBoundingClientRect();
-      viewport.scrollLeft += after.left + pagePoint.x * zoom - clientX;
-      viewport.scrollTop += after.top + pagePoint.y * zoom - clientY;
-      if (collectMetrics) zoomFrameMs = performance.now() - startedAt;
+    // Apply synchronously so the layout below already has the new size; the scroll is then fixed
+    // in the same frame, before the browser paints.
+    flushSync(() => {
+      zoom = pending.zoom;
     });
+    const after = frame.getBoundingClientRect();
+    viewport.scrollLeft += after.left + pagePoint.x * zoom - pending.clientX;
+    viewport.scrollTop += after.top + pagePoint.y * zoom - pending.clientY;
+    if (collectMetrics) zoomFrameMs = performance.now() - startedAt;
   }
 
   function wheelZoom(event: WheelEvent) {
@@ -3781,7 +4114,7 @@
       return;
     }
     event.preventDefault();
-    zoomAt(zoom * Math.exp(-event.deltaY * 0.01), event.clientX, event.clientY);
+    zoomAt(targetZoom() * Math.exp(-event.deltaY * 0.01), event.clientX, event.clientY);
   }
 
   function currentToolLabel() {
@@ -3794,7 +4127,8 @@
   /// the strip kept claiming "0.35 mm · graphite" after the writer had changed both, and the
   /// widths it named did not match the defaults either.
   function nibDetail(preset: PenPreset) {
-    return `${(preset.widthPt * MM_PER_PT).toFixed(2)} mm · ${colorName(preset.color).toLowerCase()}`;
+    const pattern = preset.pattern && preset.pattern !== "solid" ? ` · ${preset.pattern}` : "";
+    return `${(preset.widthPt * MM_PER_PT).toFixed(2)} mm · ${colorName(preset.color).toLowerCase()}${pattern}`;
   }
 
   function currentToolDetail() {
@@ -3831,8 +4165,15 @@
     return settings.pressureEnabled && activePreset().pressure;
   }
 
+  /// The highlighter has no nib picker, so it must not inherit a taper from whichever nib type
+  /// its stored preset happens to carry; whether its ends narrow is its own explicit switch.
   function inkTaper() {
+    if (tool === "highlighter") return settings.highlighterTaper ? HIGHLIGHTER_TAPER : 0;
     return penType(activePreset().type).taper;
+  }
+
+  function inkPattern(): StrokePattern {
+    return tool === "pen" ? (activePreset().pattern ?? "solid") : "solid";
   }
 
   function inkOpacity() {
@@ -4159,6 +4500,8 @@
                     widthPt={inkWidthPt()}
                     pressure={inkPressure()}
                     taper={inkTaper()}
+                    pattern={inkPattern()}
+                    patternSpacing={inkPatternSpacing()}
                     opacity={inkOpacity()}
                     straighten={inkStraighten()}
                     shapeKind={settings.shapeKind}
@@ -4166,11 +4509,16 @@
                     shapeConstrain={settings.shapeConstrain}
                     drawAndHoldShapes={settings.drawAndHoldShapes}
                     eraseRadiusPt={ERASER_RADIUS_PT[settings.eraserSize]}
+                    eraserReach={settings.eraserReach}
                     calibration={settings.calibration}
+                    {pointerMapping}
+                    onEraseEnd={returnFromEraser}
+                    onEraserEngaged={() => activateTool("eraser")}
                     directObjectInput={active && directObjectInput}
                     selectedBlockId={active ? selectedTypstId : null}
                     selectedImageId={active ? selectedImageId : null}
                     selectedShapeId={active ? selectedShapeId : null}
+                    shapesGrabbable={tool !== "eraser"}
                     editingShapeId={active ? editingShapeId : null}
                     onCompile={(id, request) =>
                       active
@@ -4209,6 +4557,7 @@
                       active
                         ? addStroke(stroke)
                         : commitNeighborInk(entry.id, [...neighborStrokesFor(entry), stroke], "Added ink")}
+                    onEraseShape={active ? eraseShape : undefined}
                     onShapeFinalized={active ? addShape : undefined}
                     onInkShapeRecognized={active ? promoteHeldInk : undefined}
                     onStrokesChange={(next) =>
@@ -4236,17 +4585,42 @@
 
       <!-- One grid owns the canvas chrome. Corner controls reserve their intrinsic row/column,
            so the palette can never be positioned through them by an unrelated fixed offset. -->
-      <div class="workspace-chrome">
-      <div class="history-pill" aria-label="Page history">
+      <div bind:this={workspaceChrome} class="workspace-chrome">
+      <div
+        bind:this={historyElement}
+        class:dragging={historyDrag !== null}
+        class:reduced-motion={settings.reducedMotion}
+        class="history-pill"
+        data-corner={chrome.historyCorner}
+        style:left={historyDrag ? `${historyX}px` : null}
+        style:top={historyDrag ? `${historyY}px` : null}
+        style:grid-column={historyDrag ? null : gridSpan(chrome.history.columnStart, chrome.history.columnEnd)}
+        style:grid-row={historyDrag ? null : gridSpan(chrome.history.rowStart, chrome.history.rowEnd)}
+        style:justify-self={historyDrag ? null : chrome.history.justify}
+        style:align-self={historyDrag ? null : chrome.history.align}
+        role="toolbar"
+        tabindex="0"
+        aria-label="Page history — drag between the buttons to move, or use the arrow keys"
+        onpointerdown={beginHistoryDrag}
+        onpointermove={moveHistory}
+        onpointerup={finishHistoryDrag}
+        onpointercancel={finishHistoryDrag}
+        onkeydown={moveHistoryWithKeyboard}
+      >
         <button type="button" aria-label="Undo" title="Undo (Ctrl+Z)" onclick={undo} disabled={busy || pendingTransactions > 0 || !canUndo}>
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 7-5 5 5 5M4 12h10a6 6 0 0 1 0 12" /></svg>
         </button>
+        <span class="grip" aria-hidden="true"></span>
+        <span class="transport" aria-hidden="true">
+          <svg viewBox="0 0 24 24"><path d="m9 7-5 5 5 5M4 12h10a6 6 0 0 1 0 12" /></svg>
+        </span>
         <button type="button" aria-label="Redo" title="Redo (Ctrl+Y)" onclick={redo} disabled={busy || pendingTransactions > 0 || !canRedo}>
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 7 5 5-5 5M20 12H10a6 6 0 0 0 0 12" /></svg>
         </button>
       </div>
 
       <nav
+        bind:this={paletteElement}
         class:dragging={paletteDrag !== null}
         class:reduced-motion={settings.reducedMotion}
         class:horizontal={paletteDrag === null && (paletteDock === "top" || paletteDock === "bottom")}
@@ -4256,10 +4630,43 @@
         class:dock-left={paletteDock === "left" && paletteDrag === null}
         class="instrument-palette"
         data-dock={paletteDock}
+        style:grid-column={paletteDrag ? null : gridSpan(chrome.palette.columnStart, chrome.palette.columnEnd)}
+        style:grid-row={paletteDrag ? null : gridSpan(chrome.palette.rowStart, chrome.palette.rowEnd)}
+        style:justify-self={paletteDrag ? null : chrome.palette.justify}
+        style:align-self={paletteDrag ? null : chrome.palette.align}
         style:left={paletteDrag ? `${paletteX}px` : null}
         style:top={paletteDrag ? `${paletteY}px` : null}
         aria-label="Canvas tools"
       >
+        {#if paletteEditor}
+          {#key paletteEditor.anchor}
+            <PaletteEditor title={paletteEditor.kind === "width" ? "Stroke" : paletteEditor.adding ? "Add colour" : "Colour"}
+              anchor={paletteEditor.anchor} dock={paletteDock} onClose={closePaletteEditor} onDismiss={closeToolCard}>
+              {#if paletteEditor.kind === "width"}
+                <WidthPanel embedded widthPt={activeWidth} kind={tool === "highlighter" ? "highlighter" : "pen"}
+                  minimumMm={WIDTH_BOUNDS_MM[tool === "highlighter" ? "highlighter" : "pen"].minimum}
+                  maximumMm={WIDTH_BOUNDS_MM[tool === "highlighter" ? "highlighter" : "pen"].maximum}
+                  pattern={inkPattern()}
+                  onPatternChange={tool === "pen" ? setActivePattern : undefined}
+                  spacing={inkPatternSpacing()}
+                  onSpacingChange={tool === "pen" ? setActiveSpacing : undefined}
+                  canRemove={paletteEditor.index >= 0 && canRemoveWidth(activeWidthChips)}
+                  onCommit={(width) => { if (!paletteEditor) return; paletteEditor.index < 0 ? addWidth(width) : editWidth(paletteEditor.index, width); closePaletteEditor(); }}
+                  onAdd={activeWidthChips.length < MAX_WIDTHS ? (width) => { addWidth(width); closePaletteEditor(); } : undefined}
+                  onRemove={() => { if (paletteEditor) removeWidth(paletteEditor.index); closePaletteEditor(); }}
+                  onClose={closePaletteEditor} />
+              {:else}
+                <ColorPanel embedded value={activeInkColor} recent={settings.recentColors}
+                  mode={paletteEditor.adding ? "add" : "edit"}
+                  canRemove={paletteEditor.index >= 0 && activeColorChips.length > 1}
+                  onPick={(color) => { if (!paletteEditor) return; if (paletteEditor.adding) addSwatch(color); else if (paletteEditor.index >= 0) editSwatch(paletteEditor.index, color); else setActiveColor(color); closePaletteEditor(); }}
+                  onChange={paletteEditor.adding ? undefined : (color) => { if (!paletteEditor) return; if (paletteEditor.index >= 0) editSwatch(paletteEditor.index, color); else setActiveColor(color); }}
+                  onRemove={() => { if (!paletteEditor) return; const index = paletteEditor.index; removeSwatch(index); setActiveColor(activeColorChips[Math.min(index, activeColorChips.length - 1)]); closePaletteEditor(); }}
+                  onClose={closePaletteEditor} />
+              {/if}
+            </PaletteEditor>
+          {/key}
+        {/if}
         {#if shapeCard}
           <div class="palette-panel-anchor card" style:--anchor={`${shapeCard.anchor}px`}>
             <ShapeCard
@@ -4270,6 +4677,11 @@
               drawAndHold={settings.drawAndHoldShapes}
               strokeColor={currentShapeStyle().strokeColor}
               strokeWidthPt={currentShapeStyle().strokeWidthPt}
+              pattern={settings.shapePattern}
+              onPatternChange={(shapePattern) => changeSettings({ ...settings, shapePattern })}
+              spacing={settings.shapePatternSpacing}
+              onSpacingChange={(shapePatternSpacing) =>
+                changeSettings({ ...settings, shapePatternSpacing })}
               onKindChange={(shapeKind) => changeSettings({ ...settings, shapeKind })}
               onFillChange={(shapeFill) => changeSettings({ ...settings, shapeFill })}
               onConstrainChange={(shapeConstrain) =>
@@ -4284,7 +4696,6 @@
           <div class="palette-panel-anchor card" style:--anchor={`${toolCard.anchor}px`}>
             <ToolCard
               dock={paletteDock}
-              initialView={toolCard.view ?? "main"}
               tool={toolCard.kind}
               label={toolCard.kind === "highlighter" ? "Highlighter" : `Pen ${toolCard.slot}`}
               preset={toolCardPreset}
@@ -4292,14 +4703,7 @@
               opacity={settings.highlighterOpacity}
               straighten={settings.highlighterStraighten}
               behindInk={settings.highlighterBehindInk}
-              widths={activeWidthChips}
-              colors={activeColorChips}
-              recentColors={settings.recentColors}
-              canAddWidth={activeWidthChips.length < MAX_WIDTHS}
-              canAddColor={activeColorChips.length < MAX_SWATCHES}
-              canRemoveWidth={canRemoveWidth(activeWidthChips)}
-              canRemoveColor={activeColorChips.length > 1}
-              widthBounds={WIDTH_BOUNDS_MM[toolCard.kind]}
+              taperEnds={settings.highlighterTaper}
               onChange={updateToolPreset}
               onSmoothingChange={(smoothing) =>
                 changeSettings({ ...settings, calibration: { ...settings.calibration, smoothing } })}
@@ -4309,13 +4713,7 @@
                 changeSettings({ ...settings, highlighterStraighten })}
               onBehindInkChange={(highlighterBehindInk) =>
                 changeSettings({ ...settings, highlighterBehindInk })}
-              onCommitWidth={(index, widthPt) =>
-                index === -1 ? addWidth(widthPt) : editWidth(index, widthPt)}
-              onRemoveWidth={removeWidth}
-              onCommitColor={(index, color) => (index === -1 ? addSwatch(color) : editSwatch(index, color))}
-              onPreviewColor={(index, color) =>
-                index === -1 ? addSwatch(color) : editSwatch(index, color)}
-              onRemoveColor={removeSwatch}
+              onTaperEndsChange={(highlighterTaper) => changeSettings({ ...settings, highlighterTaper })}
               onClose={closeToolCard}
             />
           </div>
@@ -4363,11 +4761,17 @@
               opacity={tool === "highlighter" ? settings.highlighterOpacity : 1}
               eraserSizes={ERASER_SIZE_OPTIONS}
               eraserSize={settings.eraserSize}
-              onPickWidth={setActiveWidth}
-              onPickColor={setActiveColor}
+              pattern={inkPattern()}
+              patternOf={tool === "pen" ? (width) => patternForWidth(settings.penWidthPatterns, width) : undefined}
+              expandedEditor={paletteEditor?.adding ? null : paletteEditor?.kind ?? null}
+              addingColor={paletteEditor?.adding ?? false}
+              onPickWidth={(width) => { closeToolCard(); setActiveWidth(width); }}
+              onPickColor={(color) => { closeToolCard(); setActiveColor(color); }}
+              onEditWidth={(index, tile) => openPaletteEditor("width", index, tile)}
+              onEditColor={(index, tile) => openPaletteEditor("color", index, tile)}
               onPickEraserSize={setEraserSize}
               canAddColor={activeColorChips.length < MAX_SWATCHES}
-              onAddColor={() => openCardForHeldTool("add-colour")}
+              onAddColor={(tile) => openPaletteEditor("color", -1, tile, true)}
               onOpenCard={paletteContext === "ink" ? () => openCardForHeldTool() : undefined}
             />
           {/if}
@@ -4478,6 +4882,15 @@
         void reopen();
       }}
       onCancel={() => (conflictDetail = null)}
+    />
+  {/if}
+  {#if confirmingPageDelete !== null}
+    <ConfirmDialog
+      title={`Delete page ${confirmingPageDelete}?`}
+      detail="Its files are kept for recovery, but it leaves this notebook."
+      confirmLabel="Delete page"
+      onConfirm={() => void confirmDeleteActivePage()}
+      onCancel={() => (confirmingPageDelete = null)}
     />
   {/if}
 
@@ -4826,10 +5239,93 @@
     border-radius: var(--radius-lg);
     background: var(--panel);
     box-shadow: 0 12px 30px rgb(0 0 0 / 45%);
-    gap: 2px;
-    grid-area: 1 / 1;
-    justify-self: start;
-    align-self: start;
+    gap: 0;
+    cursor: grab;
+    touch-action: none;
+    transition: border-color 120ms ease, box-shadow 120ms ease;
+  }
+  .history-pill:focus-visible { outline: 2px solid var(--blueprint-light); outline-offset: 2px; }
+  .history-pill.dragging { border-color: rgb(76 141 240 / 72%); cursor: grabbing; }
+  /* The gap between the buttons is the handle, so it has to be wide enough to be one. The dots
+     only appear on approach, so the control reads as two buttons until it needs to read as more. */
+  /* The pill travels the way the rail does: it becomes one touch-sized puck under the pointer,
+     carrying the icon of what is being moved, with a bracket marking the corner it will land in.
+     The bracket follows the settled corner, not the one under the pointer, so a drag over a
+     corner the palette owns shows the pill stepping aside instead of promising a place it
+     cannot have. */
+  .history-pill.dragging {
+    position: absolute;
+    z-index: 30;
+    width: var(--control-touch);
+    height: var(--control-touch);
+    padding: 0;
+    border-color: rgb(76 141 240 / 72%);
+    box-shadow: 0 14px 34px rgb(0 0 0 / 62%);
+    animation: palette-pickup 120ms cubic-bezier(0.16, 1, 0.3, 1);
+    will-change: left, top;
+  }
+  .history-pill.dragging button,
+  .history-pill.dragging .grip { display: none; }
+
+  .history-pill .transport { display: none; }
+  .history-pill.dragging .transport {
+    display: grid;
+    width: 100%;
+    height: 100%;
+    color: var(--text);
+    place-items: center;
+  }
+  .history-pill .transport svg {
+    width: var(--icon);
+    height: var(--icon);
+    fill: none;
+    stroke: currentColor;
+    stroke-width: var(--stroke);
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+
+  .history-pill.dragging::after {
+    position: absolute;
+    width: 9px;
+    height: 9px;
+    border: 2px solid var(--blueprint-light);
+    content: "";
+    pointer-events: none;
+  }
+  .history-pill.dragging[data-corner="top-left"]::after {
+    top: -6px; left: -6px; border-right: 0; border-bottom: 0;
+  }
+  .history-pill.dragging[data-corner="top-right"]::after {
+    top: -6px; right: -6px; border-bottom: 0; border-left: 0;
+  }
+  .history-pill.dragging[data-corner="bottom-left"]::after {
+    bottom: -6px; left: -6px; border-top: 0; border-right: 0;
+  }
+  .history-pill.dragging[data-corner="bottom-right"]::after {
+    bottom: -6px; right: -6px; border-top: 0; border-left: 0;
+  }
+
+  .history-pill.reduced-motion { transition: none; }
+  .history-pill.reduced-motion.dragging { animation: none; }
+
+  .history-pill .grip {
+    width: 14px;
+    height: var(--control);
+    flex: none;
+    background-image: radial-gradient(circle, var(--muted) 1.1px, transparent 1.2px);
+    background-position: center;
+    background-size: 4px 6px;
+    background-repeat: repeat-y;
+    opacity: 0;
+    transition: opacity 120ms ease;
+  }
+  .history-pill:hover .grip,
+  .history-pill:focus-visible .grip,
+  .history-pill.dragging .grip { opacity: 0.8; }
+  @media (prefers-reduced-motion: reduce) {
+    .history-pill, .history-pill .grip { transition: none; }
+    .history-pill.dragging { animation: none; }
   }
   .history-pill button {
     display: grid;
@@ -4872,15 +5368,17 @@
     transition: border-color 120ms ease, box-shadow 120ms ease;
   }
 
-  /* Each dock spans every grid track except the occupied corner on its own edge. */
-  .instrument-palette.dock-left { grid-column: 1; grid-row: 2 / 4; justify-self: start; align-self: center; }
-  .instrument-palette.dock-right { grid-column: 3; grid-row: 1 / 3; justify-self: end; align-self: center; }
-  .instrument-palette.dock-top { grid-column: 2 / 4; grid-row: 1; justify-self: center; align-self: start; }
-  .instrument-palette.dock-bottom { grid-column: 1 / 3; grid-row: 3; justify-self: center; align-self: end; }
+  /* Placement comes from `chromeLayout`, which is the only thing that sees every piece of chrome
+     at once and so the only thing able to keep them off each other. The dock classes that remain
+     carry appearance: which way a settings card opens, and where its arrow points. */
   .instrument-palette.horizontal {
     grid-template-columns: auto 1fr;
     grid-template-rows: var(--rail);
   }
+
+  /* The palette overlays the page. Keep its intrinsic size rather than squeezing its
+     controls into a scroll container when the page or available space changes. */
+  .instrument-palette:not(.horizontal):not(.dragging) { min-width: max-content; }
 
   /* One column, always. The quick controls sit at the foot of this same column rather than in a
      second one, which is what lets the rail keep a single fixed width in every state. */
@@ -4901,11 +5399,15 @@
     grid-column: 1 / -1;
     grid-row: 1;
     justify-self: center;
+    touch-action: none;
   }
 
+  /* Never narrower than the tiles it holds. With `min-width: 0` the row squeezed below its own
+     contents and the tiles carried on past the panel, so the background stopped short of the last
+     of them — the rail looked cut off at one end rather than full. */
   .horizontal .palette-primary {
     width: auto;
-    min-width: 0;
+    min-width: max-content;
     flex-direction: row;
     grid-column: 2;
     grid-row: 1;

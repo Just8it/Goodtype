@@ -19,7 +19,8 @@ pub const INK_DIR: &str = "ink";
 
 /// Store-owned state that is not part of the document.
 pub const INTERNAL_DIR: &str = ".goodtype";
-pub const PENDING_TRANSACTION: &str = ".goodtype/pending-transaction.json";
+pub const PENDING_TRANSACTION: &str = ".goodtype/pending-transaction.bin";
+pub const LEGACY_PENDING_TRANSACTION: &str = ".goodtype/pending-transaction.json";
 pub const RECOVERY_DIR: &str = ".goodtype/recovery";
 
 pub fn page_id(number: usize) -> String {
@@ -35,7 +36,19 @@ pub fn ink_layer_id(page_id: &str, number: usize) -> String {
 }
 
 pub fn ink_layer_path(page_id: &str, number: usize) -> String {
+    format!("{INK_DIR}/{page_id}-layer-{number:03}.ink")
+}
+
+pub fn legacy_ink_layer_path(page_id: &str, number: usize) -> String {
     format!("{INK_DIR}/{page_id}-layer-{number:03}.json")
+}
+
+pub fn ink_layer_path_for_schema(page_id: &str, number: usize, schema_version: u32) -> String {
+    if schema_version >= crate::BINARY_INK_SCHEMA_VERSION {
+        ink_layer_path(page_id, number)
+    } else {
+        legacy_ink_layer_path(page_id, number)
+    }
 }
 
 pub fn object_id(page_id: &str, number: usize) -> String {
@@ -70,6 +83,10 @@ pub fn recovery_path(file_name: &str) -> String {
 /// An archived candidate from a transaction that was interrupted before it could finish. The
 /// suffix breaks ties when two archives land inside one timestamp tick.
 pub fn interrupted_candidate(revision: u64, timestamp: u128, suffix: usize) -> String {
+    format!("interrupted-r{revision}-{timestamp}-{suffix}.bin")
+}
+
+pub fn legacy_interrupted_candidate(revision: u64, timestamp: u128, suffix: usize) -> String {
     format!("interrupted-r{revision}-{timestamp}-{suffix}.json")
 }
 
@@ -79,10 +96,13 @@ pub fn interrupted_candidate(revision: u64, timestamp: u128, suffix: usize) -> S
 /// this rejects is a file the store will refuse to read back.
 pub fn is_candidate_name(file_name: &str) -> bool {
     file_name.strip_prefix("interrupted-r").is_some_and(|rest| {
-        rest.strip_suffix(".json").is_some_and(|stem| {
-            let mut parts = stem.split('-');
-            parts.clone().count() == 3 && parts.all(|part| part.bytes().all(|b| b.is_ascii_digit()))
-        })
+        rest.strip_suffix(".bin")
+            .or_else(|| rest.strip_suffix(".json"))
+            .is_some_and(|stem| {
+                let mut parts = stem.split('-');
+                parts.clone().count() == 3
+                    && parts.all(|part| part.bytes().all(|b| b.is_ascii_digit()))
+            })
     })
 }
 
@@ -95,6 +115,11 @@ mod tests {
     #[test]
     fn archived_candidate_names_are_accepted_by_their_own_validator() {
         assert!(is_candidate_name(&interrupted_candidate(
+            2,
+            1_700_000_000,
+            0
+        )));
+        assert!(is_candidate_name(&legacy_interrupted_candidate(
             2,
             1_700_000_000,
             0
@@ -112,7 +137,11 @@ mod tests {
     #[test]
     fn ink_layer_names_agree_between_id_and_path() {
         assert_eq!(ink_layer_id("page-002", 1), "page-002-ink-001");
-        assert_eq!(ink_layer_path("page-002", 1), "ink/page-002-layer-001.json");
+        assert_eq!(ink_layer_path("page-002", 1), "ink/page-002-layer-001.ink");
+        assert_eq!(
+            legacy_ink_layer_path("page-002", 1),
+            "ink/page-002-layer-001.json"
+        );
         assert_eq!(page_path(&page_id(2)), "pages/page-002.json");
     }
 }

@@ -180,7 +180,7 @@
   class:embedded
   class="color-panel"
   style:transform={embedded ? null : `translate(${shift.x}px, ${shift.y}px)`}
-  role="dialog"
+  role={embedded ? "group" : "dialog"}
   tabindex="-1"
   aria-label={mode === "add" ? "Add a color" : "Edit color"}
   onkeydown={keydown}

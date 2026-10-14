@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { PresetSummary } from "../page/presets";
   import PresetMenu from "./PresetMenu.svelte";
+  import EditorColorButton from "./EditorColorButton.svelte";
   import { TYPST_SNIPPETS } from "./snippets";
   import type { WritingCommand } from "./writingCommands";
 
@@ -38,6 +39,7 @@
     <button type="button" aria-label="Bold" title="Bold (Ctrl+B)" onclick={() => onCommand("bold")}><b>B</b></button>
     <button type="button" aria-label="Emphasis" title="Emphasis (Ctrl+I)" onclick={() => onCommand("italic")}><i>I</i></button>
     <button type="button" aria-label="Underline" title="Underline (Ctrl+U)" onclick={() => onCommand("underline")}><u>U</u></button>
+    <EditorColorButton {onCommand} />
   </div>
 
   <span class="rule" aria-hidden="true"></span>

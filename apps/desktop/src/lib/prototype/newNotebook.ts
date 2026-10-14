@@ -1,5 +1,5 @@
 import type { NotebookSnapshot } from "../ipc/types";
-import { MIN_SUPPORTED_SCHEMA_VERSION, type NotebookManifest } from "../model";
+import { SCHEMA_VERSION, type NotebookManifest } from "../model";
 import type { NotebookSetup } from "../page/presets";
 import { projectSnapshot } from "./snapshot";
 
@@ -9,9 +9,8 @@ export function blankNotebookSnapshot(
 ): NotebookSnapshot {
   const pageId = "page-001";
   const manifest: NotebookManifest = {
-    // A blank notebook holds nothing that needs version 2, so it starts at the version the
-    // widest range of builds can open. It rises the first time it stores a shape.
-    schemaVersion: MIN_SUPPORTED_SCHEMA_VERSION,
+    // New notebooks start on the current format so their first ink layer is binary immediately.
+    schemaVersion: SCHEMA_VERSION,
     id: `notebook-${Date.now().toString(36)}`,
     title: setup.name,
     pages: [{ id: pageId, path: "pages/page-001.json", geometry: setup.geometry }],
@@ -28,7 +27,7 @@ export function blankNotebookSnapshot(
     geometry: setup.geometry,
     background: setup.background,
     inkLayerId: "ink-layer-001",
-    inkLayerPath: "ink/page-001-layer-001.json",
+    inkLayerPath: "ink/page-001-layer-001.ink",
     strokes: [],
     typst: [],
     pageTypst: null,

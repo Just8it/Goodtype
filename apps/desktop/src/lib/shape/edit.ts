@@ -5,6 +5,24 @@ import { MIN_CLOSED_SPLINE_NODES, MIN_SHAPE_SIZE_PT, shapeBounds } from "./geome
 
 /// Shift-rotation lands on the same twelfth-turn grid a constrained line snaps to.
 const ROTATION_SNAP_DEGREES = 15;
+
+/**
+ * Turn `moved` around `fixed` onto the nearest 15° step as seen on the page, keeping its distance.
+ * Line ends live in the shape's own frame, so the shape's rotation is added before rounding and
+ * taken off again; otherwise a rotated line would snap to angles that look arbitrary.
+ */
+function snapAround(moved: Point, fixed: Point, rotationDegrees: number): Point {
+  const dx = moved.x - fixed.x;
+  const dy = moved.y - fixed.y;
+  const length = Math.hypot(dx, dy);
+  if (length === 0) return moved;
+  const onPage = (Math.atan2(dy, dx) * 180) / Math.PI + rotationDegrees;
+  const snapped =
+    ((Math.round(onPage / ROTATION_SNAP_DEGREES) * ROTATION_SNAP_DEGREES - rotationDegrees) *
+      Math.PI) /
+    180;
+  return { x: fixed.x + Math.cos(snapped) * length, y: fixed.y + Math.sin(snapped) * length };
+}
 const MIN_OPEN_SPLINE_NODES = 2;
 
 export type ShapeAnchor =
@@ -45,21 +63,28 @@ export function resizeShape(
   return { ...shape, geometry: scaleGeometry(shape.geometry, { x: bounds.left, y: bounds.top }, scaleX, scaleY) };
 }
 
-export function moveShapeAnchor(shape: ShapeView, anchor: ShapeAnchor, delta: Point): ShapeView {
+export function moveShapeAnchor(
+  shape: ShapeView,
+  anchor: ShapeAnchor,
+  delta: Point,
+  snapAngle = false,
+): ShapeView {
   const geometry = shape.geometry;
   if (geometry.kind === "line" && typeof anchor === "string") {
     // The store refuses a line whose ends coincide, and rightly — it is not a line. Catching it
     // here keeps a dragged handle from turning into a commit failure the user cannot act on.
+    const place = (moved: Point, fixed: Point) =>
+      separated(snapAngle ? snapAround(moved, fixed, shape.rotation) : moved, fixed);
     if (anchor === "line-start") {
       return {
         ...shape,
-        geometry: { ...geometry, start: separated(add(geometry.start, delta), geometry.end) },
+        geometry: { ...geometry, start: place(add(geometry.start, delta), geometry.end) },
       };
     }
     if (anchor === "line-end") {
       return {
         ...shape,
-        geometry: { ...geometry, end: separated(add(geometry.end, delta), geometry.start) },
+        geometry: { ...geometry, end: place(add(geometry.end, delta), geometry.start) },
       };
     }
   }

@@ -414,6 +414,34 @@ mod tests {
         );
     }
 
+    #[test]
+    fn imported_source_is_bounded_before_typst_reads_it() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("large.typ"),
+            vec![b'x'; MAX_SOURCE_BYTES + 1],
+        )
+        .unwrap();
+        let result = compile_block(
+            root.path(),
+            &CompileRequest {
+                source: "#include \"large.typ\"".to_owned(),
+                width_pt: 240.0,
+                generation: 1,
+                allow_remote_packages: false,
+            },
+        )
+        .unwrap();
+
+        assert!(result.svg.is_none());
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.severity == DiagnosticSeverity::Error)
+        );
+    }
+
     /// Completion must come from the compiler, not a word list: a caret after `#` offers real
     /// library functions, and a math symbol resolves to its glyph.
     #[test]

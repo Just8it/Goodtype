@@ -96,14 +96,14 @@ export type Page = {
 export const MIN_SUPPORTED_SCHEMA_VERSION = 1;
 /// Shapes are what version 2 added. Mirrors `SHAPE_SCHEMA_VERSION` in goodtype-core.
 export const SHAPE_SCHEMA_VERSION = 2;
-export const SCHEMA_VERSION = 2;
+export const BINARY_INK_SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = BINARY_INK_SCHEMA_VERSION;
 
 /**
  * The version a page's content obliges its notebook to be written at.
  *
- * A notebook is not upgraded for being opened, nor for being saved after an unrelated edit: it
- * rises only when it stores something the new version introduced. The store applies the same
- * rule on commit and is the authority; this keeps the snapshot the app builds agreeing with it.
+ * Object content may require an older schema version, while the current manifest keeps the
+ * notebook-wide maximum. Rust additionally upgrades a confirmed legacy page to binary ink.
  */
 export function requiredSchemaVersion(objects: readonly PageObject[]): number {
   return objects.some((object) => object.type === "shape")
@@ -147,6 +147,10 @@ export type ShapeStyle = {
   strokeWidthPt: number;
   fillColor: string | null;
   opacity: number;
+  /** Solid when absent, which is how every shape written before patterns reads. */
+  pattern?: StrokePattern;
+  /** Gap factor for the pattern (ADR 0023); 1 when absent. */
+  patternSpacing?: number;
 };
 
 export type PageObject =
@@ -195,6 +199,8 @@ export type InkLayer = {
   strokes: Stroke[];
 };
 
+export type StrokePattern = "solid" | "dashed" | "dotted";
+
 export type Stroke = {
   id: string;
   /** Shared visual order with movable objects; absent legacy values paint above them. */
@@ -202,6 +208,10 @@ export type Stroke = {
   tool: "pen" | "highlighter";
   color: string;
   widthPt: number;
+  /** Resolved when the mark is made. Missing legacy values are solid. */
+  pattern?: StrokePattern;
+  /** Gap factor for the pattern (ADR 0023); 1 when absent. */
+  patternSpacing?: number;
   /**
    * Whether this stroke's width followed stylus pressure. Resolved from the nib at draw time and
    * then stored, never inferred from `tool` — nibs differ, and export must not re-decide.

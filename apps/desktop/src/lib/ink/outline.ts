@@ -65,7 +65,7 @@ function quantize(value: number): number {
   return Math.round(value * 1000) / 1000;
 }
 
-function widthAt(point: OutlinePoint, options: OutlineOptions): number {
+export function outlineWidthAt(point: OutlinePoint, options: OutlineOptions): number {
   if (!options.pressure) return options.widthPt;
   const clamped = Math.min(1, Math.max(0, point.pressure));
   return options.widthPt * (MIN_PRESSURE_SCALE + (1 - MIN_PRESSURE_SCALE) * clamped);
@@ -91,7 +91,7 @@ export function outlinePoints(
   }
 
   if (path.length === 1) {
-    const half = widthAt(path[0], options) / 2;
+    const half = outlineWidthAt(path[0], options) / 2;
     const { x, y } = path[0];
     return [
       { x: quantize(x - half), y: quantize(y - half) },
@@ -144,7 +144,7 @@ export function outlinePoints(
       dy = heading.y;
     }
 
-    let half = widthAt(path[index], options) / 2;
+    let half = outlineWidthAt(path[index], options) / 2;
     if (taperLength > 0) {
       const fromStart = cumulative[index];
       const fromEnd = total - cumulative[index];

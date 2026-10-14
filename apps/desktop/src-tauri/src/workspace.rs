@@ -169,6 +169,7 @@ pub fn resume_notebook_session(
 pub fn record_notebook_session(
     app: tauri::AppHandle,
     roots: tauri::State<'_, AllowedRoots>,
+    histories: tauri::State<'_, crate::notebook::NotebookHistories>,
     open_roots: Vec<String>,
     active_root: Option<String>,
 ) -> Result<(), String> {
@@ -176,12 +177,15 @@ pub fn record_notebook_session(
         return Err("at most 30 notebook tabs can be restored".to_owned());
     }
     let mut canonical_roots = Vec::new();
+    let mut retained_roots = HashSet::new();
     for root in open_roots {
-        let canonical = path_string(ensure_allowed(&roots, &root)?)?;
+        let canonical_path = ensure_allowed(&roots, &root)?;
+        let canonical = path_string(canonical_path.clone())?;
         if !is_recent_notebook(&app, &canonical)? {
             return Err("an open notebook is not in recents".to_owned());
         }
         if !canonical_roots.contains(&canonical) {
+            retained_roots.insert(canonical_path);
             canonical_roots.push(canonical);
         }
     }
@@ -195,7 +199,8 @@ pub fn record_notebook_session(
         }
         None => None,
     };
-    record_recent_session(&app, canonical_roots, active_root)
+    record_recent_session(&app, canonical_roots, active_root)?;
+    histories.retain_roots(&retained_roots)
 }
 
 /// Record a successful open in the recents list.
@@ -229,10 +234,12 @@ pub fn record_notebook_page(
 pub fn close_notebook_session(
     app: tauri::AppHandle,
     roots: tauri::State<'_, AllowedRoots>,
+    histories: tauri::State<'_, crate::notebook::NotebookHistories>,
     root: String,
 ) -> Result<(), String> {
     let canonical = ensure_allowed(&roots, &root)?;
-    clear_active_recent(&app, &path_string(canonical)?)
+    clear_active_recent(&app, &path_string(canonical.clone())?)?;
+    histories.forget_root(&canonical)
 }
 
 #[tauri::command]

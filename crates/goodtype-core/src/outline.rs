@@ -56,7 +56,7 @@ const TAPER_MAX_NIB_WIDTHS: f64 = 6.0;
 /// Deliberately mimics JavaScript's `Math.round` (half toward positive infinity) rather than
 /// using `f64::round` (half away from zero), because the two disagree on negative halves and the
 /// mirrored implementations must produce identical numbers.
-fn quantize(value: f64) -> f64 {
+pub(crate) fn quantize(value: f64) -> f64 {
     (value * 1000.0 + 0.5).floor() / 1000.0
 }
 
@@ -66,7 +66,7 @@ fn span(a: OutlinePoint, b: OutlinePoint) -> f64 {
     (a.x - b.x).hypot(a.y - b.y)
 }
 
-fn width_at(point: &OutlinePoint, options: &OutlineOptions) -> f64 {
+pub(crate) fn width_at(point: &OutlinePoint, options: &OutlineOptions) -> f64 {
     if !options.pressure {
         return options.width_pt;
     }

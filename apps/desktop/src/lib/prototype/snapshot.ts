@@ -203,9 +203,8 @@ export function projectSnapshot(input: Projection): NotebookSnapshot {
     return order === undefined ? object : { ...object, readingOrder: order };
   });
 
-  // Never below what this page needs, never above what the notebook already is: a shape raises
-  // the notebook to version 2, and everything else leaves an older notebook exactly as it found
-  // it. `commit_notebook` applies the same rule and has the last word.
+  // Never below what this page's objects need or what the notebook already records. Rust has the
+  // last word and upgrades a confirmed legacy page to schema 3 when it writes binary ink.
   const schemaVersion = Math.max(
     input.manifest.schemaVersion ?? MIN_SUPPORTED_SCHEMA_VERSION,
     requiredSchemaVersion(objects),

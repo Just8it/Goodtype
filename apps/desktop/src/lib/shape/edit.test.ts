@@ -139,4 +139,31 @@ describe("spline editing", () => {
       (removeSplineNode(closed, 0).geometry as Extract<ShapeGeometry, { kind: "spline" }>).nodes,
     ).toHaveLength(3);
   });
+
+  it("lets either end of a line move freely, and snaps its angle on the page with Shift", () => {
+    const line = {
+      id: "line",
+      x: 0,
+      y: 0,
+      rotation: 0,
+      scale: 1,
+      zIndex: 1,
+      readingOrder: 0,
+      geometry: { kind: "line" as const, start: { x: 0, y: 0 }, end: { x: 100, y: 0 } },
+      style: { strokeColor: "#000000", strokeWidthPt: 1, fillColor: null, opacity: 1 },
+    };
+    const free = moveShapeAnchor(line, "line-start", { x: 3, y: 7 });
+    expect(free.geometry).toMatchObject({ start: { x: 3, y: 7 }, end: { x: 100, y: 0 } });
+
+    // Dragged to about 40°, Shift lands it on 45° and keeps the length.
+    const snapped = moveShapeAnchor(line, "line-end", { x: -23.4, y: 64.3 }, true);
+    const end = (snapped.geometry as { end: { x: number; y: number } }).end;
+    expect((Math.atan2(end.y, end.x) * 180) / Math.PI).toBeCloseTo(45);
+    expect(Math.hypot(end.x, end.y)).toBeCloseTo(Math.hypot(76.6, 64.3));
+
+    // On a line rotated by 10°, the snap is to page angles, so local 35° reads as 45°.
+    const rotated = moveShapeAnchor({ ...line, rotation: 10 }, "line-end", { x: -23.4, y: 64.3 }, true);
+    const local = (rotated.geometry as { end: { x: number; y: number } }).end;
+    expect((Math.atan2(local.y, local.x) * 180) / Math.PI + 10).toBeCloseTo(45);
+  });
 });

@@ -7,7 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{nonnegative, positive, valid_hex_color, valid_page_dimension};
+use crate::{StrokePattern, nonnegative, positive, valid_hex_color, valid_page_dimension};
 
 /// A fitted curve should describe intent, not preserve every sampled pen event.
 pub const MAX_SPLINE_NODES: usize = 256;
@@ -119,6 +119,16 @@ pub struct ShapeStyle {
     pub stroke_width_pt: f64,
     pub fill_color: Option<String>,
     pub opacity: f64,
+    /// Outline pattern (ADR 0022). Omitted when solid, so solid shapes serialize exactly as they
+    /// did before patterns existed and older shapes read as solid.
+    #[serde(default, skip_serializing_if = "StrokePattern::is_solid")]
+    pub pattern: StrokePattern,
+    /// Gap factor for the pattern (ADR 0023), omitted at 1.
+    #[serde(
+        default = "crate::unit_spacing",
+        skip_serializing_if = "crate::is_unit_spacing"
+    )]
+    pub pattern_spacing: f64,
 }
 
 impl ShapeStyle {
@@ -136,6 +146,9 @@ impl ShapeStyle {
         }
         if !self.opacity.is_finite() || !(0.0..=1.0).contains(&self.opacity) {
             return Err("shape opacity must be between zero and one");
+        }
+        if !crate::valid_pattern_spacing(self.pattern_spacing) {
+            return Err("shape pattern spacing is out of range");
         }
         Ok(())
     }
@@ -197,8 +210,44 @@ mod tests {
             stroke_width_pt: 1.6,
             fill_color: None,
             opacity: 1.0,
+            pattern: StrokePattern::Solid,
+            pattern_spacing: 1.0,
         };
         assert!(geometry.validate().is_ok());
         assert!(style.validate().is_ok());
+    }
+
+    #[test]
+    fn shape_patterns_round_trip_and_solid_stays_unwritten() {
+        let old =
+            r##"{"strokeColor":"#16212b","strokeWidthPt":1.6,"fillColor":null,"opacity":1.0}"##;
+        let solid: ShapeStyle = serde_json::from_str(old).unwrap();
+        assert_eq!(solid.pattern, StrokePattern::Solid);
+        assert!(!serde_json::to_string(&solid).unwrap().contains("pattern"));
+
+        let dotted = ShapeStyle {
+            pattern: StrokePattern::Dotted,
+            ..solid
+        };
+        let json = serde_json::to_string(&dotted).unwrap();
+        assert!(json.contains(r#""pattern":"dotted""#));
+        assert_eq!(serde_json::from_str::<ShapeStyle>(&json).unwrap(), dotted);
+        assert!(!json.contains("patternSpacing"));
+
+        let spaced = ShapeStyle {
+            pattern_spacing: 2.0,
+            ..dotted.clone()
+        };
+        assert!(
+            serde_json::to_string(&spaced)
+                .unwrap()
+                .contains(r#""patternSpacing":2.0"#)
+        );
+        assert!(spaced.validate().is_ok());
+        let out_of_range = ShapeStyle {
+            pattern_spacing: 5.0,
+            ..dotted
+        };
+        assert!(out_of_range.validate().is_err());
     }
 }

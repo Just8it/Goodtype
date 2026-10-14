@@ -67,6 +67,50 @@ export function dampedVelocity(velocity: Point, elapsedMs: number, retention: nu
 }
 
 /** Keep a page-sized raster under its memory budget without exceeding device resolution. */
+/**
+ * Zoom rounded to half-octave steps (…, 0.71, 1, 1.41, 2, 2.83, …).
+ *
+ * For work that depends on zoom but need not follow every step of a pinch: re-rasterising a PDF
+ * or rebuilding hairline ink at each of the dozens of intermediate zooms a gesture passes through
+ * is what made zooming stutter. Rounding up means a tier never under-resolves the zoom it covers.
+ */
+export function zoomTier(zoom: number): number {
+  const safe = Math.max(validZoom(zoom), MIN_ZOOM);
+  return 2 ** (Math.ceil(Math.log2(safe) * 2 - 1e-9) / 2);
+}
+
+export type PageRegion = { x: number; y: number; width: number; height: number };
+
+/**
+ * The part of a zoomed page that is on screen, in page points, padded by `marginPt` and kept on
+ * the sheet. `pageScreen` is the page's rendered box and `view` the visible window, both in
+ * screen pixels. A raster sized to this region at zoom × device density stays about one screen
+ * of pixels at any zoom, where one covering the whole page would have to grow with zoom squared.
+ * Null when no part of the page is visible.
+ */
+export function visiblePageRegion(
+  pageScreen: { left: number; top: number; width: number; height: number },
+  view: { left: number; top: number; width: number; height: number },
+  page: Size,
+  marginPt = 0,
+): PageRegion | null {
+  const zoom = pageScreen.width / Math.max(page.width, 1);
+  if (!(zoom > 0)) return null;
+  const left = Math.max(pageScreen.left, view.left);
+  const top = Math.max(pageScreen.top, view.top);
+  const right = Math.min(pageScreen.left + pageScreen.width, view.left + view.width);
+  const bottom = Math.min(pageScreen.top + pageScreen.height, view.top + view.height);
+  if (right <= left || bottom <= top) return null;
+  const x = Math.max((left - pageScreen.left) / zoom - marginPt, 0);
+  const y = Math.max((top - pageScreen.top) / zoom - marginPt, 0);
+  return {
+    x,
+    y,
+    width: Math.min((right - pageScreen.left) / zoom + marginPt, page.width) - x,
+    height: Math.min((bottom - pageScreen.top) / zoom + marginPt, page.height) - y,
+  };
+}
+
 export function boundedRasterScale(size: Size, density: number, maxPixels: number): number {
   return Math.min(density, Math.sqrt(maxPixels / (Math.max(size.width, 1) * Math.max(size.height, 1))));
 }

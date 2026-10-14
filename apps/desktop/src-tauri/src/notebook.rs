@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
@@ -19,6 +19,22 @@ use crate::workspace::{AllowedRoots, ensure_allowed};
 // ponytail: one global lock is sufficient for one notebook window; split by root when multiple
 // independent notebook windows need concurrent storage throughput.
 pub struct NotebookHistories(Arc<Mutex<HistoryStore>>);
+
+impl NotebookHistories {
+    pub(crate) fn forget_root(&self, root: &Path) -> Result<(), String> {
+        let mut store = self.0.lock().map_err(message)?;
+        store.pages.retain(|(known_root, _), _| known_root != root);
+        store.structure.remove(root);
+        Ok(())
+    }
+
+    pub(crate) fn retain_roots(&self, roots: &HashSet<PathBuf>) -> Result<(), String> {
+        let mut store = self.0.lock().map_err(message)?;
+        store.pages.retain(|(root, _), _| roots.contains(root));
+        store.structure.retain(|root, _| roots.contains(root));
+        Ok(())
+    }
+}
 
 #[derive(Default)]
 struct HistoryStore {
@@ -537,8 +553,8 @@ pub async fn restore_recovery_candidate(
         let page_id = candidates
             .iter()
             .find(|candidate| candidate.file_name == file_name)
-            .map(|candidate| candidate.page_id.clone())
-            .ok_or_else(|| "unknown recovery candidate".to_owned())?;
+            .and_then(|candidate| candidate.page_id.clone())
+            .ok_or_else(|| "recovery candidate is unknown or unreadable".to_owned())?;
         let history = store
             .pages
             .entry((root.to_path_buf(), page_id))
@@ -609,5 +625,33 @@ mod tests {
         });
 
         assert_eq!(peak.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn closed_notebook_histories_are_released() {
+        let histories = NotebookHistories::default();
+        let kept = PathBuf::from("kept");
+        let closed = PathBuf::from("closed");
+        with_notebook_lock(&histories, |store| {
+            store
+                .pages
+                .insert((kept.clone(), "page-1".into()), NotebookHistory::default());
+            store.pages.insert(
+                (closed.clone(), "page-1".into()),
+                NotebookHistory::default(),
+            );
+            store
+                .structure
+                .insert(closed.clone(), NotebookStructureHistory::default());
+            Ok(())
+        })
+        .unwrap();
+
+        histories
+            .retain_roots(&HashSet::from([kept.clone()]))
+            .unwrap();
+        let store = histories.0.lock().unwrap();
+        assert!(store.pages.keys().all(|(root, _)| root == &kept));
+        assert!(store.structure.is_empty());
     }
 }

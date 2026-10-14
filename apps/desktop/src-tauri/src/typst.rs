@@ -78,7 +78,9 @@ pub async fn complete_typst(
     let tinymist = tinymist.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let (source, prefix) = editor_source(source);
-        let cursor = cursor + prefix;
+        let cursor = cursor
+            .checked_add(prefix)
+            .ok_or("Typst cursor offset overflow")?;
         if let Ok(mut items) = tinymist.complete(&root, &source, cursor, explicit) {
             for item in &mut items {
                 item.offset = item.offset.saturating_sub(prefix);
@@ -111,7 +113,9 @@ pub async fn hover_typst(
     let tinymist = tinymist.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let (source, prefix) = editor_source(source);
-        let cursor = cursor + prefix;
+        let cursor = cursor
+            .checked_add(prefix)
+            .ok_or("Typst cursor offset overflow")?;
         if let Ok(result) = tinymist.hover(&root, &source, cursor) {
             return Ok(result);
         }

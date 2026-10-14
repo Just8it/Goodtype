@@ -18,15 +18,40 @@ export const DEFAULT_PRESSURE_CALIBRATION: PressureCalibration = {
 
 export type PointerRole = "draw" | "shape" | "erase" | "lasso" | "select" | "ignore";
 export type InkTool = "pen" | "highlighter" | "shape" | "eraser" | "lasso" | "select";
+/** What the stylus barrel button does. The eraser end of the pen always erases. */
+export type PenSideButton = "eraser" | "lasso" | "none";
+
 export type PointerMapping = {
   eraserButton: number;
   eraserButtonsMask: number;
+  /** Pointer Events report the barrel button as button 2 and buttons bit 2. */
+  sideButton: PenSideButton;
+  /** Whether a single finger takes the active tool instead of panning. */
+  fingerDraws: boolean;
 };
 
 export const DEFAULT_POINTER_MAPPING: PointerMapping = {
   eraserButton: 5,
   eraserButtonsMask: 32,
+  sideButton: "eraser",
+  fingerDraws: false,
 };
+
+const BARREL_BUTTON = 2;
+const BARREL_BUTTONS_MASK = 2;
+const CONTACT_BUTTONS_MASK = 1;
+
+/**
+ * Pressing the barrel button while the pen only hovers already counts as a press, so the button
+ * alone must not start anything; it acts once the tip is on the glass as well.
+ */
+export function barrelInContact(pointer: Pick<PointerLike, "pointerType" | "buttons">): boolean {
+  return (
+    pointer.pointerType === "pen" &&
+    (pointer.buttons & BARREL_BUTTONS_MASK) !== 0 &&
+    (pointer.buttons & CONTACT_BUTTONS_MASK) !== 0
+  );
+}
 
 export type PointerLike = {
   pointerType: string;
@@ -40,6 +65,30 @@ export type PointerLike = {
   tiltY: number;
 };
 
+/**
+ * Whether this pointer would erase if it touched down now, including while it only hovers.
+ *
+ * The eraser circle follows this rather than the selected tool: the pen's eraser end and a side
+ * button set to Eraser erase while the pen tool stays selected, and the writer still needs to see
+ * where the eraser will land. A hovering pen reports the eraser end and a held barrel button in
+ * `buttons` even with the tip off the glass.
+ */
+export function eraserInHand(
+  pointer: Pick<PointerLike, "pointerType" | "button" | "buttons">,
+  tool: InkTool,
+  mapping: PointerMapping = DEFAULT_POINTER_MAPPING,
+): boolean {
+  if (pointer.pointerType === "touch") return tool === "eraser" && mapping.fingerDraws;
+  if (tool === "eraser") return true;
+  if (pointer.pointerType !== "pen") return false;
+  if (pointer.button === mapping.eraserButton || (pointer.buttons & mapping.eraserButtonsMask) !== 0) {
+    return true;
+  }
+  const barrelHeld =
+    pointer.button === BARREL_BUTTON || (pointer.buttons & BARREL_BUTTONS_MASK) !== 0;
+  return barrelHeld && mapping.sideButton === "eraser";
+}
+
 export function pointerRole(
   pointer: Pick<PointerLike, "pointerType" | "button" | "buttons">,
   tool: InkTool,
@@ -48,20 +97,29 @@ export function pointerRole(
   // Touch belongs to viewport navigation, and that has to be decided before anything else: an
   // eraser held while a finger rests on the page must still pan, not erase. The shape tool is
   // the single exception, because it promises direct finger construction and needs no second
-  // finger or hidden modifier to mean it.
-  if (pointer.pointerType === "touch") return tool === "shape" ? "shape" : "ignore";
+  // finger or hidden modifier to mean it. Finger drawing, when the writer asks for it, hands one
+  // finger the tool in hand; the workspace still claims a second finger for pan and pinch.
+  if (pointer.pointerType === "touch" && tool !== "shape" && !mapping.fingerDraws) return "ignore";
+  const pen = pointer.pointerType === "pen";
+  const barrelHeld =
+    pen &&
+    (pointer.button === BARREL_BUTTON || (pointer.buttons & BARREL_BUTTONS_MASK) !== 0);
+  if (barrelHeld && (pointer.buttons & CONTACT_BUTTONS_MASK) === 0) return "ignore";
+  const barrel = barrelHeld && mapping.sideButton !== "none";
   if (
     tool === "eraser" ||
-    (pointer.pointerType === "pen" &&
+    (pen &&
       (pointer.button === mapping.eraserButton ||
-        (pointer.buttons & mapping.eraserButtonsMask) !== 0))
+        (pointer.buttons & mapping.eraserButtonsMask) !== 0)) ||
+    (barrel && mapping.sideButton === "eraser")
   ) {
     return "erase";
   }
+  if (barrel && mapping.sideButton === "lasso") return "lasso";
   if (tool === "shape") return "shape";
   if (tool === "lasso") return "lasso";
   if (tool === "select") return "select";
-  if (pointer.pointerType === "pen") return "draw";
+  if (pen || pointer.pointerType === "touch") return "draw";
   if (tool === "pen" || tool === "highlighter") return "draw";
   return "select";
 }

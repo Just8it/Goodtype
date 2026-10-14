@@ -1,9 +1,19 @@
 import type { Point } from "../geometry/coordinates";
 import type { ShapeStyle, StrokePoint } from "../model";
-import { straightenStroke } from "../ink/straighten";
-import { shapeFromDrag, splineFromPoints, type ShapeDraft } from "./geometry";
+import { DEFAULT_STRAIGHTEN, straightenStroke } from "../ink/straighten";
+import {
+  distanceToEllipse,
+  shapeFromDrag,
+  splineFromPoints,
+  type ShapeDraft,
+} from "./geometry";
 
 export type Recognition = { draft: ShapeDraft; confidence: number };
+
+export type RecognitionOptions = {
+  /** Round a recognised line to a multiple of this angle. Zero, the default, keeps what was drawn. */
+  snapDegrees?: number;
+};
 
 const MIN_RECOGNITION_SIZE_PT = 24;
 
@@ -67,6 +77,7 @@ const SHAPE_WEIGHT = 0.08;
 export function recognizeHeldShape(
   samples: readonly StrokePoint[],
   style: ShapeStyle,
+  options: RecognitionOptions = {},
 ): Recognition | null {
   const points = deduplicate(samples.map(({ x, y }) => ({ x, y })));
   if (points.length < 3) return null;
@@ -74,7 +85,14 @@ export function recognizeHeldShape(
   const diagonal = Math.hypot(bounds.width, bounds.height);
   if (diagonal < MIN_RECOGNITION_SIZE_PT) return null;
 
-  const snapped = straightenStroke(samples.slice());
+  // Straightening decides whether this was a line and where its ends are; it is deliberately not
+  // allowed to decide the angle. Rounding to the nearest fifteen degrees moves the far end away
+  // from the pointer the line was drawn to, which is visible and was never asked for — so the
+  // writer asks for it, through the same setting that squares a rectangle.
+  const snapped = straightenStroke(samples.slice(), {
+    ...DEFAULT_STRAIGHTEN,
+    snapDegrees: options.snapDegrees ?? 0,
+  });
   if (snapped.length === 2) {
     const draft = shapeFromDrag("line", snapped[0], snapped[1], style);
     return draft ? { draft, confidence: 0.98 } : null;
@@ -368,16 +386,13 @@ function bestEllipse(points: Point[], diagonal: number): OrientedFit | null {
     if (rx < 4 || ry < 4) continue;
     const cx = (fit.left + fit.right) / 2;
     const cy = (fit.top + fit.bottom) / 2;
+    // Measured as a distance on the page, the same kind of thing the rectangle reports, so the
+    // two can be compared. The eraser measures against an ellipse the same way.
     const error =
-      fit.rotated.reduce((sum, point) => {
-        const dx = (point.x - cx) / rx;
-        const dy = (point.y - cy) / ry;
-        const radius = Math.hypot(dx, dy);
-        // One Newton step from the normalised residual back to a distance on the page, so this
-        // number is the same kind of thing the rectangle reports and the two can be compared.
-        const gradient = Math.hypot(dx / rx, dy / ry);
-        return sum + (gradient > 1e-9 ? Math.abs(radius - 1) / gradient : Math.min(rx, ry));
-      }, 0) /
+      fit.rotated.reduce(
+        (sum, point) => sum + distanceToEllipse(point, { x: cx, y: cy }, rx, ry),
+        0,
+      ) /
       points.length /
       diagonal;
     const candidate = toFit(fit, angle, error);

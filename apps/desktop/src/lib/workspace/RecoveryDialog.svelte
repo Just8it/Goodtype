@@ -32,11 +32,17 @@
       {#each candidates as candidate (candidate.fileName)}
         <li>
           <div class="summary">
-            <strong>Page {candidate.pageId}</strong>
-            <span>interrupted at revision {candidate.candidateRevision}; confirmed revision {candidate.confirmedRevision}</span>
+            {#if candidate.error}
+              <strong>Unreadable recovered work</strong>
+              <span>{candidate.fileName}</span>
+              <span>{candidate.error}</span>
+            {:else}
+              <strong>Page {candidate.pageId}</strong>
+              <span>interrupted at revision {candidate.candidateRevision}; confirmed revision {candidate.confirmedRevision}</span>
+            {/if}
           </div>
           <div class="actions">
-            <button class="primary" type="button" disabled={busy} onclick={() => onRestore(candidate.fileName)}>
+            <button class="primary" type="button" disabled={busy || !!candidate.error} onclick={() => onRestore(candidate.fileName)}>
               Restore
             </button>
             <button type="button" disabled={busy} onclick={() => onDiscard(candidate.fileName)}>
@@ -109,11 +115,13 @@
   .summary {
     display: grid;
     gap: 2px;
+    min-width: 0;
+    overflow-wrap: anywhere;
     font-size: 12.5px;
   }
 
   .summary span {
-    color: #6a727c;
+    color: #aeb5be;
     font-size: 11.5px;
   }
 

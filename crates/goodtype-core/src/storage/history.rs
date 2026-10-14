@@ -9,14 +9,25 @@ use std::path::Path;
 use serde::Serialize;
 
 use super::{
-    HISTORY_LIMIT, NotebookSnapshot, StorageError, invalid_error, pages::*, paths::*,
-    validate::raise_schema_version, write::*,
+    HISTORY_BYTES_LIMIT, HISTORY_LIMIT, NotebookSnapshot, StorageError, invalid_error,
+    pages::*,
+    paths::*,
+    validate::{raise_schema_version, validate_page_bundle_versions},
+    write::*,
 };
+
+#[derive(Debug)]
+struct HistoryEntry {
+    snapshot: NotebookSnapshot,
+    bytes: usize,
+}
 
 #[derive(Debug, Default)]
 pub struct NotebookHistory {
-    undo: Vec<NotebookSnapshot>,
-    redo: Vec<NotebookSnapshot>,
+    undo: Vec<HistoryEntry>,
+    redo: Vec<HistoryEntry>,
+    undo_bytes: usize,
+    redo_bytes: usize,
     current_page_id: Option<String>,
     current_revision: Option<u64>,
     current_fingerprint: Option<u64>,
@@ -45,8 +56,13 @@ impl NotebookHistory {
         saved: &NotebookSnapshot,
         fingerprint: u64,
     ) {
-        push_history(&mut self.undo, previous.without_assets());
+        push_history(
+            &mut self.undo,
+            &mut self.undo_bytes,
+            previous.without_assets(),
+        );
         self.redo.clear();
+        self.redo_bytes = 0;
         self.record(saved, fingerprint);
     }
 
@@ -55,6 +71,8 @@ impl NotebookHistory {
     fn forget(&mut self) {
         self.undo.clear();
         self.redo.clear();
+        self.undo_bytes = 0;
+        self.redo_bytes = 0;
     }
 
     fn describes(&self, snapshot: &NotebookSnapshot, fingerprint: u64) -> bool {
@@ -126,6 +144,7 @@ pub fn commit_notebook(
     let root = canonical_root(selected_root)?;
     let current = open_page(selected_root, &snapshot.page.id)?;
     ensure_current(&root, history, &current, snapshot.page.revision)?;
+    validate_page_bundle_versions(&snapshot)?;
     // A preloaded neighbouring page may carry a timestamp from before another page saved.
     // Keep the current manifest and only advance its bookkeeping time.
     let requested_modified_at = snapshot.manifest.modified_at.clone();
@@ -175,20 +194,33 @@ fn restore_notebook(
         &current,
         history.current_revision.unwrap_or(current.page.revision),
     )?;
-    let source = if undo { &history.undo } else { &history.redo };
-    let mut target = source
-        .last()
-        .cloned()
-        .ok_or_else(|| StorageError::InvalidNotebook("nothing to undo or redo".into()))?;
+    let mut target = if undo {
+        history.undo.last()
+    } else {
+        history.redo.last()
+    }
+    .map(|entry| entry.snapshot.clone())
+    .ok_or_else(|| StorageError::InvalidNotebook("nothing to undo or redo".into()))?;
+    // Undo restores this page's content. Page ordering and the notebook-wide schema maximum may
+    // have advanced since the entry was retained and must never be resurrected from old history.
+    target.manifest = current.manifest.clone();
     target.page.revision = current.page.revision + 1;
     let (restored, fingerprint) = save_and_return(&root, &current, &target)?;
 
     if undo {
-        history.undo.pop();
-        push_history(&mut history.redo, current.without_assets());
+        history.undo_bytes -= history.undo.pop().expect("checked undo entry").bytes;
+        push_history(
+            &mut history.redo,
+            &mut history.redo_bytes,
+            current.without_assets(),
+        );
     } else {
-        history.redo.pop();
-        push_history(&mut history.undo, current.without_assets());
+        history.redo_bytes -= history.redo.pop().expect("checked redo entry").bytes;
+        push_history(
+            &mut history.undo,
+            &mut history.undo_bytes,
+            current.without_assets(),
+        );
     }
     history.record(&restored, fingerprint);
     Ok(history_result(restored, history))
@@ -229,11 +261,48 @@ fn ensure_current(
     )))
 }
 
-pub(crate) fn push_history(stack: &mut Vec<NotebookSnapshot>, snapshot: NotebookSnapshot) {
-    if stack.len() == HISTORY_LIMIT {
-        stack.remove(0);
+fn push_history(stack: &mut Vec<HistoryEntry>, total: &mut usize, snapshot: NotebookSnapshot) {
+    push_history_bounded(stack, total, snapshot, HISTORY_BYTES_LIMIT);
+}
+
+fn push_history_bounded(
+    stack: &mut Vec<HistoryEntry>,
+    total: &mut usize,
+    snapshot: NotebookSnapshot,
+    byte_limit: usize,
+) {
+    // This is a bounded payload proxy, not a claim about allocator or `String` capacity. Counting
+    // encoded ink avoids turning every retained sample into JSON merely to enforce the budget.
+    let Ok(bytes) = retained_payload_bytes(&snapshot) else {
+        return;
+    };
+    if bytes > byte_limit {
+        return;
     }
-    stack.push(snapshot);
+    while stack.len() == HISTORY_LIMIT || *total + bytes > byte_limit {
+        *total -= stack.remove(0).bytes;
+    }
+    *total += bytes;
+    stack.push(HistoryEntry { snapshot, bytes });
+}
+
+fn retained_payload_bytes(snapshot: &NotebookSnapshot) -> Result<usize, StorageError> {
+    let mut bytes = serde_json::to_vec(&snapshot.manifest)?.len();
+    bytes = bytes
+        .checked_add(serde_json::to_vec(&snapshot.page)?.len())
+        .ok_or_else(|| invalid_error("history payload size overflow"))?;
+    for file in snapshot.blocks.iter().chain(&snapshot.assets) {
+        bytes = bytes
+            .checked_add(file.path.len())
+            .and_then(|value| value.checked_add(file.bytes.len()))
+            .ok_or_else(|| invalid_error("history payload size overflow"))?;
+    }
+    for layer in &snapshot.ink_layers {
+        bytes = bytes
+            .checked_add(crate::ink_codec::encoded_len(layer)?)
+            .ok_or_else(|| invalid_error("history payload size overflow"))?;
+    }
+    Ok(bytes)
 }
 
 pub(crate) fn history_result(
@@ -249,11 +318,24 @@ pub(crate) fn history_result(
 
 #[cfg(test)]
 mod tests {
+    use super::push_history_bounded;
     use crate::{
         PageObject, layout,
         storage::{fixtures::*, *},
     };
     use std::fs;
+
+    #[test]
+    fn history_evicts_old_snapshots_at_its_byte_budget() {
+        let value = snapshot().without_assets();
+        let one_snapshot = super::retained_payload_bytes(&value).unwrap();
+        let mut stack = Vec::new();
+        let mut bytes = 0;
+        push_history_bounded(&mut stack, &mut bytes, value.clone(), one_snapshot + 1);
+        push_history_bounded(&mut stack, &mut bytes, value, one_snapshot + 1);
+        assert_eq!(stack.len(), 1);
+        assert!(bytes <= one_snapshot + 1);
+    }
 
     #[test]
     fn committed_change_undoes_and_redoes_with_monotonic_revisions() {
@@ -318,6 +400,33 @@ mod tests {
     }
 
     #[test]
+    fn commit_rejects_invalid_submitted_versions_before_normalizing() {
+        let cases = [
+            (0, 0),
+            (crate::SCHEMA_VERSION + 1, crate::SCHEMA_VERSION + 1),
+            (3, 2),
+        ];
+        for (page_version, layer_version) in cases {
+            let temporary = tempfile::tempdir().unwrap();
+            let root = temporary.path().join("notebook");
+            create_notebook(&root, &snapshot()).unwrap();
+            let ink_path = root.join("ink/page-001-layer-001.ink");
+            let original_ink = fs::read(&ink_path).unwrap();
+            let mut history = NotebookHistory::default();
+            let mut candidate = observe_notebook(&root, &mut history).unwrap();
+            candidate.page.schema_version = page_version;
+            candidate.ink_layers[0].schema_version = layer_version;
+
+            assert!(matches!(
+                commit_notebook(&root, &mut history, candidate),
+                Err(StorageError::InvalidNotebook(_))
+            ));
+            assert_eq!(open_notebook(&root).unwrap().page.revision, 1);
+            assert_eq!(fs::read(&ink_path).unwrap(), original_ink);
+        }
+    }
+
+    #[test]
     fn different_pages_can_commit_after_the_shared_modified_time_changes() {
         let temporary = tempfile::tempdir().unwrap();
         let notebook_root = temporary.path().join("notebook");
@@ -350,6 +459,52 @@ mod tests {
             committed.snapshot.manifest.modified_at,
             "2026-07-30T10:01:00Z"
         );
+    }
+
+    #[test]
+    fn observed_legacy_sibling_can_commit_after_another_page_migrates() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("notebook");
+        create_notebook(&root, &legacy_snapshot()).unwrap();
+        create_page(
+            &root,
+            "2026-09-10T08:00:00Z",
+            &PagePosition::Last,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let mut first_history = NotebookHistory::default();
+        let mut second_history = NotebookHistory::default();
+        let first = observe_page(&root, "page-001", &mut first_history).unwrap();
+        let second = observe_page(&root, "page-002", &mut second_history).unwrap();
+        commit_notebook(&root, &mut first_history, first).unwrap();
+        let second = commit_notebook(&root, &mut second_history, second)
+            .unwrap()
+            .snapshot;
+
+        assert_eq!(second.manifest.schema_version, crate::SCHEMA_VERSION);
+        assert_eq!(second.page.schema_version, crate::SCHEMA_VERSION);
+        assert!(second.page.ink_layers[0].path.ends_with(".ink"));
+    }
+
+    #[test]
+    fn undo_after_legacy_migration_keeps_schema_and_binary_reference() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("notebook");
+        create_notebook(&root, &legacy_snapshot()).unwrap();
+        let mut history = NotebookHistory::default();
+        let mut candidate = observe_notebook(&root, &mut history).unwrap();
+        candidate.ink_layers[0].strokes[0].points[0].x = 123.0;
+        commit_notebook(&root, &mut history, candidate).unwrap();
+
+        let undone = undo_notebook(&root, &mut history).unwrap().snapshot;
+        assert_eq!(undone.manifest.schema_version, crate::SCHEMA_VERSION);
+        assert_eq!(undone.page.schema_version, crate::SCHEMA_VERSION);
+        assert!(undone.page.ink_layers[0].path.ends_with(".ink"));
+        assert_eq!(undone.ink_layers[0].strokes[0].points[0].x, 80.0);
+        assert!(root.join("ink/page-001-layer-001.json").is_file());
     }
 
     #[test]
@@ -408,7 +563,7 @@ mod tests {
             format!("stroke-{:06}", STROKES - 1)
         );
 
-        let written = fs::metadata(notebook_root.join("ink/page-001-layer-001.json"))
+        let written = fs::metadata(notebook_root.join("ink/page-001-layer-001.ink"))
             .unwrap()
             .len();
         assert!(
