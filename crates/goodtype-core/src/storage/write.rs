@@ -4,7 +4,11 @@
 //! whether the bytes came from disk or from the write that just happened, and the two answers
 //! have to be equal — otherwise every later commit reports a change that never occurred.
 
-use std::{collections::HashMap, fs, path::Path};
+use std::{
+    collections::{HashMap, HashSet},
+    fs,
+    path::Path,
+};
 
 use crate::{SourceRole, layout};
 
@@ -100,14 +104,24 @@ impl<'a> FileSet<'a> {
     }
 }
 
-/// `modifiedAt` records Goodtype's own saves. It is shared by every page, so hashing it would
-/// make saving one page look like an outside edit on every other loaded page.
+/// `modifiedAt` and the manifest schema maximum are Goodtype-owned notebook bookkeeping shared by
+/// every page. Hashing either would make saving or migrating one page look like an outside edit on
+/// every other loaded page. Page schemas and ink references remain fingerprinted in each page
+/// file, while every other manifest field remains protected here.
 fn fingerprint_file(relative: &str, bytes: Vec<u8>) -> Result<Vec<u8>, StorageError> {
     if relative != layout::MANIFEST {
         return Ok(bytes);
     }
-    let mut manifest: crate::NotebookManifest = serde_json::from_slice(&bytes)?;
+    let manifest: crate::NotebookManifest = serde_json::from_slice(&bytes)?;
+    manifest_fingerprint_bytes(&manifest)
+}
+
+pub(crate) fn manifest_fingerprint_bytes(
+    manifest: &crate::NotebookManifest,
+) -> Result<Vec<u8>, StorageError> {
+    let mut manifest = manifest.clone();
     manifest.modified_at.clear();
+    manifest.schema_version = 0;
     Ok(serde_json::to_vec(&manifest)?)
 }
 
@@ -127,7 +141,23 @@ pub(crate) fn save_and_return(
     previous: &NotebookSnapshot,
     candidate: &NotebookSnapshot,
 ) -> Result<(NotebookSnapshot, u64), StorageError> {
-    let fingerprint = save_transactional(root, previous, candidate)?;
+    let mut candidate = candidate.clone();
+    let missing_blocks = referenced_paths(&candidate.manifest, &candidate.page, SourceRole::Block)
+        .into_iter()
+        .filter(|path| !candidate.blocks.iter().any(|file| file.path == *path))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let existing = read_stored_files(
+        root,
+        &missing_blocks
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        SourceRole::Block.max_bytes(),
+    )?;
+    candidate.blocks.extend(existing);
+    prepare_binary_ink_write(root, previous, &mut candidate)?;
+    let fingerprint = save_transactional(root, previous, &candidate)?;
     let assets = read_stored_files(
         root,
         &referenced_paths(&candidate.manifest, &candidate.page, SourceRole::Asset),
@@ -135,9 +165,67 @@ pub(crate) fn save_and_return(
     )?;
     let saved = NotebookSnapshot {
         assets,
-        ..candidate.clone()
+        ..candidate
     };
     Ok((saved, fingerprint))
+}
+
+/// Upgrade only the page bundle being confirmed. Existing binary references are retained; a
+/// legacy reference receives a fresh sibling path and its JSON original is deliberately left
+/// untouched. An occupied target is preserved and a bounded unused sibling is selected.
+fn prepare_binary_ink_write(
+    root: &Path,
+    previous: &NotebookSnapshot,
+    candidate: &mut NotebookSnapshot,
+) -> Result<(), StorageError> {
+    for reference in &mut candidate.page.ink_layers {
+        let previous_reference = previous
+            .page
+            .ink_layers
+            .iter()
+            .find(|current| current.id == reference.id);
+        if let Some(previous_reference) = previous_reference
+            && previous_reference.path.ends_with(".ink")
+        {
+            reference.path = previous_reference.path.clone();
+            continue;
+        }
+
+        let proposed = previous_reference
+            .map(|current| current.path.as_str())
+            .unwrap_or(reference.path.as_str());
+        let mut binary = if let Some(stem) = proposed.strip_suffix(".json") {
+            format!("{stem}.ink")
+        } else if previous_reference.is_none() && proposed.ends_with(".ink") {
+            proposed.to_owned()
+        } else {
+            return Err(invalid_error(
+                "ink layer path must migrate from .json or reuse its current .ink path",
+            ));
+        };
+        if root.join(&binary).exists() {
+            let stem = binary.strip_suffix(".ink").expect("binary path suffix");
+            binary = (1..=1000)
+                .map(|suffix| format!("{stem}-migrated-{suffix:03}.ink"))
+                .find(|path| !root.join(path).exists())
+                .ok_or_else(|| invalid_error("no unused migration ink path remains"))?;
+        }
+        reference.path = binary;
+    }
+
+    candidate.manifest.schema_version = candidate
+        .manifest
+        .schema_version
+        .max(previous.manifest.schema_version)
+        .max(crate::BINARY_INK_SCHEMA_VERSION);
+    candidate.page.schema_version = candidate
+        .page
+        .schema_version
+        .max(crate::BINARY_INK_SCHEMA_VERSION);
+    for layer in &mut candidate.ink_layers {
+        layer.schema_version = candidate.page.schema_version;
+    }
+    Ok(())
 }
 
 fn save_transactional(
@@ -152,7 +240,20 @@ fn save_transactional(
     }
 
     stage_transaction(root, previous, candidate)?;
-    let fingerprint = save_to_root(root, candidate)?;
+    let previous_paths = previous
+        .page
+        .ink_layers
+        .iter()
+        .map(|reference| reference.path.as_str())
+        .collect::<HashSet<_>>();
+    let new_ink_paths = candidate
+        .page
+        .ink_layers
+        .iter()
+        .filter(|reference| !previous_paths.contains(reference.path.as_str()))
+        .map(|reference| reference.path.clone())
+        .collect::<HashSet<_>>();
+    let fingerprint = save_to_root_inner(root, candidate, None, Some(&new_ink_paths))?;
     remove_pending_transaction(root)?;
     Ok(fingerprint)
 }
@@ -288,6 +389,41 @@ pub fn remove_typst_style(selected_root: &Path, filename: &str) -> Result<(), St
 /// it wrote. Computing the fingerprint here, from the bytes just written, saves reading every
 /// canonical file back a second time on the commit and undo/redo paths.
 pub(crate) fn save_to_root(root: &Path, snapshot: &NotebookSnapshot) -> Result<u64, StorageError> {
+    save_to_root_inner(root, snapshot, None, None)
+}
+
+/// Roll back a transaction whose page file never crossed the commit boundary. A legacy migration
+/// writes a new `.ink` sibling and never touches the referenced `.json`; keeping those exact bytes
+/// avoids changing an original merely because recovery rewrote the other mutable files.
+pub(crate) fn restore_previous_to_root(
+    root: &Path,
+    previous: &NotebookSnapshot,
+    candidate: &NotebookSnapshot,
+) -> Result<u64, StorageError> {
+    let untouched_legacy = previous
+        .page
+        .ink_layers
+        .iter()
+        .filter(|reference| {
+            reference.path.ends_with(".json")
+                && candidate
+                    .page
+                    .ink_layers
+                    .iter()
+                    .find(|candidate| candidate.id == reference.id)
+                    .is_some_and(|candidate| candidate.path != reference.path)
+        })
+        .map(|reference| reference.path.clone())
+        .collect::<HashSet<_>>();
+    save_to_root_inner(root, previous, Some(&untouched_legacy), None)
+}
+
+fn save_to_root_inner(
+    root: &Path,
+    snapshot: &NotebookSnapshot,
+    preserved_ink: Option<&HashSet<String>>,
+    protected_new_ink: Option<&HashSet<String>>,
+) -> Result<u64, StorageError> {
     validate_snapshot(root, snapshot)?;
     let page_path = page_reference(&snapshot.manifest, &snapshot.page.id)?
         .path
@@ -296,6 +432,17 @@ pub(crate) fn save_to_root(root: &Path, snapshot: &NotebookSnapshot) -> Result<u
     // Retain the exact bytes of each canonical (non-asset) file so the fingerprint matches what
     // reading the file back would produce.
     let mut written: HashMap<String, Vec<u8>> = HashMap::new();
+
+    // Existing sources may be omitted from a batch (notably the shared style on a blank page).
+    // Read them before replacing anything so fingerprinting cannot fail after the save lands.
+    for path in referenced_paths(&snapshot.manifest, &snapshot.page, SourceRole::Block) {
+        if !snapshot.blocks.iter().any(|file| file.path == path) {
+            written.insert(
+                path.to_owned(),
+                read_limited(resolve_existing(root, path)?, SourceRole::Block.max_bytes())?,
+            );
+        }
+    }
 
     for file in &snapshot.blocks {
         write_atomic(root, &file.path, &file.bytes)?;
@@ -310,7 +457,15 @@ pub(crate) fn save_to_root(root: &Path, snapshot: &NotebookSnapshot) -> Result<u
             .iter()
             .find(|layer| layer.id == reference.id)
             .expect("validated ink reference");
-        let bytes = write_json_compact(root, &reference.path, layer)?;
+        let bytes = if preserved_ink.is_some_and(|paths| paths.contains(&reference.path))
+            && root.join(&reference.path).is_file()
+        {
+            read_limited(resolve_existing(root, &reference.path)?, MAX_INK_BYTES)?
+        } else if protected_new_ink.is_some_and(|paths| paths.contains(&reference.path)) {
+            write_ink_new(root, &reference.path, layer)?
+        } else {
+            write_ink(root, &reference.path, layer)?
+        };
         written.insert(reference.path.clone(), bytes);
     }
     written.insert(
@@ -375,5 +530,54 @@ mod tests {
         let reopened = open_notebook(&notebook_root).unwrap();
         assert_eq!(reopened.page.revision, 6);
         assert_eq!(reopened.ink_layers[0].strokes.len(), 6);
+    }
+
+    #[test]
+    fn confirmed_write_migrates_ink_without_touching_the_legacy_original() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("notebook");
+        create_notebook(&root, &legacy_snapshot()).unwrap();
+        let legacy_path = root.join("ink/page-001-layer-001.json");
+        let layer = open_notebook(&root).unwrap().ink_layers.remove(0);
+        let mut original = serde_json::to_vec_pretty(&layer).unwrap();
+        original.extend_from_slice(b"\n");
+        fs::write(&legacy_path, &original).unwrap();
+
+        let mut history = NotebookHistory::default();
+        let candidate = observe_notebook(&root, &mut history).unwrap();
+        let saved = commit_notebook(&root, &mut history, candidate)
+            .unwrap()
+            .snapshot;
+
+        assert_eq!(fs::read(&legacy_path).unwrap(), original);
+        assert_eq!(saved.page.ink_layers[0].path, "ink/page-001-layer-001.ink");
+        assert!(
+            fs::read(root.join(&saved.page.ink_layers[0].path))
+                .unwrap()
+                .starts_with(b"GTINK\0\r\n")
+        );
+    }
+
+    #[test]
+    fn first_migration_preserves_an_occupied_target_and_uses_a_sibling() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("notebook");
+        create_notebook(&root, &legacy_snapshot()).unwrap();
+        let occupied = root.join("ink/page-001-layer-001.ink");
+        fs::write(&occupied, b"unrelated").unwrap();
+
+        let mut history = NotebookHistory::default();
+        let candidate = observe_notebook(&root, &mut history).unwrap();
+        let saved = commit_notebook(&root, &mut history, candidate)
+            .unwrap()
+            .snapshot;
+
+        assert_eq!(fs::read(occupied).unwrap(), b"unrelated");
+        assert_eq!(saved.page.revision, 2);
+        assert_eq!(
+            saved.page.ink_layers[0].path,
+            "ink/page-001-layer-001-migrated-001.ink"
+        );
+        assert!(root.join(&saved.page.ink_layers[0].path).is_file());
     }
 }

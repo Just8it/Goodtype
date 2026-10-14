@@ -1,13 +1,26 @@
 <script lang="ts">
   import type { Point } from "../geometry/coordinates";
-  import { boundedRasterScale, screenToPage } from "../geometry/coordinates";
-  import type { ShapeStyle, Stroke, StrokePoint } from "../model";
+  import {
+    boundedRasterScale,
+    screenToPage,
+    visiblePageRegion,
+    zoomTier,
+  } from "../geometry/coordinates";
+  import {
+    DEFAULT_INK_Z_INDEX,
+    type ShapeStyle,
+    type Stroke,
+    type StrokePattern,
+    type StrokePoint,
+  } from "../model";
   import {
     maximumSampleGap,
     type StrokePerformance,
   } from "../ink/metrics";
   import {
+    barrelInContact,
     DEFAULT_PRESSURE_CALIBRATION,
+    eraserInHand,
     DEFAULT_POINTER_MAPPING,
     normalizePointerSample,
     pointerRole,
@@ -17,11 +30,13 @@
     type PointerMapping,
     type PressureCalibration,
   } from "../ink/pipeline";
-  import { outlinePoints } from "../ink/outline";
+  import { patternedOutlinePoints } from "../ink/pattern";
   import { paintStrata } from "../ink/paint";
   import { straightenStroke } from "../ink/straighten";
+  import type { EraserReach } from "../settings";
   import {
     shapeFromDrag,
+    shapeDashArray,
     shapePath,
     splineFromPoints,
     type ShapeDraft,
@@ -53,6 +68,10 @@
     pressure?: boolean;
     /** Fraction of the stroke's length over which each end tapers to a point. */
     taper?: number;
+    /** Solid, dashed, or dotted; resolved into the stroke at pen-up. */
+    pattern?: StrokePattern;
+    /** Gap factor for the pattern, resolved into the stroke with it. */
+    patternSpacing?: number;
     /** Ink opacity for the active tool, 0–1. */
     opacity?: number;
     /** Snap an almost-straight stroke to the line it was aiming for, on release. */
@@ -62,8 +81,18 @@
     shapeConstrain?: boolean;
     drawAndHoldShapes?: boolean;
     eraseRadiusPt?: number;
+    /** Highlighter-only leaves pen ink and shapes alone. */
+    eraserReach?: EraserReach;
     calibration?: PressureCalibration;
     pointerMapping?: PointerMapping;
+    /// The topmost shape the eraser reaches at this point, if any. Shapes live above this
+    /// component, so it asks rather than holding them.
+    shapeAt?: (point: Point, reachPt: number) => { id: string; zIndex: number } | null;
+    onEraseShape?: (id: string) => void;
+    /** Fires as an erase gesture lifts, whether or not it reached anything. */
+    onEraseEnd?: () => void;
+    /** An erase began from the pen's eraser end or side button while another tool was held. */
+    onEraserEngaged?: () => void;
     onStrokeFinalized?: (stroke: Stroke) => void;
     onShapeFinalized?: (shape: ShapeDraft) => void;
     onInkShapeRecognized?: (stroke: Stroke, shape: ShapeDraft) => void;
@@ -85,6 +114,8 @@
     widthPt = 2,
     pressure = true,
     taper = 0,
+    pattern = "solid",
+    patternSpacing = 1,
     opacity = 1,
     straighten = false,
     shapeKind = "line",
@@ -97,8 +128,13 @@
     shapeConstrain = false,
     drawAndHoldShapes = true,
     eraseRadiusPt = 8,
+    eraserReach = "everything",
     calibration = DEFAULT_PRESSURE_CALIBRATION,
     pointerMapping = DEFAULT_POINTER_MAPPING,
+    shapeAt,
+    onEraseShape,
+    onEraseEnd,
+    onEraserEngaged,
     onStrokeFinalized,
     onShapeFinalized,
     onInkShapeRecognized,
@@ -161,8 +197,11 @@
   let gesture: Gesture | null = null;
   let holdTimer: ReturnType<typeof setTimeout> | undefined;
   let splineFrame: number | undefined;
-  const MAX_IMMEDIATE_CANVAS_PIXELS = 6_000_000;
+  const MAX_IMMEDIATE_CANVAS_PIXELS = 12_000_000;
+  /** Live ink a little past the window edge still shows while the page settles. */
+  const LIVE_CANVAS_MARGIN_PT = 24;
   const SHAPE_HOLD_MS = 500;
+  const SHAPE_SNAP_DEGREES = 15;
   const SHAPE_HOLD_DRIFT_PT = 4;
 
   $effect(() => {
@@ -185,8 +224,11 @@
    * composites, so it stays crisp without JavaScript re-rasterising every stroke — which is what
    * made zooming lag. Only filled outlines can be merged like this; stroked polylines could not.
    */
+  // The hairline floor follows zoom in half-octave tiers, not every pinch step: with a per-step
+  // floor every page rebuilt and re-joined all of its outlines dozens of times a second.
+  const inkZoomTier = $derived(zoomTier(zoom));
   const committedStrata = $derived(
-    paintStrata(localStrokes, objectZIndices, 0.5 / zoom),
+    paintStrata(localStrokes, objectZIndices, 0.5 / inkZoomTier),
   );
   const selectedBounds = $derived(selectionBounds(localStrokes, localSelection));
   const eraserRadiusOnPage = $derived(eraseRadiusPt / zoom);
@@ -211,7 +253,47 @@
       canvas.width = pixelWidth;
       canvas.height = pixelHeight;
     }
+    canvas.style.left = "0px";
+    canvas.style.top = "0px";
     canvas.getContext("2d")?.setTransform(renderScale, 0, 0, renderScale, 0, 0);
+  }
+
+  /**
+   * Re-fit the live canvas to what is on screen, at the resolution the zoom actually shows.
+   *
+   * The page-sized bitmap above is device resolution at 100%, and the zoom transform enlarges it,
+   * so a live stroke at 4x looked four times blurrier than the same stroke once committed as SVG.
+   * Covering only the visible part of the page keeps the bitmap near one screen of pixels at any
+   * zoom. It runs once as a gesture starts, never during a pinch, so zooming allocates nothing.
+   */
+  function fitCanvasToView(canvas: HTMLCanvasElement): void {
+    if (!surface) return;
+    const page = { width: Math.max(pageWidthPt, 1), height: Math.max(pageHeightPt, 1) };
+    const region = visiblePageRegion(
+      surface.getBoundingClientRect(),
+      { left: 0, top: 0, width: window.innerWidth, height: window.innerHeight },
+      page,
+      LIVE_CANVAS_MARGIN_PT,
+    );
+    if (!region) return;
+    const renderScale = boundedRasterScale(
+      region,
+      (window.devicePixelRatio || 1) * Math.max(zoom, 0.01),
+      MAX_IMMEDIATE_CANVAS_PIXELS,
+    );
+    canvas.style.left = `${region.x}px`;
+    canvas.style.top = `${region.y}px`;
+    canvas.style.width = `${region.width}px`;
+    canvas.style.height = `${region.height}px`;
+    const pixelWidth = Math.ceil(region.width * renderScale);
+    const pixelHeight = Math.ceil(region.height * renderScale);
+    if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
+      canvas.width = pixelWidth;
+      canvas.height = pixelHeight;
+    }
+    canvas
+      .getContext("2d")
+      ?.setTransform(renderScale, 0, 0, renderScale, -region.x * renderScale, -region.y * renderScale);
   }
 
   function pagePoint(event: PointerEvent): Point {
@@ -243,10 +325,12 @@
     const role = pointerRole(event, tool, pointerMapping);
     if (role === "ignore" || gesture) return;
     event.preventDefault();
+    if (immediateCanvas) fitCanvasToView(immediateCanvas);
 
     surface?.focus({ preventScroll: true });
     surface?.setPointerCapture(event.pointerId);
     if (role === "erase") {
+      if (tool !== "eraser") onEraserEngaged?.();
       eraserPressed = true;
       gesture = {
         kind: "erase",
@@ -341,6 +425,12 @@
 
   function pointerMove(event: PointerEvent): void {
     updateEraserCursor(event);
+    // Holding the barrel button and then touching down sends no second pointerdown: the press
+    // began in the air. The gesture starts on the move that brings the tip onto the glass.
+    if (!gesture && barrelInContact(event)) {
+      pointerDown(event);
+      return;
+    }
     if (!gesture || event.pointerId !== gesture.pointerId) return;
     event.preventDefault();
     if (gesture.kind === "draw") {
@@ -436,6 +526,9 @@
         onStrokesChange?.(localStrokes);
         onSelectionChange?.(localSelection);
       }
+      finishPointer(event.pointerId);
+      onEraseEnd?.();
+      return;
     } else {
       onStrokesChange?.(localStrokes);
       status =
@@ -464,10 +557,9 @@
   }
 
   function updateEraserCursor(event: PointerEvent): void {
-    eraserCursor =
-      tool === "eraser" && pointerRole(event, tool, pointerMapping) === "erase"
-        ? pagePoint(event)
-        : null;
+    const erasing =
+      gesture?.kind === "erase" || eraserInHand(event, tool, pointerMapping);
+    eraserCursor = erasing ? pagePoint(event) : null;
   }
 
   function finishPointer(pointerId: number): void {
@@ -479,8 +571,26 @@
     redrawImmediate();
   }
 
+  /**
+   * The eraser takes whole marks, and takes the one on top.
+   *
+   * Ink and shapes are held in different places, so the topmost of each is found separately and
+   * then compared by the same z-index the renderer stacks them by. Without that, erasing ink drawn
+   * over a shape would take the shape out from under it. A tie goes to the shape, which is the
+   * case where a held mark was promoted and the two carry the same index by construction.
+   */
   function eraseAt(point: Point): void {
-    const next = eraseStrokeAt(localStrokes, point, eraserRadiusOnPage);
+    const highlighterOnly = eraserReach === "highlighter";
+    const reaches = (stroke: Stroke) => !highlighterOnly || stroke.tool === "highlighter";
+    const shape = highlighterOnly ? null : (shapeAt?.(point, eraserRadiusOnPage) ?? null);
+    const stroke = hitStroke(localStrokes, point, eraserRadiusOnPage, reaches);
+    if (!shape && !stroke) return;
+    if (shape && (!stroke || shape.zIndex >= (stroke.zIndex ?? DEFAULT_INK_Z_INDEX))) {
+      onEraseShape?.(shape.id);
+      status = "Erased one shape";
+      return;
+    }
+    const next = eraseStrokeAt(localStrokes, point, eraserRadiusOnPage, reaches);
     if (next === localStrokes) return;
     localStrokes = next;
     strokeCount = localStrokes.length;
@@ -562,6 +672,7 @@
           liveWidthPt(gesture.strokeTool),
           pressure,
           taper,
+          gesture.strokeTool === "pen" ? pattern : "solid",
           opacity,
         );
     } else if (gesture?.kind === "shape" && gesture.preview) {
@@ -589,23 +700,26 @@
     baseWidthPt: number,
     usePressure: boolean,
     strokeTaper: number,
+    strokePattern: StrokePattern,
     strokeOpacity: number,
   ): void {
     if (points.length === 0) return;
-    const polygon = outlinePoints(points, {
+    const polygons = patternedOutlinePoints(points, {
       // Below roughly half a device pixel the fill has nothing to cover, so hairline ink stays
       // visible when zoomed far out instead of dropping out entirely.
       widthPt: Math.max(baseWidthPt, 0.5 / zoom),
       pressure: usePressure,
       taper: strokeTaper,
-    });
-    if (polygon.length === 0) return;
+    }, strokePattern, patternSpacing);
+    if (polygons.length === 0) return;
     context.save();
     context.fillStyle = strokeColor;
     context.globalAlpha = Math.min(1, Math.max(0, strokeOpacity));
-    path(context, polygon);
-    context.closePath();
-    context.fill();
+    for (const polygon of polygons) {
+      path(context, polygon);
+      context.closePath();
+      context.fill();
+    }
     context.restore();
   }
 
@@ -631,6 +745,10 @@
       tool: strokeTool,
       color,
       widthPt: liveWidthPt(strokeTool),
+      pattern: strokeTool === "pen" ? pattern : "solid",
+      ...(strokeTool === "pen" && pattern !== "solid" && patternSpacing !== 1
+        ? { patternSpacing }
+        : {}),
       pressure,
       taper,
       opacity,
@@ -670,9 +788,12 @@
     if (!drawAndHoldShapes || active.strokeTool !== "pen") return;
     holdTimer = setTimeout(() => {
       if (gesture !== active) return;
+      // The same preference that squares a rectangle snaps a line, and by default neither
+      // happens: what was drawn is what is kept.
       active.shapePreview = recognizeHeldShape(
         smoothPoints(active.points, calibration.smoothing),
         shapeStyle,
+        { snapDegrees: shapeConstrain ? SHAPE_SNAP_DEGREES : 0 },
       )?.draft ?? null;
       if (active.shapePreview) {
         status = `Release to use ${active.shapePreview.geometry.kind}; continue drawing to keep ink`;
@@ -722,6 +843,7 @@
     context.lineCap = "round";
     context.lineJoin = "round";
     context.globalAlpha = draft.style.opacity;
+    context.setLineDash(shapeDashArray(draft.style) ?? []);
     const path = new Path2D(shapePath(draft.geometry));
     const closed =
       draft.geometry.kind === "rectangle" ||
@@ -763,7 +885,7 @@
 <div
   bind:this={surface}
   class="ink-surface"
-  class:eraser-active={tool === "eraser"}
+  class:eraser-active={tool === "eraser" || eraserCursor !== null}
   class:shape-active={tool === "shape"}
   style:width={`${pageWidthPt}px`}
   style:height={`${pageHeightPt}px`}
@@ -775,6 +897,11 @@
   onpointerleave={pointerLeave}
   onpointerup={pointerUp}
   onpointercancel={pointerCancel}
+  onlostpointercapture={pointerCancel}
+  oncontextmenu={(event) => {
+    // Windows turns the pen's barrel button into a right-click; on the page it is a tool.
+    if (event instanceof PointerEvent && event.pointerType === "pen") event.preventDefault();
+  }}
   onkeydown={keyDown}
 >
   <canvas bind:this={immediateCanvas} aria-hidden="true"></canvas>

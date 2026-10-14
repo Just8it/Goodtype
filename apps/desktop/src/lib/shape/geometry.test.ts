@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ShapeStyle } from "../model";
-import { shapeFromDrag, shapePath, splineFromPoints } from "./geometry";
+import { shapeDashArray, shapeFromDrag, shapePath, splineFromPoints } from "./geometry";
 
 const style: ShapeStyle = {
   strokeColor: "#16212b",
@@ -63,5 +63,21 @@ describe("fitting a long freehand drag", () => {
     expect(nodes).toHaveLength(2);
     expect(nodes[0].point).toEqual({ x: 0, y: 0 });
     expect(nodes[1].point).toEqual({ x: 499, y: 0 });
+  });
+});
+
+describe("shape line patterns", () => {
+  const style = { strokeColor: "#000000", strokeWidthPt: 2, fillColor: null, opacity: 1 };
+  it("stays solid unless a pattern is set, including for older shapes", () => {
+    expect(shapeDashArray(style)).toBeNull();
+    expect(shapeDashArray({ ...style, pattern: "solid" })).toBeNull();
+  });
+  it("spaces dashes and dots like patterned ink of the same width", () => {
+    // Ink: 8pt dashes and 5pt gaps at 2pt; round caps add one width to each visible dash.
+    expect(shapeDashArray({ ...style, pattern: "dashed" })).toEqual([6, 7]);
+    expect(shapeDashArray({ ...style, pattern: "dotted" })).toEqual([0.01, 5.5]);
+    // Spacing stretches only the gap, matching the ink.
+    expect(shapeDashArray({ ...style, pattern: "dashed", patternSpacing: 2 })).toEqual([6, 12]);
+    expect(shapeDashArray({ ...style, pattern: "dotted", patternSpacing: 2 })).toEqual([0.01, 11]);
   });
 });

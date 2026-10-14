@@ -1,5 +1,8 @@
 <script lang="ts">
-  import { colorName, type EraserSize } from "../settings";
+  import { centredDashArray } from "./dash";
+  import { colorName, MM_PER_PT, type EraserSize } from "../settings";
+  import type { StrokePattern } from "../model";
+  import { paletteWidthIndex } from "./palette";
 
   /**
    * The quick controls at the foot of the rail: sizes and favourite colours for the tool being
@@ -11,7 +14,7 @@
    *
    * Colours grow with the writer: three by default, a `+` in the next free cell, and at six —
    * the swatch ceiling — the last colour takes the `+`'s place rather than starting a row for it.
-   * Exact millimetres, nib and pressure stay one tap further in, on the tool's card.
+   * Press the selected width or colour again to edit it in place. Nib settings stay on the tool.
    */
   let {
     kind,
@@ -25,6 +28,12 @@
     eraserSize,
     onPickWidth,
     onPickColor,
+    onEditWidth,
+    onEditColor,
+    pattern = "solid",
+    patternOf,
+    expandedEditor = null,
+    addingColor = false,
     onPickEraserSize,
     canAddColor = true,
     onAddColor,
@@ -40,68 +49,93 @@
     opacity?: number;
     eraserSizes?: { id: EraserSize; label: string; diameter: number }[];
     eraserSize?: EraserSize;
-    onPickWidth?: (widthPt: number) => void;
-    onPickColor?: (color: string) => void;
+    onPickWidth?: (widthPt: number, tile: HTMLElement) => void;
+    onPickColor?: (color: string, tile: HTMLElement) => void;
+    onEditWidth?: (index: number, tile: HTMLElement) => void;
+    onEditColor?: (index: number, tile: HTMLElement) => void;
+    pattern?: StrokePattern;
+    /** Each chip's own pattern; the active pattern stands in for a custom width off the row. */
+    patternOf?: (widthPt: number) => StrokePattern;
+    expandedEditor?: "width" | "color" | null;
+    addingColor?: boolean;
     onPickEraserSize?: (size: EraserSize) => void;
     /** False at the swatch ceiling, where the last colour stands where the `+` would have. */
     canAddColor?: boolean;
-    /** Opens the card straight into its colour picker. */
-    onAddColor?: () => void;
+    /** Opens a colour picker attached to the add button. */
+    onAddColor?: (tile: HTMLElement) => void;
     /** Absent for tools whose card holds nothing the pocket does not already show. */
     onOpenCard?: () => void;
   } = $props();
 
-  const mm = (pt: number) => `${(pt / 2.835).toFixed(2)} mm`;
+  const mm = (pt: number) => `${(pt * MM_PER_PT).toFixed(2)} mm`;
 
-  /// The chip standing for the live width: the nearest one, so a value typed in the card still
-  /// lights the row rather than leaving every chip dark.
-  const nearestWidth = $derived(
-    widths.length
-      ? widths.reduce((best, width) =>
-          Math.abs(width - activeWidth) < Math.abs(best - activeWidth) ? width : best,
-        )
-      : null,
+  // Custom nib widths get their own live control rather than falsely selecting a nearby preset.
+  const activeWidthIndex = $derived(paletteWidthIndex(widths, activeWidth));
+  const visibleWidths = $derived(
+    activeWidthIndex < 0 && Number.isFinite(activeWidth) && activeWidth > 0
+      ? [...widths, activeWidth]
+      : widths,
   );
+  const activeColorIndex = $derived(colors.findIndex((color) => color.toLowerCase() === activeColor.toLowerCase()));
+  const visibleColors = $derived(activeColor && activeColorIndex < 0 ? [...colors, activeColor] : colors);
+  const chipPattern = (width: number, index: number): StrokePattern =>
+    index < widths.length && patternOf ? patternOf(width) : pattern;
+  /** The chip rule is a fixed 18 units long, so its centred pattern needs no measuring. */
+  const CHIP_RULE_LENGTH = 18;
+  const chipDash = (chip: StrokePattern) =>
+    chip === "dashed"
+      ? centredDashArray(CHIP_RULE_LENGTH, 5, 4)
+      : chip === "dotted"
+        ? centredDashArray(CHIP_RULE_LENGTH, 0.01, 5)
+        : null;
 
 </script>
 
 <div class:horizontal class="pocket">
   {#if kind === "ink"}
     <div class="grid widths" role="group" aria-label="Stroke size">
-      {#each widths as width (width)}
+      {#each visibleWidths as width, index (width)}
+        {@const selected = Math.abs(width - activeWidth) < 0.001}
+        {@const linePattern = chipPattern(width, index)}
         <button
           type="button"
-          class:current={width === nearestWidth}
-          aria-pressed={width === nearestWidth}
-          aria-label={mm(width)}
-          title={mm(width)}
-          onclick={() => onPickWidth?.(width)}
+          class:current={selected}
+          aria-pressed={selected}
+          aria-expanded={selected && onEditWidth ? expandedEditor === "width" : undefined}
+          aria-label={`${mm(width)}, ${linePattern}${selected ? " — edit stroke" : ""}`}
+          title={`${mm(width)} · ${linePattern}${selected ? " — press again to edit stroke" : ""}`}
+          onclick={(event) => selected && onEditWidth
+            ? onEditWidth(index < widths.length ? index : -1, event.currentTarget)
+            : onPickWidth?.(width, event.currentTarget)}
         >
-          <span
-            class="rule"
-            style:height={`${Math.max(1, Math.min(width * 1.4, 8))}px`}
-            style:background={activeColor && opacity < 1 ? `${activeColor}cc` : "var(--text)"}
-          ></span>
+          <svg class="rule" viewBox="0 0 24 12" aria-hidden="true">
+            <path d="M3 6H21" fill="none" stroke="currentColor" stroke-linecap="round"
+              stroke-width={Math.max(1, Math.min(width * 1.4, linePattern === "solid" ? 8 : 3))}
+              stroke-dasharray={chipDash(linePattern)?.dasharray}
+              stroke-dashoffset={chipDash(linePattern)?.dashoffset} />
+          </svg>
         </button>
       {/each}
     </div>
 
     <div class="grid colors" role="group" aria-label="Ink colour">
-      {#each colors as color (color)}
+      {#each visibleColors as color, index}
+        {@const selected = color.toLowerCase() === activeColor.toLowerCase()}
         <button
           type="button"
           class="dot"
-          class:current={color.toLowerCase() === activeColor.toLowerCase()}
-          style:background={color}
-          style:opacity
-          aria-pressed={color.toLowerCase() === activeColor.toLowerCase()}
-          aria-label={colorName(color)}
-          title={colorName(color)}
-          onclick={() => onPickColor?.(color)}
-        ></button>
+          class:current={selected}
+          aria-pressed={selected}
+          aria-expanded={selected && onEditColor ? expandedEditor === "color" : undefined}
+          aria-label={`${colorName(color)}${selected ? " — edit colour" : ""}`}
+          title={`${colorName(color)}${selected ? " — press again to edit colour" : ""}`}
+          onclick={(event) => selected && onEditColor
+            ? onEditColor(index < colors.length ? index : -1, event.currentTarget)
+            : onPickColor?.(color, event.currentTarget)}
+        ><span class="swatch" style:background={color} style:opacity></span></button>
       {/each}
       {#if canAddColor && onAddColor}
-        <button type="button" class="dot add" aria-label="Add a colour" title="Add a colour" onclick={onAddColor}>
+        <button type="button" class="dot add" aria-label="Add a colour" title="Add a colour" aria-expanded={addingColor} onclick={(event) => onAddColor?.(event.currentTarget)}>
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 6v12M6 12h12" /></svg>
         </button>
       {/if}
@@ -168,7 +202,7 @@
   .grid {
     display: grid;
     grid-template-columns: 1fr 1fr;
-    gap: 4px;
+    gap: 2px;
     place-items: center;
   }
 
@@ -198,8 +232,8 @@
 
   button {
     display: grid;
-    width: 20px;
-    height: 20px;
+    width: 24px;
+    height: 24px;
     padding: 0;
     border: 0;
     border-radius: var(--radius);
@@ -217,9 +251,13 @@
     outline: 1px solid var(--blueprint);
   }
 
-  .rule { width: 13px; border-radius: 4px; }
+  .rule { width: 24px; height: 12px; color: var(--text); }
 
   .dot {
+    border-radius: 50%;
+  }
+
+  .swatch {
     width: 18px;
     height: 18px;
     border: 1px solid rgb(255 255 255 / 22%);
@@ -231,8 +269,7 @@
   /* Dashed, like every other control in this app that opens an editor rather than setting a
      value. It vanishes at the ceiling, where the sixth colour stands in its cell. */
   .dot.add {
-    border-style: dashed;
-    border-color: rgb(255 255 255 / 30%);
+    border: 1px dashed rgb(255 255 255 / 30%);
     background: transparent;
   }
 

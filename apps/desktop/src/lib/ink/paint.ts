@@ -6,7 +6,8 @@
 // at all because a stroke is a filled silhouette rather than a stroked centreline.
 
 import { DEFAULT_INK_Z_INDEX, type Stroke } from "../model";
-import { outlinePath, outlinePoints } from "./outline";
+import { outlinePath } from "./outline";
+import { patternedOutlinePoints } from "./pattern";
 import { transformedPoint } from "./selection";
 
 export type PaintedPath = {
@@ -41,12 +42,14 @@ function silhouette(stroke: Stroke, minimumWidthPt: number): string {
   // The floor moves with zoom, so a cached path is only reusable at the width it was built for.
   if (cached && cached.widthPt === widthPt) return cached.d;
 
-  const d = outlinePath(
-    outlinePoints(
-      stroke.points.map((point) => ({ ...point, ...transformedPoint(stroke, point) })),
-      { widthPt, pressure: stroke.pressure, taper: stroke.taper },
-    ),
-  );
+  const d = patternedOutlinePoints(
+    stroke.points.map((point) => ({ ...point, ...transformedPoint(stroke, point) })),
+    { widthPt, pressure: stroke.pressure, taper: stroke.taper },
+    stroke.pattern ?? "solid",
+    stroke.patternSpacing ?? 1,
+  )
+    .map(outlinePath)
+    .join(" ");
   silhouettes.set(stroke, { widthPt, d });
   return d;
 }

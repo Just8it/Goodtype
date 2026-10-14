@@ -24,7 +24,9 @@ pub async fn export_notebook_pdf(
     // Match the on-screen preview: an export resolves packages under the same policy.
     let allow_remote_packages = packages.allowed();
     tauri::async_runtime::spawn_blocking(move || {
-        with_notebook(&histories, || {
+        // Take one coherent canonical snapshot while saves are excluded, then release the
+        // storage lock before the potentially expensive Typst/PDF compilation.
+        let pages = with_notebook(&histories, || {
             let notebook_root = root.as_path();
             let manifest = storage::open_notebook(notebook_root)
                 .map_err(|error| error.to_string())?
@@ -37,10 +39,11 @@ pub async fn export_notebook_pdf(
                 pages.push(export_page_from_bundle(&bundle, page_text_baseline_grid)?);
             }
 
-            export_pages(notebook_root, &output_name, &pages, allow_remote_packages)
-                .map_err(|error| error.to_string())
-                .and_then(|result| crate::workspace::path_string(result.output_path))
-        })
+            Ok(pages)
+        })?;
+        export_pages(root.as_path(), &output_name, &pages, allow_remote_packages)
+            .map_err(|error| error.to_string())
+            .and_then(|result| crate::workspace::path_string(result.output_path))
     })
     .await
     .map_err(|error| error.to_string())?
@@ -114,7 +117,13 @@ fn export_page_from_bundle(
                 geometry: geometry.clone(),
                 style: style.clone(),
             }),
-            _ => {}
+            PageObject::PdfMaterial { fields, .. } => {
+                return Err(format!(
+                    "PDF object {} cannot be exported yet; no PDF was written",
+                    fields.id
+                ));
+            }
+            PageObject::InkGroup { .. } | PageObject::Group { .. } => {}
         }
     }
 
@@ -126,6 +135,8 @@ fn export_page_from_bundle(
             z_index: stroke.z_index,
             color: stroke.color.clone(),
             width_pt: stroke.width_pt,
+            pattern: stroke.pattern,
+            pattern_spacing: stroke.pattern_spacing,
             // Taken from the stroke, never re-derived from the tool: the nib that drew it already
             // resolved these, and re-deciding here is exactly how the PDF drifted from the screen.
             pressure: stroke.pressure,
@@ -167,4 +178,18 @@ fn export_page_from_bundle(
         shapes,
         images,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unsupported_pdf_objects_cannot_silently_disappear_from_export() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../fixtures/notebooks/minimal");
+        let bundle = storage::open_notebook(&root).unwrap();
+        let error = export_page_from_bundle(&bundle, true).unwrap_err();
+        assert!(error.contains("PDF object pdf-001 cannot be exported yet"));
+    }
 }

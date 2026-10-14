@@ -1,6 +1,14 @@
 <script lang="ts">
-  import type { AppSettings } from "../settings";
-  import { PALETTE_TOOLS, type PaletteCommand } from "./palette";
+  import { centredDash } from "./dash";
+  import type { StrokePattern } from "../model";
+  import type { AppSettings, PenPreset } from "../settings";
+  import {
+    ERASER_PATH,
+    HIGHLIGHTER_PATH,
+    INSTRUMENT_TRANSFORM,
+    NIB_PATHS,
+  } from "./instruments";
+  import { visiblePaletteTools, type PaletteCommand } from "./palette";
 
   type Props = {
     settings: AppSettings;
@@ -12,10 +20,27 @@
   };
 
   let { settings, activeCommands, expandedCommand, horizontal, onActivate }: Props = $props();
+
+  // The mark under each instrument is the line it will actually lay down: the pen's colour,
+  // thickness and pattern, the highlighter's translucent band. That, more than the silhouette,
+  // is what tells a pen from a highlighter at a glance.
+  const lineWidth = (preset: PenPreset) => Math.max(1.2, Math.min(preset.widthPt * 0.9, 3));
+  const bandHeight = (preset: PenPreset) => Math.max(3, Math.min(preset.widthPt * 0.9, 5));
+  const dasharray = (pattern: StrokePattern) =>
+    pattern === "dashed" ? [3.2, 2.2] : pattern === "dotted" ? [0.01, 2.6] : null;
+  const ERASER_RADIUS = { small: 1.4, medium: 2, large: 2.7 } as const;
 </script>
 
-{#each PALETTE_TOOLS as definition (definition.id)}
-  {#if definition.dividerBefore}
+{#snippet pen(preset: PenPreset)}
+  <svg viewBox="0 0 24 24" aria-hidden="true">
+    <path class="ink-halo" d="M4.5 21.2h15" stroke-width={lineWidth(preset) + 1.1} use:centredDash={dasharray(preset.pattern)} />
+    <path class="ink" d="M4.5 21.2h15" stroke={preset.color} stroke-width={lineWidth(preset)} use:centredDash={dasharray(preset.pattern)} />
+    <path d={NIB_PATHS[preset.type]} transform={INSTRUMENT_TRANSFORM} />
+  </svg>
+{/snippet}
+
+{#each visiblePaletteTools(settings.hiddenTools) as { tool: definition, dividerBefore } (definition.id)}
+  {#if dividerBefore}
     <span class:horizontal class="palette-divider"></span>
   {/if}
   {@const active = activeCommands.includes(definition.id)}
@@ -30,17 +55,20 @@
     onclick={(event) => onActivate(definition.id, event.currentTarget)}
   >
     {#if definition.id === "pen-1"}
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15.5 3.5l5 5-9.5 9.5-5.5 1.5 1.5-5.5 9.5-9.5z"></path><path d="M6.5 19.5l1.3-3.6"></path></svg>
-      <span class="tool-state" aria-hidden="true" style:height={`${Math.max(2, Math.min(settings.penPresets[0].widthPt * 1.4, 6))}px`} style:background={settings.penPresets[0].color}></span>
+      {@render pen(settings.penPresets[0])}
     {:else if definition.id === "pen-2"}
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 4l6 6-9 9-5 1 1-5 7-11z"></path><path d="M12.5 6.5l5 5"></path></svg>
-      <span class="tool-state" aria-hidden="true" style:height={`${Math.max(2, Math.min(settings.penPresets[1].widthPt * 1.4, 6))}px`} style:background={settings.penPresets[1].color}></span>
+      {@render pen(settings.penPresets[1])}
     {:else if definition.id === "highlighter"}
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 15l7-9 5 4-6 9-4 1-2-5z"></path><path d="M8 20h8"></path></svg>
-      <span class="tool-state" aria-hidden="true" style:height={`${Math.max(2, Math.min(settings.highlighter.widthPt * 1.2, 6))}px`} style:background={settings.highlighter.color} style:opacity={settings.highlighterOpacity}></span>
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <rect class="band" x="3.5" y={22.2 - bandHeight(settings.highlighter)} width="17" height={bandHeight(settings.highlighter)} rx="1"
+          fill={settings.highlighter.color} opacity={Math.max(settings.highlighterOpacity, 0.45)} />
+        <path d={HIGHLIGHTER_PATH} transform={INSTRUMENT_TRANSFORM} />
+      </svg>
     {:else if definition.id === "eraser"}
-      <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="12" width="13" height="7" rx="1.6" transform="rotate(-38 10 15)"></rect><path d="M9 21h11"></path></svg>
-      <span class="eraser-tool-state" class:medium={settings.eraserSize === "medium"} class:large={settings.eraserSize === "large"} aria-hidden="true"></span>
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d={ERASER_PATH} transform={INSTRUMENT_TRANSFORM} />
+        <circle class="eraser-size" cx="19" cy="20" r={ERASER_RADIUS[settings.eraserSize]} />
+      </svg>
     {:else if definition.id === "shape"}
       {#if settings.shapeKind === "line"}
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 18 19 6"></path><circle cx="5" cy="18" r="1.5"></circle><circle cx="19" cy="6" r="1.5"></circle></svg>
@@ -80,8 +108,9 @@
   .tool-tile.active { background: var(--blueprint); color: #fff; }
   .tool-tile:focus-visible { outline: 2px solid var(--blueprint); outline-offset: 1px; }
   .tool-tile svg {
-    width: var(--icon);
-    height: var(--icon);
+    /* A touch larger than chrome icons: the tip is the detail that names the instrument. */
+    width: calc(var(--icon) + 4px);
+    height: calc(var(--icon) + 4px);
     fill: none;
     stroke: currentColor;
     stroke-width: var(--stroke);
@@ -89,29 +118,10 @@
     stroke-linejoin: round;
   }
   .tool-tile svg circle { fill: currentColor; stroke: none; }
-  .tool-state {
-    position: absolute;
-    right: 4px;
-    bottom: 4px;
-    width: 10px;
-    min-height: 2px;
-    border-radius: var(--radius-pill);
-    box-shadow: 0 0 0 1px rgb(255 255 255 / 55%);
-    pointer-events: none;
-  }
-  .eraser-tool-state {
-    position: absolute;
-    right: 3px;
-    bottom: 3px;
-    box-sizing: border-box;
-    width: 5px;
-    height: 5px;
-    border: 1px solid currentColor;
-    border-radius: 50%;
-    pointer-events: none;
-  }
-  .eraser-tool-state.medium { width: 7px; height: 7px; }
-  .eraser-tool-state.large { width: 9px; height: 9px; }
+  /* Ink sits on a pale halo so graphite stays visible on the dark rail and on the blue tile. */
+  .tool-tile svg .ink-halo { stroke: rgb(255 255 255 / 62%); }
+  .tool-tile svg .band { stroke: none; }
+  .tool-tile svg circle.eraser-size { fill: none; stroke: currentColor; stroke-width: 1.2; }
   .palette-divider { width: 26px; height: 1px; margin: 1px 0; background: var(--edge); }
   .palette-divider.horizontal { width: 1px; height: 26px; margin: 0 3px; }
 </style>

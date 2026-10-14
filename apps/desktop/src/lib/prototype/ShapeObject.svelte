@@ -14,7 +14,7 @@
     toggleSplineClosed,
     type ShapeAnchor,
   } from "../shape/edit";
-  import { describeShape, shapeBounds, shapePath } from "../shape/geometry";
+  import { describeShape, shapeBounds, shapeDashArray, shapePath } from "../shape/geometry";
   import type { ShapeEditCommit, ShapeView } from "./pageView";
 
   type Gesture = {
@@ -32,6 +32,7 @@
     shape,
     selected = false,
     editing = false,
+    grabbable = true,
     pageWidthPt,
     pageHeightPt,
     zoom = 1,
@@ -43,6 +44,14 @@
     shape: ShapeView;
     selected?: boolean;
     editing?: boolean;
+    /**
+     * Whether this shape may be grabbed at all.
+     *
+     * False on a page that is only being read, and false while the eraser is out — an eraser
+     * dragged across a shape has to reach the ink surface underneath to do its work, and a shape
+     * that took the pointer first would be dragged around instead of rubbed out.
+     */
+    grabbable?: boolean;
     pageWidthPt: number;
     pageHeightPt: number;
     zoom?: number;
@@ -66,13 +75,18 @@
   const controlScale = $derived(1 / Math.max(zoom * preview.scale, 0.05));
   const spline = $derived(preview.geometry.kind === "spline" ? preview.geometry : null);
   const rotationHandle = $derived(rotationHandlePoint(preview.geometry, 28 * controlScale));
+  /// A line is defined by its two ends, so selecting one goes straight to those handles: dragging
+  /// either end fixes a slightly wrong angle or length in one move. The box, rotate and resize
+  /// controls only restate what the ends already do.
+  const endsOnly = $derived(preview.geometry.kind === "line");
+  const showAnchors = $derived(editing || endsOnly);
 
   $effect(() => {
     if (!gesture) preview = shape;
   });
 
   function begin(event: PointerEvent, kind: Gesture["kind"], anchor?: ShapeAnchor) {
-    if (event.button !== 0) return;
+    if (!grabbable || event.button !== 0) return;
     event.preventDefault();
     event.stopPropagation();
     onSelect?.();
@@ -106,7 +120,7 @@
     const local = localDelta(page, gesture.start.rotation, gesture.start.scale);
     preview = gesture.kind === "resize"
       ? resizeShape(gesture.start, local, event.shiftKey)
-      : moveShapeAnchor(gesture.start, gesture.anchor!, local);
+      : moveShapeAnchor(gesture.start, gesture.anchor!, local, event.shiftKey);
   }
 
   function finish(event: PointerEvent) {
@@ -203,6 +217,7 @@
 
 <svg
   class="shape-object"
+  class:grabbable
   class:selected
   class:editing
   style:z-index={preview.zIndex}
@@ -221,6 +236,7 @@
       fill={closed ? (preview.style.fillColor ?? "none") : "none"}
       stroke={preview.style.strokeColor}
       stroke-width={preview.style.strokeWidthPt}
+      stroke-dasharray={shapeDashArray(preview.style)?.join(" ")}
       stroke-linecap="round"
       stroke-linejoin="round"
       opacity={preview.style.opacity}
@@ -233,7 +249,7 @@
       stroke="transparent"
       stroke-width={Math.max(preview.style.strokeWidthPt, 44 * controlScale)}
       role="button"
-      tabindex={onSelect ? 0 : -1}
+      tabindex={grabbable && onSelect ? 0 : -1}
       aria-pressed={selected}
       aria-label={`${label}. Press Enter to edit anchor points${spline ? ", then C to open or close the curve and Delete to remove an anchor" : ""}.`}
       onpointerdown={(event) => begin(event, "move")}
@@ -248,6 +264,7 @@
     ></path>
 
     {#if selected}
+      {#if !endsOnly}
       <rect
         class="selection-box"
         x={bounds.left}
@@ -257,7 +274,8 @@
         stroke-width={1.5 * controlScale}
         stroke-dasharray={`${4 * controlScale} ${3 * controlScale}`}
       ></rect>
-      {#if !editing}
+      {/if}
+      {#if !showAnchors}
         <line
           class="handle-line"
           x1={(bounds.left + bounds.right) / 2}
@@ -272,7 +290,7 @@
           cy={rotationHandle.y}
           r={22 * controlScale}
           role="button"
-          tabindex="0"
+          tabindex={grabbable ? 0 : -1}
           aria-label={`Rotate ${describeShape(preview.geometry)}, currently ${Math.round(preview.rotation)} degrees. Hold Shift to snap to 15 degree steps, or use the bracket keys.`}
           onpointerdown={(event) => begin(event, "rotate")}
           onpointermove={update}
@@ -287,7 +305,7 @@
           cy={bounds.bottom}
           r={22 * controlScale}
           role="button"
-          tabindex="0"
+          tabindex={grabbable ? 0 : -1}
           aria-label={`Resize ${describeShape(preview.geometry)}. Hold Shift to keep proportions.`}
           onpointerdown={(event) => begin(event, "resize")}
           onpointermove={update}
@@ -320,7 +338,7 @@
             cy={item.point.y}
             r={22 * controlScale}
             role="button"
-            tabindex="0"
+            tabindex={grabbable ? 0 : -1}
             aria-label={`Move ${anchorName(item.anchor)}`}
             onpointerdown={(event) => begin(event, "anchor", item.anchor)}
             onpointermove={update}
@@ -344,11 +362,13 @@
 <style>
   .shape-object { position: absolute; inset: 0; display: block; overflow: visible; pointer-events: none; touch-action: none; user-select: none; }
   .shape-mark { pointer-events: none; }
-  .shape-hit { pointer-events: stroke; cursor: move; outline: none; }
-  .shape-hit.closed { pointer-events: all; }
+  .shape-hit { pointer-events: none; cursor: move; outline: none; }
+  .grabbable .shape-hit { pointer-events: stroke; }
+  .grabbable .shape-hit.closed { pointer-events: all; }
   .shape-hit:focus-visible { stroke: var(--blueprint-light); opacity: 0.32; }
   .selection-box { fill: none; stroke: var(--blueprint); pointer-events: none; }
-  .control-hit { fill: transparent; pointer-events: all; cursor: nwse-resize; outline: none; }
+  .control-hit { fill: transparent; pointer-events: none; cursor: nwse-resize; outline: none; }
+  .grabbable .control-hit { pointer-events: all; }
   .control-hit.rotate { cursor: grab; }
   .control-hit.rotate:active { cursor: grabbing; }
   .editing .control-hit { cursor: move; }

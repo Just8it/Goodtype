@@ -17,8 +17,8 @@ use crate::{
 };
 
 use super::{
-    HISTORY_LIMIT, MAX_IMAGE_BYTES, MAX_INK_BYTES, MAX_JSON_BYTES, NotebookSnapshot, StorageError,
-    StoredFile, files::*, invalid, invalid_error, paths::*, recovery::*, validate::*, write::*,
+    HISTORY_LIMIT, MAX_IMAGE_BYTES, MAX_JSON_BYTES, NotebookSnapshot, StorageError, StoredFile,
+    files::*, invalid, invalid_error, paths::*, recovery::*, validate::*, write::*,
 };
 
 pub fn create_notebook(
@@ -80,7 +80,7 @@ fn load_page(
     let ink_layers = page
         .ink_layers
         .iter()
-        .map(|reference| read_json_limited(root, &reference.path, MAX_INK_BYTES))
+        .map(|reference| read_ink(root, &reference.path))
         .collect::<Result<Vec<_>, _>>()?;
 
     let block_paths = referenced_paths(&manifest, &page, SourceRole::Block);
@@ -212,7 +212,7 @@ pub fn create_page(
         page_path,
         ink_id,
         ink_path,
-    } = fresh_page_identifiers(&root, manifest);
+    } = fresh_page_identifiers(&root, manifest, schema_version);
 
     let insert_at = match position {
         PagePosition::Last => manifest.pages.len(),
@@ -298,7 +298,7 @@ pub fn import_pdf_pages(
             page_path,
             ink_id,
             ink_path,
-        } = fresh_page_identifiers(&root, &guard.manifest);
+        } = fresh_page_identifiers(&root, &guard.manifest, schema_version);
         guard.manifest.pages.insert(
             insert_at + index,
             PageReference {
@@ -351,7 +351,7 @@ pub fn import_pdf_pages(
     }
     guard.ensure_unchanged("importing PDF pages")?;
     for (page, page_path, ink, ink_path) in &pages {
-        write_json_compact(&root, ink_path, ink)?;
+        write_ink(&root, ink_path, ink)?;
         write_json(&root, page_path, page)?;
     }
     write_json(&root, layout::MANIFEST, &guard.manifest)?;
@@ -375,7 +375,7 @@ fn duplication_remap(source: &NotebookSnapshot, new_id: &str, modified_at: &str)
             &reference.id,
             layout::ink_layer_id(new_id, index + 1),
             &reference.path,
-            layout::ink_layer_path(new_id, index + 1),
+            layout::ink_layer_path_for_schema(new_id, index + 1, source.page.schema_version),
         );
     }
     let mut blocks = 0usize;
@@ -416,14 +416,18 @@ struct FreshPage {
     ink_path: String,
 }
 
-fn fresh_page_identifiers(root: &Path, manifest: &NotebookManifest) -> FreshPage {
+fn fresh_page_identifiers(
+    root: &Path,
+    manifest: &NotebookManifest,
+    schema_version: u32,
+) -> FreshPage {
     let mut number = manifest.pages.len() + 1;
     loop {
         let id = layout::page_id(number);
         let fresh = FreshPage {
             page_path: layout::page_path(&id),
             ink_id: layout::ink_layer_id(&id, 1),
-            ink_path: layout::ink_layer_path(&id, 1),
+            ink_path: layout::ink_layer_path_for_schema(&id, 1, schema_version),
             id,
         };
         if !manifest
@@ -452,7 +456,7 @@ pub fn duplicate_page(
     let source = open_page(&root, page_id)?;
     let manifest = &mut guard.manifest;
 
-    let fresh = fresh_page_identifiers(&root, manifest);
+    let fresh = fresh_page_identifiers(&root, manifest, source.page.schema_version);
     let (new_id, new_page_path) = (fresh.id, fresh.page_path);
 
     let remap = duplication_remap(&source, &new_id, modified_at);
@@ -650,10 +654,11 @@ pub fn observe_structure(
 ) -> Result<(), StorageError> {
     let guard = ManifestGuard::read(selected_root)?;
     page_reference(&guard.manifest, active_page_id)?;
+    let fingerprint = manifest_fingerprint_bytes(&guard.manifest)?;
     if history
         .current_manifest_bytes
         .as_ref()
-        .is_some_and(|bytes| bytes != &guard.bytes)
+        .is_some_and(|bytes| bytes != &fingerprint)
     {
         history.undo.clear();
         history.redo.clear();
@@ -662,7 +667,7 @@ pub fn observe_structure(
         manifest: guard.manifest,
         active_page_id: active_page_id.to_owned(),
     });
-    history.current_manifest_bytes = Some(guard.bytes);
+    history.current_manifest_bytes = Some(fingerprint);
     Ok(())
 }
 
@@ -672,18 +677,19 @@ pub fn advance_structure(
     snapshot: &NotebookSnapshot,
     history: &mut NotebookStructureHistory,
 ) -> Result<StructureHistoryResult, StorageError> {
+    let guard = ManifestGuard::read(selected_root)?;
+    let fingerprint = manifest_fingerprint_bytes(&guard.manifest)?;
     let previous = history
         .current
         .take()
         .ok_or_else(|| invalid_error("page structure must be observed before changing it"))?;
     push_structure(&mut history.undo, previous);
     history.redo.clear();
-    let guard = ManifestGuard::read(selected_root)?;
     history.current = Some(StructureSnapshot {
         manifest: guard.manifest,
         active_page_id: snapshot.page.id.clone(),
     });
-    history.current_manifest_bytes = Some(guard.bytes);
+    history.current_manifest_bytes = Some(fingerprint);
     Ok(structure_result(snapshot.clone(), history))
 }
 
@@ -710,47 +716,49 @@ fn restore_structure(
     undo: bool,
 ) -> Result<StructureHistoryResult, StorageError> {
     let mut guard = ManifestGuard::open(selected_root, modified_at)?;
-    if history.current_manifest_bytes.as_ref() != Some(&guard.bytes) {
+    if history.current_manifest_bytes.as_ref()
+        != Some(&manifest_fingerprint_bytes(&guard.manifest)?)
+    {
         history.undo.clear();
         history.redo.clear();
         return Err(invalid_error(
             "external change detected; reopen the notebook before changing page history",
         ));
     }
-    let source = if undo {
-        &mut history.undo
-    } else {
-        &mut history.redo
-    };
-    let mut target = source
-        .pop()
+    let source = if undo { &history.undo } else { &history.redo };
+    let target = source
+        .last()
         .ok_or_else(|| invalid_error("nothing to undo or redo in page structure"))?;
     let current = history
         .current
-        .take()
+        .as_ref()
+        .cloned()
         .ok_or_else(|| invalid_error("page structure must be observed before undo or redo"))?;
-    target.manifest.modified_at = modified_at.to_owned();
-    validate_manifest_files(guard.root(), &target.manifest)?;
-    guard.manifest = target.manifest.clone();
+    // Restore only page references; newer schema and other notebook settings stay current.
+    guard.manifest.pages = target.manifest.pages.clone();
+    guard.manifest.modified_at = modified_at.to_owned();
+    validate_manifest_files(guard.root(), &guard.manifest)?;
     let root = guard.root().to_path_buf();
+    let snapshot = load_page(&root, guard.manifest.clone(), &target.active_page_id)?;
+    let fingerprint = manifest_fingerprint_bytes(&guard.manifest)?;
+    let active_page_id = target.active_page_id.clone();
     guard.commit(if undo {
         "undoing a page-list change"
     } else {
         "redoing a page-list change"
     })?;
-    let snapshot = open_page(&root, &target.active_page_id)?;
-
     if undo {
+        history.undo.pop();
         push_structure(&mut history.redo, current);
     } else {
+        history.redo.pop();
         push_structure(&mut history.undo, current);
     }
-    let observed = ManifestGuard::read(&root)?;
     history.current = Some(StructureSnapshot {
-        manifest: observed.manifest,
-        active_page_id: target.active_page_id,
+        manifest: snapshot.manifest.clone(),
+        active_page_id,
     });
-    history.current_manifest_bytes = Some(observed.bytes);
+    history.current_manifest_bytes = Some(fingerprint);
     Ok(structure_result(snapshot, history))
 }
 
@@ -776,10 +784,140 @@ fn structure_result(
 mod tests {
     use crate::{
         MIN_SUPPORTED_SCHEMA_VERSION, PageBackground, PageGeometry, PageObject, SCHEMA_VERSION,
-        ShapeGeometry, ShapePoint, ShapeStyle,
+        ShapeGeometry, ShapePoint, ShapeStyle, StrokePattern,
         storage::{fixtures::*, *},
     };
     use std::path::Path;
+
+    #[test]
+    fn blank_pages_and_duplicates_preserve_the_shared_style() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("notebook");
+        let mut initial = snapshot();
+        initial.manifest.shared_style_path = Some("style.typ".into());
+        let style = b"#set text(size: 12pt)\n";
+        initial.blocks.push(StoredFile {
+            path: "style.typ".into(),
+            bytes: style.to_vec(),
+        });
+        create_notebook(&root, &initial).unwrap();
+        let added = create_page(
+            &root,
+            "2026-10-12T10:00:00Z",
+            &PagePosition::Last,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(added.manifest.pages.len(), 2);
+        assert!(
+            added
+                .blocks
+                .iter()
+                .any(|file| file.path == "style.typ" && file.bytes == style)
+        );
+        duplicate_page(&root, &added.page.id, "2026-10-12T10:01:00Z").unwrap();
+        let mut history = NotebookHistory::default();
+        let mut candidate = observe_page(&root, &added.page.id, &mut history).unwrap();
+        candidate.blocks.clear();
+        let saved = commit_notebook(&root, &mut history, candidate).unwrap();
+        assert_eq!(std::fs::read(root.join("style.typ")).unwrap(), style);
+        assert_eq!(saved.snapshot.page.revision, 2);
+        assert!(
+            saved
+                .snapshot
+                .blocks
+                .iter()
+                .any(|file| file.path == "style.typ")
+        );
+        observe_page(&root, &added.page.id, &mut history).unwrap();
+    }
+
+    #[test]
+    fn structure_history_survives_page_saves_and_does_not_downgrade_schema() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("notebook");
+        create_notebook(&root, &legacy_snapshot()).unwrap();
+        let mut structure = NotebookStructureHistory::default();
+        observe_structure(&root, "page-001", &mut structure).unwrap();
+        let added = create_page(
+            &root,
+            "2026-10-12T10:00:00Z",
+            &PagePosition::Last,
+            None,
+            None,
+        )
+        .unwrap();
+        advance_structure(&root, &added, &mut structure).unwrap();
+        let mut history = NotebookHistory::default();
+        let mut page = observe_page(&root, "page-001", &mut history).unwrap();
+        page.manifest.modified_at = "2026-10-12T10:01:00Z".into();
+        commit_notebook(&root, &mut history, page).unwrap();
+        let undone = undo_structure(&root, "2026-10-12T10:02:00Z", &mut structure).unwrap();
+        assert_eq!(undone.snapshot.manifest.pages.len(), 1);
+        assert_eq!(undone.snapshot.manifest.schema_version, SCHEMA_VERSION);
+        assert!(undone.snapshot.page.ink_layers[0].path.ends_with(".ink"));
+        let redone = redo_structure(&root, "2026-10-12T10:03:00Z", &mut structure).unwrap();
+        assert_eq!(redone.snapshot.manifest.pages.len(), 2);
+        assert_eq!(redone.snapshot.manifest.schema_version, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn failed_structure_undo_can_be_retried_after_repair() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("notebook");
+        create_notebook(&root, &snapshot()).unwrap();
+        let added = create_page(
+            &root,
+            "2026-10-12T10:00:00Z",
+            &PagePosition::Last,
+            None,
+            None,
+        )
+        .unwrap();
+        let mut structure = NotebookStructureHistory::default();
+        observe_structure(&root, &added.page.id, &mut structure).unwrap();
+        let deleted = delete_page(&root, &added.page.id, "2026-10-12T10:01:00Z").unwrap();
+        advance_structure(&root, &deleted, &mut structure).unwrap();
+        let path = root.join(crate::layout::page_path(&added.page.id));
+        let original = std::fs::read(&path).unwrap();
+        let manifest = std::fs::read(root.join(crate::layout::MANIFEST)).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert!(undo_structure(&root, "2026-10-12T10:02:00Z", &mut structure).is_err());
+        assert_eq!(
+            std::fs::read(root.join(crate::layout::MANIFEST)).unwrap(),
+            manifest
+        );
+        std::fs::write(path, original).unwrap();
+        let restored = undo_structure(&root, "2026-10-12T10:02:00Z", &mut structure).unwrap();
+        assert_eq!(restored.snapshot.page.id, added.page.id);
+        assert_eq!(restored.snapshot.manifest.pages.len(), 2);
+    }
+
+    #[test]
+    fn structure_undo_still_refuses_external_manifest_content_changes() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("notebook");
+        create_notebook(&root, &snapshot()).unwrap();
+        let mut structure = NotebookStructureHistory::default();
+        observe_structure(&root, "page-001", &mut structure).unwrap();
+        let added = create_page(
+            &root,
+            "2026-10-12T10:00:00Z",
+            &PagePosition::Last,
+            None,
+            None,
+        )
+        .unwrap();
+        advance_structure(&root, &added, &mut structure).unwrap();
+        let path = root.join(crate::layout::MANIFEST);
+        let mut manifest = added.manifest;
+        manifest.title = "External title".into();
+        let bytes = serde_json::to_vec_pretty(&manifest).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        assert!(undo_structure(&root, "2026-10-12T10:01:00Z", &mut structure).is_err());
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
+    }
 
     #[test]
     fn creates_saves_and_reopens_one_page() {
@@ -884,7 +1022,10 @@ mod tests {
         let fixture =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/notebooks/shape-v2");
         let snapshot = open_notebook(&fixture).unwrap();
-        assert_eq!(snapshot.manifest.schema_version, SCHEMA_VERSION);
+        assert_eq!(
+            snapshot.manifest.schema_version,
+            crate::SHAPE_SCHEMA_VERSION
+        );
         assert_eq!(snapshot.page.objects.len(), 4);
         assert!(
             snapshot
@@ -895,11 +1036,10 @@ mod tests {
         );
     }
 
-    /// A version-1 notebook survives ordinary editing as a version-1 notebook, and rises to
-    /// version 2 on the commit that actually gives it a shape — not before, and not for being
-    /// opened. Older builds keep reading it until the user genuinely uses the new feature.
+    /// Opening leaves a legacy bundle alone. Its first confirmed write migrates only that page;
+    /// an untouched sibling stays readable at version 1 until its own confirmed write.
     #[test]
-    fn a_notebook_rises_to_version_two_only_when_it_gains_a_shape() {
+    fn a_legacy_notebook_migrates_one_confirmed_page_at_a_time() {
         let temporary = tempfile::tempdir().unwrap();
         let root = temporary.path().join("notebook");
         let mut snapshot = snapshot();
@@ -908,7 +1048,16 @@ mod tests {
         for layer in &mut snapshot.ink_layers {
             layer.schema_version = MIN_SUPPORTED_SCHEMA_VERSION;
         }
+        snapshot.page.ink_layers[0].path = crate::layout::legacy_ink_layer_path("page-001", 1);
         create_notebook(&root, &snapshot).unwrap();
+        create_page(
+            &root,
+            "2026-09-03T08:59:00Z",
+            &PagePosition::Last,
+            None,
+            None,
+        )
+        .unwrap();
 
         let mut history = NotebookHistory::default();
         let mut edited = observe_notebook(&root, &mut history).unwrap();
@@ -918,11 +1067,11 @@ mod tests {
         let saved = commit_notebook(&root, &mut history, edited)
             .unwrap()
             .snapshot;
-        assert_eq!(saved.manifest.schema_version, MIN_SUPPORTED_SCHEMA_VERSION);
-        assert_eq!(saved.page.schema_version, MIN_SUPPORTED_SCHEMA_VERSION);
+        assert_eq!(saved.manifest.schema_version, SCHEMA_VERSION);
+        assert_eq!(saved.page.schema_version, SCHEMA_VERSION);
         assert_eq!(
             open_notebook(&root).unwrap().manifest.schema_version,
-            MIN_SUPPORTED_SCHEMA_VERSION
+            SCHEMA_VERSION
         );
 
         let mut with_shape = observe_notebook(&root, &mut history).unwrap();
@@ -938,6 +1087,8 @@ mod tests {
                 stroke_width_pt: 1.6,
                 fill_color: None,
                 opacity: 1.0,
+                pattern: StrokePattern::Solid,
+                pattern_spacing: 1.0,
             },
         });
         with_shape.page.reading_order.push("shape-1".into());
@@ -950,9 +1101,25 @@ mod tests {
 
         let reopened = open_notebook(&root).unwrap();
         assert_eq!(reopened.manifest.schema_version, SCHEMA_VERSION);
+
+        // The untouched sibling remains a valid version-1 bundle below the version-3 manifest,
+        // then upgrades normally on its next confirmed write.
+        let sibling = open_page(&root, "page-002").unwrap();
+        assert_eq!(sibling.page.schema_version, MIN_SUPPORTED_SCHEMA_VERSION);
+        assert_eq!(
+            sibling.ink_layers[0].schema_version,
+            MIN_SUPPORTED_SCHEMA_VERSION
+        );
+        let mut sibling_history = NotebookHistory::default();
+        let sibling = observe_page(&root, "page-002", &mut sibling_history).unwrap();
+        let sibling = commit_notebook(&root, &mut sibling_history, sibling)
+            .unwrap()
+            .snapshot;
+        assert_eq!(sibling.page.schema_version, SCHEMA_VERSION);
+        assert_eq!(sibling.ink_layers[0].schema_version, SCHEMA_VERSION);
     }
 
-    /// A page added to a version-1 notebook is a version-1 page: one notebook, one version.
+    /// A page added to a version-1 notebook starts at the manifest's current version.
     #[test]
     fn a_page_added_to_a_version_one_notebook_stays_version_one() {
         let temporary = tempfile::tempdir().unwrap();
@@ -963,6 +1130,7 @@ mod tests {
         for layer in &mut snapshot.ink_layers {
             layer.schema_version = MIN_SUPPORTED_SCHEMA_VERSION;
         }
+        snapshot.page.ink_layers[0].path = crate::layout::legacy_ink_layer_path("page-001", 1);
         create_notebook(&root, &snapshot).unwrap();
 
         let added = create_page(
@@ -1251,7 +1419,7 @@ mod tests {
         assert_eq!(after_delete.manifest.pages.len(), 2);
         // Deletion removes the reference, never the canonical files.
         assert!(notebook_root.join("pages/page-001.json").is_file());
-        assert!(notebook_root.join("ink/page-001-layer-001.json").is_file());
+        assert!(notebook_root.join("ink/page-001-layer-001.ink").is_file());
 
         delete_page(&notebook_root, "page-002", "2026-07-23T19:05:00Z").unwrap();
         let error = delete_page(&notebook_root, "page-003", "2026-07-23T19:06:00Z").unwrap_err();

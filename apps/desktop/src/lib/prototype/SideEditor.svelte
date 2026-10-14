@@ -1,6 +1,7 @@
 <script lang="ts">
   import TypstEditor from "../editor/TypstEditor.svelte";
   import WritingBar from "../editor/WritingBar.svelte";
+  import EditorColorButton from "../editor/EditorColorButton.svelte";
   import type { WritingCommand } from "../editor/writingCommands";
   import type { PresetSummary } from "../page/presets";
 
@@ -134,6 +135,9 @@
       {/if}
     </span>
     {#if mode === "edit" || mode === "style"}
+      {#if !pageText || mode === "style"}
+        <EditorColorButton onCommand={(command) => editor?.applyWritingCommand(command)} />
+      {/if}
       <button
         type="button"
         class="icon"

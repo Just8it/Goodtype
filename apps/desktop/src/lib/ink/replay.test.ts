@@ -2,7 +2,13 @@ import { describe, expect, it } from "vitest";
 import fixture from "../../../../../fixtures/pen-events/phase0b-replay.json";
 import type { Stroke } from "../model";
 import { maximumSampleGap, summarizeMetric } from "./metrics";
-import { pointerRole, quantizePoints, replaySamples } from "./pipeline";
+import {
+  DEFAULT_POINTER_MAPPING,
+  eraserInHand,
+  pointerRole,
+  quantizePoints,
+  replaySamples,
+} from "./pipeline";
 import {
   eraseStrokeAt,
   hitStroke,
@@ -58,6 +64,43 @@ describe("deterministic pen replay", () => {
     );
   });
 
+  it("maps the barrel button and finger drawing from the writer's settings", () => {
+    const barrel = { pointerType: "pen", button: 2, buttons: 3 };
+    const mapping = (changes: Partial<typeof DEFAULT_POINTER_MAPPING>) => ({
+      ...DEFAULT_POINTER_MAPPING,
+      ...changes,
+    });
+    expect(pointerRole(barrel, "pen")).toBe("erase");
+    expect(pointerRole(barrel, "pen", mapping({ sideButton: "lasso" }))).toBe("lasso");
+    expect(pointerRole(barrel, "pen", mapping({ sideButton: "none" }))).toBe("draw");
+    // The barrel pressed while the pen only hovers is a press too; it must not start a gesture.
+    expect(pointerRole({ pointerType: "pen", button: 2, buttons: 2 }, "pen")).toBe("ignore");
+    // The eraser end is not the barrel button, and no setting turns it into something else.
+    expect(
+      pointerRole({ pointerType: "pen", button: 5, buttons: 32 }, "pen", mapping({ sideButton: "none" })),
+    ).toBe("erase");
+
+    const finger = { pointerType: "touch", button: 0, buttons: 1 };
+    const fingerDraws = mapping({ fingerDraws: true });
+    expect(pointerRole(finger, "pen", fingerDraws)).toBe("draw");
+    expect(pointerRole(finger, "highlighter", fingerDraws)).toBe("draw");
+    expect(pointerRole(finger, "eraser", fingerDraws)).toBe("erase");
+    expect(pointerRole(finger, "lasso", fingerDraws)).toBe("lasso");
+  });
+
+  it("shows the eraser wherever the pen would erase, not only for the eraser tool", () => {
+    const hover = (buttons: number) => ({ pointerType: "pen", button: -1, buttons });
+    expect(eraserInHand(hover(0), "pen")).toBe(false);
+    // Eraser end, and the side button held while hovering, both mean "about to erase".
+    expect(eraserInHand(hover(32), "pen")).toBe(true);
+    expect(eraserInHand(hover(2), "pen")).toBe(true);
+    expect(
+      eraserInHand(hover(2), "pen", { ...DEFAULT_POINTER_MAPPING, sideButton: "lasso" }),
+    ).toBe(false);
+    expect(eraserInHand({ pointerType: "mouse", button: 0, buttons: 0 }, "eraser")).toBe(true);
+    expect(eraserInHand({ pointerType: "mouse", button: 0, buttons: 0 }, "pen")).toBe(false);
+  });
+
   it("selects, hits, moves, and uniformly scales complete strokes", () => {
     const stroke = makeStroke("stroke-a", [
       { x: 10, y: 10 },
@@ -86,6 +129,16 @@ describe("deterministic pen replay", () => {
     const erasedFirst = eraseStrokeAt(strokes, { x: 15, y: 15 }, 2);
     const erasedBoth = eraseStrokeAt(erasedFirst, { x: 80, y: 80 }, 2);
     expect(erasedBoth).toEqual([]);
+  });
+
+  it("lets a highlighter-only eraser pass through pen ink to the sweep beneath", () => {
+    const sweep = { ...makeStroke("sweep", [{ x: 10, y: 10 }, { x: 20, y: 20 }]), tool: "highlighter" as const };
+    const ink = makeStroke("ink", [{ x: 10, y: 10 }, { x: 20, y: 20 }]);
+    const onlyHighlighter = (stroke: { tool: string }) => stroke.tool === "highlighter";
+
+    expect(hitStroke([sweep, ink], { x: 15, y: 15 }, 2)?.id).toBe("ink");
+    expect(hitStroke([sweep, ink], { x: 15, y: 15 }, 2, onlyHighlighter)?.id).toBe("sweep");
+    expect(eraseStrokeAt([ink], { x: 15, y: 15 }, 2, onlyHighlighter)).toEqual([ink]);
   });
 
   it("quantizes completed samples to canonical precision", () => {

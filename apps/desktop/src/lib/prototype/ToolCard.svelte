@@ -1,36 +1,20 @@
 <script lang="ts">
-  import ColorPanel from "./ColorPanel.svelte";
-  import WidthPanel from "./WidthPanel.svelte";
+  import { centredDash } from "./dash";
   import type { PaletteDock } from "./palette";
+  import type { StrokePattern } from "../model";
+  import { patternDashArray } from "../shape/geometry";
+  import { NIB_PATHS } from "./instruments";
   import {
     MM_PER_PT,
     PEN_TYPES,
-    colorName,
     penType,
     type PenPreset,
     type PenTypeId,
   } from "../settings";
 
-  /**
-   * Everything one tool can be set to, in a single card anchored to the tile you tapped.
-   *
-   * The pocket on the rail is where a width or colour is *chosen*; this card is where one is
-   * changed or removed. Splitting the two that way is what let the second-tap-to-edit gesture go:
-   * you no longer have to adopt a colour in order to delete it.
-   *
-   * It replaces a second full-height column on the palette plus three satellite popouts. The
-   * palette used to grow in two directions and still could not hold a pen's settings; now the
-   * rail is a fixed width and the options live off it. The width and colour editors open *inside*
-   * this card rather than beside it, because a popout hanging off a popout is the clutter this
-   * card exists to remove.
-   *
-   * Adding a setting is meant to cost one line. The rows below are snippets — `toggleRow`,
-   * `choiceRow`, `sliderRow` — so a new switch is a `{@render toggleRow(...)}` and nothing else.
-   * See AGENT_DOC §3.9 for the settings queued to land here.
-   */
+  // Tool behaviour lives here; width, pattern and colour are edited at their rail controls.
   let {
     dock,
-    initialView = "main",
     tool,
     label,
     preset,
@@ -38,30 +22,17 @@
     opacity = 1,
     straighten = false,
     behindInk = true,
-    widths,
-    colors,
-    recentColors = [],
-    canAddWidth = true,
-    canAddColor = true,
-    canRemoveWidth = false,
-    canRemoveColor = false,
-    widthBounds,
+    taperEnds = false,
     onChange,
     onSmoothingChange,
     onOpacityChange,
     onStraightenChange,
     onBehindInkChange,
-    onCommitWidth,
-    onRemoveWidth,
-    onCommitColor,
-    onPreviewColor,
-    onRemoveColor,
+    onTaperEndsChange,
     onClose,
   }: {
     /** Which edge the rail is on, so the pointer faces back toward the tile that opened this. */
     dock: PaletteDock;
-    /** `add-colour` opens straight into the picker, for the pocket's `+`. */
-    initialView?: "main" | "add-colour";
     tool: "pen" | "highlighter";
     label: string;
     preset: PenPreset;
@@ -69,29 +40,15 @@
     opacity?: number;
     straighten?: boolean;
     behindInk?: boolean;
-    widths: number[];
-    colors: string[];
-    recentColors?: string[];
-    canAddWidth?: boolean;
-    canAddColor?: boolean;
-    canRemoveWidth?: boolean;
-    canRemoveColor?: boolean;
-    widthBounds: { minimum: number; maximum: number };
+    taperEnds?: boolean;
     onChange: (preset: PenPreset) => void;
     onSmoothingChange: (smoothing: number) => void;
     onOpacityChange?: (opacity: number) => void;
     onStraightenChange?: (straighten: boolean) => void;
     onBehindInkChange?: (behindInk: boolean) => void;
-    /** Write a width back to the chip at `index`, or append when `index` is -1. */
-    onCommitWidth: (index: number, widthPt: number) => void;
-    onRemoveWidth: (index: number) => void;
-    onCommitColor: (index: number, color: string) => void;
-    onPreviewColor: (index: number, color: string) => void;
-    onRemoveColor: (index: number) => void;
+    onTaperEndsChange?: (taperEnds: boolean) => void;
     onClose: () => void;
   } = $props();
-
-  type View = { kind: "main" } | { kind: "width"; index: number } | { kind: "color"; index: number };
 
   const SMOOTHING_STEPS = [
     { label: "None", value: 0 },
@@ -100,30 +57,7 @@
     { label: "High", value: 0.6 },
   ];
 
-  /// Drawn rather than named: at 20px a nib reads faster as its own silhouette than as a word.
-  const NIB_ICONS: Record<PenTypeId, string> = {
-    fountain: "M15.5 3.5l5 5-9.5 9.5-5.5 1.5 1.5-5.5 9.5-9.5z",
-    ballpoint: "M14 4l6 6-9 9-5 1 1-5 7-11z",
-    pencil: "M4 20l3.5-1 12-12-2.5-2.5-12 12L4 20zM14 7l3 3",
-    marker: "M7 14l7-9 5 4-6 9H8l-1-4z",
-    technical: "M12 3.5 15 10v8.5H9V10zM10.5 13.5h3",
-  };
-
-  let view = $state<View>({ kind: "main" });
-
-  /// Seeded from the caller rather than fixed at mount, so the pocket's `+` still lands on the
-  /// picker when the card is already open on something else.
-  $effect(() => {
-    if (initialView === "add-colour") view = { kind: "color", index: -1 };
-  });
-
   const mm = (pt: number) => `${(pt * MM_PER_PT).toFixed(2)} mm`;
-  const activeWidthIndex = $derived(
-    widths.findIndex((width) => Math.abs(width - preset.widthPt) < 0.001),
-  );
-  const activeColorIndex = $derived(
-    colors.findIndex((color) => color.toLowerCase() === preset.color.toLowerCase()),
-  );
   const nearestSmoothing = $derived(
     SMOOTHING_STEPS.reduce((best, step) =>
       Math.abs(step.value - smoothing) < Math.abs(best.value - smoothing) ? step : best,
@@ -137,15 +71,10 @@
     onSmoothingChange(type.smoothing);
   }
 
-  function back() {
-    view = { kind: "main" };
-  }
-
   function keydown(event: KeyboardEvent) {
     if (event.key !== "Escape") return;
     event.stopPropagation();
-    if (view.kind === "main") onClose();
-    else back();
+    onClose();
   }
 </script>
 
@@ -220,59 +149,13 @@
 >
   <span class="arrow" aria-hidden="true"></span>
   <header>
-    {#if view.kind !== "main"}
-      <button type="button" class="chrome" aria-label="Back to {label} settings" onclick={back}>
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 6l-6 6 6 6" /></svg>
-      </button>
-    {/if}
-    <span class="name">{view.kind === "width" ? "Width" : view.kind === "color" ? "Colour" : label}</span>
-    {#if view.kind === "main"}<span class="meta">{mm(preset.widthPt)}</span>{/if}
+    <span class="name">{label}</span>
+    <span class="meta">{mm(preset.widthPt)}</span>
     <button type="button" class="chrome" aria-label="Close settings" onclick={onClose}>
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18" /></svg>
     </button>
   </header>
 
-  {#if view.kind === "width"}
-    <WidthPanel
-      embedded
-      widthPt={view.index === -1 ? preset.widthPt : widths[view.index]}
-      kind={tool}
-      minimumMm={widthBounds.minimum}
-      maximumMm={widthBounds.maximum}
-      canRemove={view.index !== -1 && canRemoveWidth}
-      onCommit={(next) => {
-        onCommitWidth(view.kind === "width" ? view.index : -1, next);
-        back();
-      }}
-      onRemove={() => {
-        if (view.kind === "width" && view.index !== -1) onRemoveWidth(view.index);
-        back();
-      }}
-      onClose={back}
-    />
-  {:else if view.kind === "color"}
-    <ColorPanel
-      embedded
-      value={view.index === -1 ? preset.color : colors[view.index]}
-      recent={recentColors}
-      mode={view.index === -1 ? "add" : "edit"}
-      canRemove={view.index !== -1 && canRemoveColor}
-      onPick={(color) => {
-        // Opened by the pocket's `+`, the card was only ever a means to add a colour, so it
-        // gets out of the way once there is one rather than parking itself over the page.
-        const fromPocket = initialView === "add-colour" && view.kind === "color" && view.index === -1;
-        onCommitColor(view.kind === "color" ? view.index : -1, color);
-        if (fromPocket) onClose();
-        else back();
-      }}
-      onChange={(color) => onPreviewColor(view.kind === "color" ? view.index : -1, color)}
-      onRemove={() => {
-        if (view.kind === "color" && view.index !== -1) onRemoveColor(view.index);
-        back();
-      }}
-      onClose={back}
-    />
-  {:else}
     <div class="body">
       <!-- The choice made visible rather than numeric: the same stroke the pen will lay down. -->
       <div class="preview">
@@ -283,6 +166,9 @@
             stroke={preset.color}
             stroke-width={preset.widthPt * (tool === "highlighter" ? 3 : 1.6)}
             stroke-linecap="round"
+            use:centredDash={tool === "pen"
+              ? patternDashArray(preset.pattern, preset.widthPt * 1.6)
+              : null}
             opacity={tool === "highlighter" ? opacity : 1}
           />
         </svg>
@@ -302,74 +188,12 @@
                 title={`${type.label} — ${type.description}`}
                 onclick={() => chooseNib(type.id)}
               >
-                <svg viewBox="0 0 24 24" aria-hidden="true"><path d={NIB_ICONS[type.id]} /></svg>
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d={NIB_PATHS[type.id]} transform="rotate(45 12 12)" /></svg>
               </button>
             {/each}
           </div>
         </section>
       {/if}
-
-      <section>
-        {@render sectionLabel("Width", mm(preset.widthPt), "tap to edit")}
-        <div class="chips">
-          {#each widths as width, index (width)}
-            <button
-              type="button"
-              class="chip"
-              class:current={index === activeWidthIndex}
-              title={`${mm(width)} — tap to change or remove`}
-              aria-label={index === activeWidthIndex ? `Edit ${mm(width)}, in use` : `Edit ${mm(width)}`}
-              onclick={() => (view = { kind: "width", index })}
-            >
-              <span
-                class="rule"
-                style:height={`${Math.max(1, Math.min(width * (tool === "highlighter" ? 2.2 : 1.4), 9))}px`}
-                style:background={tool === "highlighter" ? `${preset.color}99` : "var(--text)"}
-              ></span>
-            </button>
-          {/each}
-          {#if canAddWidth}
-            <button
-              type="button"
-              class="chip open"
-              aria-label="Set an exact width"
-              title="Set an exact width"
-              onclick={() => (view = { kind: "width", index: -1 })}
-            >mm</button>
-          {/if}
-        </div>
-      </section>
-
-      <section>
-        {@render sectionLabel("Colour", colorName(preset.color), "tap to edit")}
-        <div class="swatches">
-          {#each colors as color, index (color)}
-            <button
-              type="button"
-              class="swatch"
-              class:current={index === activeColorIndex}
-              style:background={color}
-              style:opacity={tool === "highlighter" ? opacity : 1}
-              aria-label={index === activeColorIndex
-                ? `Edit ${colorName(color)}, in use`
-                : `Edit ${colorName(color)}`}
-              title={`${colorName(color)} — tap to change or remove`}
-              onclick={() => (view = { kind: "color", index })}
-            ></button>
-          {/each}
-          {#if canAddColor}
-            <button
-              type="button"
-              class="swatch open"
-              aria-label="Add a colour"
-              title="Add a colour"
-              onclick={() => (view = { kind: "color", index: -1 })}
-            >
-              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 6v12M6 12h12" /></svg>
-            </button>
-          {/if}
-        </div>
-      </section>
 
       <div class="divider"></div>
 
@@ -381,11 +205,11 @@
           {@render sliderRow("Opacity", opacity, 0.1, 1, 0.05, (next) => onOpacityChange?.(next))}
           {@render toggleRow("Straighten to lines", straighten, () => onStraightenChange?.(!straighten))}
           {@render toggleRow("Draw behind ink", behindInk, () => onBehindInkChange?.(!behindInk))}
+          {@render toggleRow("Tapered ends", taperEnds, () => onTaperEndsChange?.(!taperEnds), "Off keeps the full width to both ends")}
         {/if}
         {@render choiceRow("Stabiliser", SMOOTHING_STEPS, nearestSmoothing.value, onSmoothingChange)}
       </section>
     </div>
-  {/if}
 </div>
 
 <style>
@@ -571,64 +395,8 @@
     stroke-width: var(--stroke);
   }
 
-  .chips { display: flex; gap: 5px; }
-
-  .chip {
-    display: grid;
-    height: 38px;
-    flex: 1;
-    border: 1px solid var(--edge);
-    border-radius: var(--radius);
-    background: transparent;
-    color: var(--muted);
-    cursor: pointer;
-    place-items: center;
-  }
-
-  .chip .rule { width: 22px; border-radius: 4px; }
-
-  /* Dashed, because it opens an editor rather than setting a value — the same distinction the
-     palette already draws between a swatch and the control that makes one. */
-  .chip.open,
-  .swatch.open {
-    flex: none;
-    border-style: dashed;
-    font-size: var(--text-sm);
-  }
-
-  .chip.open { width: 38px; }
-
-  .nib:hover, .chip:hover, .swatch:hover { background: var(--wash); }
-
-  .nib.current, .chip.current {
-    border-color: var(--blueprint);
-    background: rgb(76 141 240 / 14%);
-    color: var(--text);
-  }
-
-  .swatches { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; }
-
-  .swatch {
-    display: grid;
-    width: 100%;
-    aspect-ratio: 1;
-    border: 1px solid var(--edge);
-    border-radius: 50%;
-    color: var(--quiet);
-    cursor: pointer;
-    place-items: center;
-  }
-
-  .swatch.current { outline: 1.5px solid var(--blueprint); outline-offset: 2px; }
-  .swatch.open { background: transparent; }
-  .swatch.open svg {
-    width: 12px;
-    height: 12px;
-    fill: none;
-    stroke: currentColor;
-    stroke-linecap: round;
-    stroke-width: var(--stroke-dense);
-  }
+  .nib:hover { background: var(--wash); }
+  .nib.current { border-color: var(--blueprint); background: rgb(76 141 240 / 14%); color: var(--text); }
 
   .divider { height: 1px; flex: none; background: var(--edge-soft); }
 
@@ -703,8 +471,6 @@
   .slider input { width: 100%; accent-color: var(--blueprint); }
 
   .nib:focus-visible,
-  .chip:focus-visible,
-  .swatch:focus-visible,
   .toggle:focus-visible,
   .chrome:focus-visible,
   .segmented button:focus-visible {

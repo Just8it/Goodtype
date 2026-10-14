@@ -4,6 +4,7 @@ import type {
   ShapeGeometry,
   ShapePoint,
   ShapeStyle,
+  StrokePattern,
   StrokePoint,
 } from "../model";
 
@@ -20,6 +21,38 @@ export type ShapeDraft = {
 export type ShapeBounds = { left: number; top: number; right: number; bottom: number };
 
 export const MIN_SHAPE_SIZE_PT = 4;
+
+/**
+ * Dash array for a shape outline, in the shape's own units.
+ *
+ * Spacing matches patterned ink (`ink/pattern.ts`): dashes of max(4w, 6), gaps of max(2.5w, 3.5)
+ * and dots every max(2.75w, 4). Shapes are stroked with round caps that add half a width at each
+ * end, so the array shortens each dash by one width to keep the visible lengths equal. The export
+ * in `crates/goodtype-typst/src/export.rs` mirrors this.
+ */
+export function shapeDashArray(style: ShapeStyle): number[] | null {
+  return patternDashArray(style.pattern ?? "solid", style.strokeWidthPt, style.patternSpacing ?? 1);
+}
+
+/**
+ * The same spacing for any round-capped line of `width`, in that line's units. Previews draw at a
+ * magnified width, so they pass that width rather than the nib's: a fixed array let fat dots run
+ * together into a solid bead.
+ */
+export function patternDashArray(
+  pattern: StrokePattern,
+  width: number,
+  spacing = 1,
+): number[] | null {
+  if (pattern === "dashed") {
+    return [
+      Math.max(Math.max(width * 4, 6) - width, 0.01),
+      Math.max(width * 2.5, 3.5) * spacing + width,
+    ];
+  }
+  if (pattern === "dotted") return [0.01, Math.max(width * 2.75, 4) * spacing];
+  return null;
+}
 /// The store will not accept a closed curve with fewer knots than this, and it would not enclose
 /// anything anyway.
 export const MIN_CLOSED_SPLINE_NODES = 3;
@@ -60,6 +93,139 @@ export function shapePath(geometry: ShapeGeometry): string {
     case "spline":
       return splinePath(geometry.nodes, geometry.closed);
   }
+}
+
+/**
+ * How far a point in the shape's own coordinates lies from its outline.
+ *
+ * The outline, not the region: an unfilled shape is only the line that was drawn, and reaching
+ * inside a large empty rectangle should no more touch it than reaching outside one does.
+ */
+export function distanceToOutline(geometry: ShapeGeometry, point: ShapePoint): number {
+  switch (geometry.kind) {
+    case "line":
+      return distanceToSegment(point, geometry.start, geometry.end);
+    case "rectangle":
+      return Math.abs(signedBoxDistance(geometry.widthPt, geometry.heightPt, point));
+    case "ellipse":
+      return distanceToEllipse(
+        point,
+        { x: geometry.widthPt / 2, y: geometry.heightPt / 2 },
+        geometry.widthPt / 2,
+        geometry.heightPt / 2,
+      );
+    case "spline": {
+      const walk = splinePolyline(geometry.nodes, geometry.closed);
+      let nearest = Number.POSITIVE_INFINITY;
+      for (let index = 1; index < walk.length; index += 1) {
+        nearest = Math.min(nearest, distanceToSegment(point, walk[index - 1], walk[index]));
+      }
+      return walk.length === 1 ? distance(point, walk[0]) : nearest;
+    }
+  }
+}
+
+/**
+ * Whether a point in the shape's own coordinates falls inside it.
+ *
+ * Only meaningful for a shape that encloses something, and only consulted for one that is filled —
+ * a tint is part of what was drawn, so touching it counts as touching the shape.
+ */
+export function containsPoint(geometry: ShapeGeometry, point: ShapePoint): boolean {
+  switch (geometry.kind) {
+    case "line":
+      return false;
+    case "rectangle":
+      return signedBoxDistance(geometry.widthPt, geometry.heightPt, point) <= 0;
+    case "ellipse": {
+      const rx = geometry.widthPt / 2;
+      const ry = geometry.heightPt / 2;
+      return rx > 0 && ry > 0 && Math.hypot((point.x - rx) / rx, (point.y - ry) / ry) <= 1;
+    }
+    case "spline":
+      return geometry.closed && windsAround(splinePolyline(geometry.nodes, true), point);
+  }
+}
+
+/**
+ * Distance from a point to an ellipse's outline, by one Newton step from the normalised residual.
+ *
+ * Exact on a circle and close enough on anything a hand draws, which is what lets a residual in
+ * these coordinates be compared against a distance measured anywhere else.
+ */
+export function distanceToEllipse(
+  point: ShapePoint,
+  centre: ShapePoint,
+  rx: number,
+  ry: number,
+): number {
+  if (rx <= 0 || ry <= 0) return distance(point, centre);
+  const dx = (point.x - centre.x) / rx;
+  const dy = (point.y - centre.y) / ry;
+  const radius = Math.hypot(dx, dy);
+  const gradient = Math.hypot(dx / rx, dy / ry);
+  return gradient > 1e-9 ? Math.abs(radius - 1) / gradient : Math.min(rx, ry);
+}
+
+/// A spline flattened into straight segments, for measuring against rather than drawing.
+export function splinePolyline(nodes: BezierNode[], closed: boolean, perSegment = 8): ShapePoint[] {
+  if (nodes.length === 0) return [];
+  if (nodes.length === 1) return [nodes[0].point];
+  const walk: ShapePoint[] = [nodes[0].point];
+  const pairs = closed && nodes.length > 2 ? nodes.length : nodes.length - 1;
+  for (let index = 0; index < pairs; index += 1) {
+    const from = nodes[index];
+    const to = nodes[(index + 1) % nodes.length];
+    const control1 = add(from.point, from.handleOut ?? { x: 0, y: 0 });
+    const control2 = add(to.point, to.handleIn ?? { x: 0, y: 0 });
+    for (let step = 1; step <= perSegment; step += 1) {
+      walk.push(cubicAt(from.point, control1, control2, to.point, step / perSegment));
+    }
+  }
+  return walk;
+}
+
+/// Negative inside the box, positive outside, and the magnitude is the distance to its edge.
+function signedBoxDistance(width: number, height: number, point: ShapePoint): number {
+  const halfWidth = width / 2;
+  const halfHeight = height / 2;
+  const x = Math.abs(point.x - halfWidth) - halfWidth;
+  const y = Math.abs(point.y - halfHeight) - halfHeight;
+  return Math.hypot(Math.max(x, 0), Math.max(y, 0)) + Math.min(Math.max(x, y), 0);
+}
+
+/// Even-odd crossing test against a closed polyline.
+function windsAround(walk: ShapePoint[], point: ShapePoint): boolean {
+  let inside = false;
+  for (let index = 0, previous = walk.length - 1; index < walk.length; previous = index, index += 1) {
+    const from = walk[index];
+    const to = walk[previous];
+    if (
+      from.y > point.y !== to.y > point.y &&
+      point.x < ((to.x - from.x) * (point.y - from.y)) / (to.y - from.y) + from.x
+    ) {
+      inside = !inside;
+    }
+  }
+  return inside;
+}
+
+function cubicAt(
+  from: ShapePoint,
+  control1: ShapePoint,
+  control2: ShapePoint,
+  to: ShapePoint,
+  at: number,
+): ShapePoint {
+  const inverse = 1 - at;
+  const a = inverse * inverse * inverse;
+  const b = 3 * inverse * inverse * at;
+  const c = 3 * inverse * at * at;
+  const d = at * at * at;
+  return {
+    x: a * from.x + b * control1.x + c * control2.x + d * to.x,
+    y: a * from.y + b * control1.y + c * control2.y + d * to.y,
+  };
 }
 
 export function shapeBounds(geometry: ShapeGeometry): ShapeBounds {
@@ -293,7 +459,7 @@ function travelledDistance(points: readonly Point[]): number {
   return points.slice(1).reduce((sum, point, index) => sum + distance(points[index], point), 0);
 }
 
-function distanceToSegment(point: Point, start: Point, end: Point): number {
+function distanceToSegment(point: ShapePoint, start: ShapePoint, end: ShapePoint): number {
   const dx = end.x - start.x;
   const dy = end.y - start.y;
   if (dx === 0 && dy === 0) return distance(point, start);
@@ -304,7 +470,7 @@ function distanceToSegment(point: Point, start: Point, end: Point): number {
   return distance(point, { x: start.x + amount * dx, y: start.y + amount * dy });
 }
 
-function distance(a: Point, b: Point): number {
+function distance(a: ShapePoint, b: ShapePoint): number {
   return Math.hypot(a.x - b.x, a.y - b.y);
 }
 

@@ -1,5 +1,9 @@
 <script lang="ts">
+  import { centredDash } from "./dash";
+  import type { StrokePattern } from "../model";
+  import { MAX_PATTERN_SPACING, MIN_PATTERN_SPACING } from "../ink/pattern";
   import { colorName, MM_PER_PT } from "../settings";
+  import { patternDashArray } from "../shape/geometry";
   import type { ShapeKind } from "../shape/geometry";
   import type { PaletteDock } from "./palette";
 
@@ -11,10 +15,14 @@
     drawAndHold,
     strokeColor,
     strokeWidthPt,
+    pattern,
+    spacing,
     onKindChange,
     onFillChange,
     onConstrainChange,
     onDrawAndHoldChange,
+    onPatternChange,
+    onSpacingChange,
     onClose,
   }: {
     dock: PaletteDock;
@@ -24,12 +32,24 @@
     drawAndHold: boolean;
     strokeColor: string;
     strokeWidthPt: number;
+    pattern: StrokePattern;
+    spacing: number;
     onKindChange: (kind: ShapeKind) => void;
     onFillChange: (fill: boolean) => void;
     onConstrainChange: (constrain: boolean) => void;
     onDrawAndHoldChange: (enabled: boolean) => void;
+    onPatternChange: (pattern: StrokePattern) => void;
+    onSpacingChange: (spacing: number) => void;
     onClose: () => void;
   } = $props();
+
+  const PATTERNS: { id: StrokePattern; label: string; dasharray: number[] | null }[] = [
+    { id: "solid", label: "Solid", dasharray: null },
+    { id: "dashed", label: "Dashed", dasharray: [10, 7] },
+    { id: "dotted", label: "Dotted", dasharray: [0.01, 7] },
+  ];
+  const previewWidth = $derived(Math.max(1.5, strokeWidthPt * 1.6));
+  const previewDasharray = $derived(patternDashArray(pattern, previewWidth, spacing));
 
   const SHAPES: { kind: ShapeKind; label: string; hint: string }[] = [
     { kind: "line", label: "Line", hint: "Drag from start to end" },
@@ -39,7 +59,15 @@
   ];
 
   const isClosed = $derived(kind === "rectangle" || kind === "ellipse");
-  const supportsConstraint = $derived(kind !== "spline");
+  /// What the constraint does depends on what is being drawn, and it governs a promoted line
+  /// whatever the tool is set to, so it is never inert.
+  const constraintHint = $derived(
+    kind === "line"
+      ? "Snap to 15° angles"
+      : kind === "spline"
+        ? "Snap a promoted line to 15° angles"
+        : "Square or circle, and 15° lines",
+  );
   const widthLabel = $derived(`${(strokeWidthPt * MM_PER_PT).toFixed(2)} mm`);
 
   function keydown(event: KeyboardEvent) {
@@ -100,7 +128,7 @@
   <div class="body">
     <div class="preview" style:--shape-colour={strokeColor}>
       <svg viewBox="0 0 250 54" aria-hidden="true">
-        <path d="M22 38C66 5 91 46 130 25S196 7 228 29" fill="none" stroke={strokeColor} stroke-width={Math.max(1.5, strokeWidthPt * 1.6)}></path>
+        <path d="M22 38C66 5 91 46 130 25S196 7 228 29" fill="none" stroke={strokeColor} stroke-width={previewWidth} stroke-linecap="round" use:centredDash={previewDasharray}></path>
       </svg>
       <span>{colorName(strokeColor)} · current pen stroke</span>
     </div>
@@ -124,13 +152,40 @@
       </div>
     </section>
 
+    <section>
+      <span class="section-label">Line</span>
+      <div class="pattern-grid" role="radiogroup" aria-label="Line pattern">
+        {#each PATTERNS as choice (choice.id)}
+          <button
+            type="button"
+            role="radio"
+            class:current={pattern === choice.id}
+            aria-checked={pattern === choice.id}
+            onclick={() => onPatternChange(choice.id)}
+          >
+            <svg viewBox="0 0 60 12" aria-hidden="true"><path d="M6 6H54" use:centredDash={choice.dasharray} /></svg>
+            <span>{choice.label}</span>
+          </button>
+        {/each}
+      </div>
+      {#if pattern !== "solid"}
+        <label class="spacing">
+          <span>Spacing</span>
+          <input type="range" min={MIN_PATTERN_SPACING} max={MAX_PATTERN_SPACING} step="0.05"
+            value={spacing} aria-label="Pattern spacing"
+            oninput={(event) => onSpacingChange(Number(event.currentTarget.value))} />
+          <output>{Math.round(spacing * 100)}%</output>
+        </label>
+      {/if}
+    </section>
+
     <div class="divider"></div>
     <section class="rows">
       {@render toggle(
         "Keep proportions",
-        kind === "line" ? "Snap to 15° angles" : "Square or perfect circle",
+        constraintHint,
         constrain,
-        !supportsConstraint,
+        false,
         () => onConstrainChange(!constrain),
       )}
       {@render toggle(
@@ -193,6 +248,15 @@
   .shape-grid svg { width: var(--icon); height: var(--icon); flex: none; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: var(--stroke); }
   .shape-grid svg circle { fill: currentColor; stroke: none; }
   .shape-grid button span { font-size: var(--text-md); }
+  .pattern-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+  .pattern-grid button { display: grid; min-height: var(--control-touch); place-items: center; padding: 6px 4px; border: 1px solid var(--edge); border-radius: var(--radius); background: transparent; color: var(--muted); cursor: pointer; gap: 2px; font: inherit; font-size: var(--text-sm); }
+  .pattern-grid button:hover { background: var(--wash); color: var(--text); }
+  .pattern-grid button.current { border-color: var(--blueprint); background: rgb(76 141 240 / 14%); color: var(--text); }
+  .pattern-grid button:focus-visible { outline: 2px solid var(--blueprint-light); outline-offset: 1px; }
+  .spacing { display: grid; grid-template-columns: auto 1fr 3.2em; align-items: center; gap: 10px; margin-top: 8px; font-size: var(--text-sm); color: var(--muted); }
+  .spacing input { width: 100%; accent-color: var(--blueprint); }
+  .spacing output { text-align: right; color: var(--text); font-variant-numeric: tabular-nums; }
+  .pattern-grid svg { width: 100%; height: 12px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
 
   .divider { height: 1px; background: var(--edge-soft); }
   .rows { gap: 2px; }

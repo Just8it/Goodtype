@@ -26,6 +26,11 @@ pub struct AppSettings {
     pub highlighter_swatches: Vec<String>,
     /// Width chips offered for each tool, in points.
     pub pen_widths: Vec<f64>,
+    /// Line pattern per pen width chip, keyed by the width as the UI writes it. A width with no
+    /// entry is solid, which is also how every older settings file reads.
+    pub pen_width_patterns: std::collections::BTreeMap<String, String>,
+    /// Gap factor per pen width chip for its pattern; a width with no entry uses 1.
+    pub pen_width_spacings: std::collections::BTreeMap<String, f64>,
     pub highlighter_widths: Vec<f64>,
     /// Most-recently-used colours, newest first. This is how colours accumulate in practice.
     pub recent_colors: Vec<String>,
@@ -35,12 +40,20 @@ pub struct AppSettings {
     pub highlighter_opacity: f64,
     pub highlighter_straighten: bool,
     pub highlighter_behind_ink: bool,
+    /// Whether highlighter strokes narrow at both ends. Off keeps a flat, full-width band.
+    pub highlighter_taper: bool,
     /// Last explicit shape tool and its small, app-local drawing preferences.
     pub shape_kind: String,
     pub shape_fill: bool,
+    /// Line pattern for the Shapes tool: "solid", "dashed" or "dotted".
+    pub shape_pattern: String,
+    /// Gap factor for the Shapes tool's pattern.
+    pub shape_pattern_spacing: f64,
     pub shape_constrain: bool,
     /// Pen shortcut: pause at the end of a deliberate mark to promote it into a shape.
     pub draw_and_hold_shapes: bool,
+    /// Where the undo and redo buttons sit; `auto` keeps them clear of the palette on their own.
+    pub history_corner: String,
     pub eraser_size: String,
     pub calibration: PressureCalibration,
     pub undo_scope: UndoScope,
@@ -59,6 +72,17 @@ pub struct AppSettings {
     /// Allow downloading Typst Universe packages on a cache miss. Cached packages
     /// keep working either way.
     pub remote_packages: bool,
+    /// Whether one finger draws with the active tool. Off keeps touch for navigation only.
+    pub draw_with_finger: bool,
+    /// What the stylus barrel button does: "eraser", "lasso" or "none". The eraser end of the
+    /// pen always erases.
+    pub pen_side_button: String,
+    /// After an erase picked from the bar, hand the page back to the tool used before it.
+    pub eraser_returns: bool,
+    /// What the eraser removes: "everything" or "highlighter" only.
+    pub eraser_reach: String,
+    /// Palette tiles the writer has taken off the bar. Their shortcuts keep working.
+    pub hidden_tools: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -72,13 +96,52 @@ pub struct PenPreset {
     /// Whether stylus force varies this slot's width.
     #[serde(default)]
     pub pressure: bool,
+    /// The line pattern this slot lays down. Older settings remain solid.
+    #[serde(default = "default_pen_pattern")]
+    pub pattern: String,
 }
 
 fn default_pen_type() -> String {
     "fountain".into()
 }
 
+fn default_pen_pattern() -> String {
+    "solid".into()
+}
+
 const PEN_TYPES: [&str; 5] = ["fountain", "ballpoint", "pencil", "marker", "technical"];
+const PEN_PATTERNS: [&str; 3] = ["solid", "dashed", "dotted"];
+/// Mirrors `MIN_PATTERN_SPACING` / `MAX_PATTERN_SPACING` in `goodtype_core::pattern`.
+const PATTERN_SPACING: (f64, f64) = (
+    goodtype_core::pattern::MIN_PATTERN_SPACING,
+    goodtype_core::pattern::MAX_PATTERN_SPACING,
+);
+/// Mirrors `PaletteCommand` in `apps/desktop/src/lib/prototype/palette.ts`.
+const PALETTE_TOOLS: [&str; 8] = [
+    "pen-1",
+    "pen-2",
+    "highlighter",
+    "eraser",
+    "lasso",
+    "shape",
+    "page-text",
+    "typst-block",
+];
+
+/// Keeps known tile ids once each, and never lets both pens leave the bar: a palette with no pen
+/// on it has nothing left to write with by tap.
+fn sanitize_hidden_tools(hidden: Vec<String>) -> Vec<String> {
+    let mut kept: Vec<String> = Vec::new();
+    for id in hidden {
+        if PALETTE_TOOLS.contains(&id.as_str()) && !kept.contains(&id) {
+            kept.push(id);
+        }
+    }
+    if kept.iter().any(|id| id == "pen-1") && kept.iter().any(|id| id == "pen-2") {
+        kept.retain(|id| id != "pen-1");
+    }
+    kept
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -105,12 +168,14 @@ impl Default for AppSettings {
                     color: "#1e232b".into(),
                     r#type: "fountain".into(),
                     pressure: true,
+                    pattern: default_pen_pattern(),
                 },
                 PenPreset {
                     width_pt: 2.8,
                     color: "#2f6fdb".into(),
                     r#type: "ballpoint".into(),
                     pressure: false,
+                    pattern: default_pen_pattern(),
                 },
             ],
             highlighter: PenPreset {
@@ -118,6 +183,7 @@ impl Default for AppSettings {
                 color: "#e0912b".into(),
                 r#type: "marker".into(),
                 pressure: false,
+                pattern: default_pen_pattern(),
             },
             pen_swatches: ["#1e232b", "#4c8df0", "#e5645e"].map(String::from).to_vec(),
             highlighter_swatches: ["#e0912b", "#e9d636", "#57c08a"].map(String::from).to_vec(),
@@ -125,16 +191,22 @@ impl Default for AppSettings {
             // opens showing the pen in hand as the selected one. More can be added; starting
             // with a full row invites picking from a ladder instead of setting a width.
             pen_widths: vec![1.6, 2.8],
+            pen_width_patterns: Default::default(),
+            pen_width_spacings: Default::default(),
             highlighter_widths: vec![3.78, 5.2],
             recent_colors: Vec::new(),
             pressure_enabled: true,
             highlighter_opacity: 0.6,
             highlighter_straighten: false,
             highlighter_behind_ink: true,
+            highlighter_taper: false,
             shape_kind: "line".into(),
             shape_fill: false,
+            shape_pattern: default_pen_pattern(),
+            shape_pattern_spacing: 1.0,
             shape_constrain: false,
             draw_and_hold_shapes: true,
+            history_corner: "auto".into(),
             eraser_size: "medium".into(),
             calibration: PressureCalibration {
                 minimum: 0.0,
@@ -151,6 +223,11 @@ impl Default for AppSettings {
             page_text_baseline_grid: true,
             page_text_line_wrap: true,
             remote_packages: true,
+            draw_with_finger: false,
+            pen_side_button: "eraser".into(),
+            eraser_returns: true,
+            eraser_reach: "everything".into(),
+            hidden_tools: Vec::new(),
         }
     }
 }
@@ -230,6 +307,9 @@ fn sanitize(mut settings: AppSettings) -> AppSettings {
         if !PEN_TYPES.contains(&preset.r#type.as_str()) {
             preset.r#type = default_pen_type();
         }
+        if !PEN_PATTERNS.contains(&preset.pattern.as_str()) {
+            preset.pattern = default_pen_pattern();
+        }
         if !valid_color(&preset.color) {
             preset.color = defaults
                 .pen_presets
@@ -242,6 +322,7 @@ fn sanitize(mut settings: AppSettings) -> AppSettings {
     if !PEN_TYPES.contains(&settings.highlighter.r#type.as_str()) {
         settings.highlighter.r#type = "marker".into();
     }
+    settings.highlighter.pattern = default_pen_pattern();
     if !valid_color(&settings.highlighter.color) {
         settings.highlighter.color = defaults.highlighter.color;
     }
@@ -249,10 +330,19 @@ fn sanitize(mut settings: AppSettings) -> AppSettings {
         settings.eraser_size = defaults.eraser_size;
     }
     if !matches!(
+        settings.history_corner.as_str(),
+        "auto" | "top-left" | "top-right" | "bottom-left" | "bottom-right"
+    ) {
+        settings.history_corner = defaults.history_corner;
+    }
+    if !matches!(
         settings.shape_kind.as_str(),
         "line" | "rectangle" | "ellipse" | "spline"
     ) {
         settings.shape_kind = defaults.shape_kind;
+    }
+    if !PEN_PATTERNS.contains(&settings.shape_pattern.as_str()) {
+        settings.shape_pattern = default_pen_pattern();
     }
     settings.calibration.minimum = clamp(settings.calibration.minimum, 0.0, 0.99, 0.0);
     settings.calibration.maximum = clamp(
@@ -284,6 +374,34 @@ fn sanitize(mut settings: AppSettings) -> AppSettings {
     settings.recent_colors.retain(|color| valid_color(color));
     settings.recent_colors.truncate(MAX_RECENT_COLORS);
     settings.pen_widths = sanitize_widths(settings.pen_widths, &defaults.pen_widths, 0.2, 12.0);
+    let widths = settings.pen_widths.clone();
+    settings.pen_width_patterns.retain(|key, pattern| {
+        pattern != "solid"
+            && PEN_PATTERNS.contains(&pattern.as_str())
+            && key.parse::<f64>().is_ok_and(|width| {
+                widths
+                    .iter()
+                    .any(|existing| (existing - width).abs() < 0.001)
+            })
+    });
+    settings.pen_width_spacings.retain(|key, spacing| {
+        spacing.is_finite()
+            && *spacing != 1.0
+            && key.parse::<f64>().is_ok_and(|width| {
+                widths
+                    .iter()
+                    .any(|existing| (existing - width).abs() < 0.001)
+            })
+    });
+    for spacing in settings.pen_width_spacings.values_mut() {
+        *spacing = spacing.clamp(PATTERN_SPACING.0, PATTERN_SPACING.1);
+    }
+    settings.shape_pattern_spacing = clamp(
+        settings.shape_pattern_spacing,
+        PATTERN_SPACING.0,
+        PATTERN_SPACING.1,
+        1.0,
+    );
     settings.highlighter_widths = sanitize_widths(
         settings.highlighter_widths,
         &defaults.highlighter_widths,
@@ -295,6 +413,16 @@ fn sanitize(mut settings: AppSettings) -> AppSettings {
     // which on a wide display is far more than any fixed pixel cap would allow.
     settings.side_editor_width = clamp(settings.side_editor_width, 280.0, 2400.0, 420.0);
     settings.touch_glide = clamp(settings.touch_glide, 0.0, 4.0, 2.0);
+    if !matches!(
+        settings.pen_side_button.as_str(),
+        "eraser" | "lasso" | "none"
+    ) {
+        settings.pen_side_button = defaults.pen_side_button;
+    }
+    if !matches!(settings.eraser_reach.as_str(), "everything" | "highlighter") {
+        settings.eraser_reach = defaults.eraser_reach;
+    }
+    settings.hidden_tools = sanitize_hidden_tools(settings.hidden_tools);
     settings
 }
 
@@ -635,11 +763,70 @@ mod tests {
     }
 
     #[test]
+    fn old_settings_keep_touch_navigation_and_a_full_bar() {
+        let settings: AppSettings =
+            serde_json::from_str("{}").expect("legacy settings should load");
+        assert!(!settings.draw_with_finger);
+        assert_eq!(settings.pen_side_button, "eraser");
+        assert_eq!(settings.eraser_reach, "everything");
+        assert!(settings.hidden_tools.is_empty());
+        assert!(!settings.highlighter_taper);
+    }
+
+    #[test]
+    fn hidden_tools_keep_a_pen_and_drop_unknown_ids() {
+        let settings = AppSettings {
+            hidden_tools: ["pen-1", "pen-2", "lasso", "lasso", "ruler"]
+                .map(String::from)
+                .to_vec(),
+            pen_side_button: "grab".into(),
+            eraser_reach: "ink".into(),
+            ..AppSettings::default()
+        };
+        let sanitized = sanitize(settings);
+        assert_eq!(sanitized.hidden_tools, ["pen-2", "lasso"]);
+        assert_eq!(sanitized.pen_side_button, "eraser");
+        assert_eq!(sanitized.eraser_reach, "everything");
+    }
+
+    #[test]
+    fn width_patterns_keep_only_real_chips_and_patterns() {
+        let mut settings = AppSettings::default();
+        for (key, pattern) in [
+            ("1.6", "dotted"),
+            ("2.8", "solid"),
+            ("9", "dashed"),
+            ("wide", "dashed"),
+            ("1.6000001", "striped"),
+        ] {
+            settings
+                .pen_width_patterns
+                .insert(key.into(), pattern.into());
+        }
+        let sanitized = sanitize(settings);
+        assert_eq!(sanitized.pen_width_patterns.len(), 1);
+        assert_eq!(sanitized.pen_width_patterns["1.6"], "dotted");
+    }
+
+    #[test]
     fn old_settings_enable_the_page_text_defaults() {
         let settings: AppSettings =
             serde_json::from_str("{}").expect("legacy settings should load");
         assert!(settings.page_text_baseline_grid);
         assert!(settings.page_text_line_wrap);
+    }
+
+    #[test]
+    fn old_and_invalid_pen_patterns_become_solid() {
+        let old: AppSettings = serde_json::from_str(
+            r##"{"penPresets":[{"widthPt":1.6,"color":"#1e232b","type":"fountain","pressure":true}]}"##,
+        )
+        .expect("legacy pen preset should load");
+        assert_eq!(sanitize(old).pen_presets[0].pattern, "solid");
+
+        let mut invalid = AppSettings::default();
+        invalid.pen_presets[0].pattern = "striped".into();
+        assert_eq!(sanitize(invalid).pen_presets[0].pattern, "solid");
     }
 
     #[test]

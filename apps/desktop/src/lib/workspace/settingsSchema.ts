@@ -1,4 +1,5 @@
 import type { AppSettings } from "../settings";
+import { PALETTE_TOOLS, type PaletteCommand } from "../prototype/palette";
 
 /**
  * What Settings holds, described as data rather than markup.
@@ -29,6 +30,8 @@ export type SettingControl =
       kind: "toggle";
       read: (settings: AppSettings) => boolean;
       write: (settings: AppSettings, value: boolean) => AppSettings;
+      /** True while the switch may not be flipped; the hint should say why. */
+      locked?: (settings: AppSettings) => boolean;
     }
   | {
       kind: "choice";
@@ -136,7 +139,74 @@ export const SETTING_GROUPS: SettingGroup[] = [
           write: (settings, value) => ({ ...settings, drawAndHoldShapes: value }),
         },
       },
+      {
+        id: "drawWithFinger",
+        label: "Draw with finger",
+        hint: "One finger uses the tool in hand; two fingers pan and zoom. Touch is ignored while the pen is near the screen",
+        keywords: ["touch", "stylus only", "palm rejection", "finger"],
+        control: {
+          kind: "toggle",
+          read: (settings) => settings.drawWithFinger,
+          write: (settings, value) => ({ ...settings, drawWithFinger: value }),
+        },
+      },
+      {
+        id: "penSideButton",
+        label: "Pen side button",
+        hint: "Hold the button on the barrel while writing. The eraser end always erases",
+        keywords: ["barrel", "stylus button", "right click", "shortcut"],
+        control: {
+          kind: "choice",
+          options: [
+            { value: "eraser", label: "Eraser" },
+            { value: "lasso", label: "Lasso", hint: "Circle ink to select it" },
+            { value: "none", label: "Nothing", hint: "The pen keeps writing" },
+          ],
+          read: (settings) => settings.penSideButton,
+          write: (settings, value) => ({
+            ...settings,
+            penSideButton: value as AppSettings["penSideButton"],
+          }),
+        },
+      },
+      {
+        id: "eraserReturns",
+        label: "Eraser goes back to your pen",
+        hint: "After each erase — from the eraser tile, the pen's eraser end, or its side button — return to the tool you had before",
+        keywords: ["auto deselect", "switch back", "previous tool"],
+        control: {
+          kind: "toggle",
+          read: (settings) => settings.eraserReturns,
+          write: (settings, value) => ({ ...settings, eraserReturns: value }),
+        },
+      },
+      {
+        id: "eraserReach",
+        label: "Eraser reaches",
+        hint: "Highlighter only clears highlights and leaves writing and shapes alone",
+        keywords: ["erase", "highlight", "protect ink"],
+        control: {
+          kind: "choice",
+          options: [
+            { value: "everything", label: "Everything" },
+            { value: "highlighter", label: "Highlighter only" },
+          ],
+          read: (settings) => settings.eraserReach,
+          write: (settings, value) => ({
+            ...settings,
+            eraserReach: value as AppSettings["eraserReach"],
+          }),
+        },
+      },
     ],
+  },
+  {
+    id: "palette",
+    title: "Palette",
+    icon: "M4 7h16M4 12h16M4 17h16M9 4v16",
+    blurb:
+      "Take tools you never use off the bar. Their keyboard shortcuts keep working, and dividers follow on their own.",
+    items: PALETTE_TOOLS.map((tool) => paletteToggle(tool.id, tool.label)),
   },
   {
     id: "editing",
@@ -256,6 +326,36 @@ export const SETTING_GROUPS: SettingGroup[] = [
     ],
   },
 ];
+
+/** At least one pen stays on the bar; Rust holds the same line for an edited settings file. */
+function lastPenShown(settings: AppSettings, id: PaletteCommand): boolean {
+  const otherPen = id === "pen-1" ? "pen-2" : id === "pen-2" ? "pen-1" : null;
+  return (
+    otherPen !== null &&
+    !settings.hiddenTools.includes(id) &&
+    settings.hiddenTools.includes(otherPen)
+  );
+}
+
+function paletteToggle(id: PaletteCommand, label: string): SettingItem {
+  return {
+    id: `palette-${id}`,
+    label,
+    hint: id === "pen-1" || id === "pen-2" ? "At least one pen stays on the bar" : undefined,
+    keywords: ["toolbar", "bar", "tools", "hide", "show", "customise", "customize"],
+    control: {
+      kind: "toggle",
+      read: (settings) => !settings.hiddenTools.includes(id),
+      write: (settings, shown) => ({
+        ...settings,
+        hiddenTools: shown
+          ? settings.hiddenTools.filter((hidden) => hidden !== id)
+          : [...settings.hiddenTools.filter((hidden) => hidden !== id), id],
+      }),
+      locked: (settings) => lastPenShown(settings, id),
+    },
+  };
+}
 
 /** One flat row per setting, carrying the group it came from so a result can say where it lives. */
 export type SettingHit = { group: SettingGroup; item: SettingItem };

@@ -1,9 +1,11 @@
 use serde::{Deserialize, Serialize};
 
+pub mod ink_codec;
 pub mod layout;
 pub mod object;
 pub mod outline;
 pub mod paths;
+pub mod pattern;
 pub mod shape;
 pub mod storage;
 pub mod template;
@@ -16,7 +18,9 @@ pub const MIN_SUPPORTED_SCHEMA_VERSION: u32 = 1;
 /// Shapes are what version 2 added. A notebook that stores none stays at version 1, and stays
 /// openable by a build that predates them.
 pub const SHAPE_SCHEMA_VERSION: u32 = 2;
-pub const SCHEMA_VERSION: u32 = 2;
+/// Binary ink layer files are what version 3 added.
+pub const BINARY_INK_SCHEMA_VERSION: u32 = 3;
+pub const SCHEMA_VERSION: u32 = BINARY_INK_SCHEMA_VERSION;
 /// Legacy strokes painted above movable objects. Missing version-1 values keep that look.
 pub const DEFAULT_INK_Z_INDEX: i32 = 1_000_000;
 
@@ -184,6 +188,13 @@ pub struct Stroke {
     pub tool: StrokeTool,
     pub color: String,
     pub width_pt: f64,
+    /// Resolved line pattern. Older strokes omitted it and remain solid.
+    #[serde(default)]
+    pub pattern: StrokePattern,
+    /// Factor on the gap between pattern marks (ADR 0023). Omitted at 1, so every ordinary
+    /// stroke serializes exactly as before.
+    #[serde(default = "unit_spacing", skip_serializing_if = "is_unit_spacing")]
+    pub pattern_spacing: f64,
     /// Whether this stroke's width followed stylus pressure. Resolved from the nib when the
     /// stroke was drawn and then stored, rather than inferred from `tool`: nibs genuinely differ —
     /// a technical pen is deliberately even where a fountain pen swells — and a notebook has to
@@ -204,6 +215,35 @@ pub struct Stroke {
 pub enum StrokeTool {
     Pen,
     Highlighter,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StrokePattern {
+    #[default]
+    Solid,
+    Dashed,
+    Dotted,
+}
+
+pub(crate) fn unit_spacing() -> f64 {
+    1.0
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+pub(crate) fn is_unit_spacing(spacing: &f64) -> bool {
+    *spacing == 1.0
+}
+
+/// Whether a pattern spacing factor is inside the bounds the editor offers.
+pub fn valid_pattern_spacing(spacing: f64) -> bool {
+    (pattern::MIN_PATTERN_SPACING..=pattern::MAX_PATTERN_SPACING).contains(&spacing)
+}
+
+impl StrokePattern {
+    pub fn is_solid(&self) -> bool {
+        *self == Self::Solid
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -294,6 +334,7 @@ mod tests {
         );
         assert_eq!(ink.strokes[0].group_id.as_deref(), Some("ink-group-001"));
         assert_eq!(ink.strokes[0].z_index, DEFAULT_INK_Z_INDEX);
+        assert_eq!(ink.strokes[0].pattern, StrokePattern::Solid);
         assert_eq!(ink.strokes[0].points[1].pressure, 0.75);
         assert_eq!(ink.strokes[0].points[1].time_ms, 8.0);
         assert_eq!(
@@ -320,5 +361,16 @@ mod tests {
         let ink: InkLayer = load(&page.ink_layers[0].path);
         assert!(ink.strokes[0].pressure);
         assert_eq!(ink.strokes[0].taper, 0.12);
+    }
+
+    #[test]
+    fn stroke_patterns_are_strict_but_legacy_strokes_default_to_solid() {
+        let page: Page = load("pages/page-001.json");
+        let ink: InkLayer = load(&page.ink_layers[0].path);
+        assert_eq!(ink.strokes[0].pattern, StrokePattern::Solid);
+
+        let mut value = serde_json::to_value(&ink).unwrap();
+        value["strokes"][0]["pattern"] = "striped".into();
+        assert!(serde_json::from_value::<InkLayer>(value).is_err());
     }
 }

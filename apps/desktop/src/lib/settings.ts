@@ -1,5 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { PressureCalibration } from "./ink/pipeline";
+import type { PenSideButton, PressureCalibration } from "./ink/pipeline";
+import type { StrokePattern } from "./model";
+import type { HistoryCorner } from "./prototype/chromeLayout";
+import type { PaletteCommand } from "./prototype/palette";
 import type { ShapeKind } from "./shape/geometry";
 
 /**
@@ -13,6 +16,7 @@ export type PenPreset = {
   color: string;
   type: PenTypeId;
   pressure: boolean;
+  pattern: StrokePattern;
 };
 
 export type PenTypeId = "fountain" | "ballpoint" | "pencil" | "marker" | "technical";
@@ -90,6 +94,7 @@ export type UndoScope = "page" | "notebook";
 export type PaletteDockSetting = "left" | "right" | "top" | "bottom";
 
 export type EraserSize = "small" | "medium" | "large";
+export type EraserReach = "everything" | "highlighter";
 
 export type AppSettings = {
   penPresets: PenPreset[];
@@ -103,6 +108,10 @@ export type AppSettings = {
   highlighterSwatches: string[];
   /** Width chips offered per tool, in points. */
   penWidths: number[];
+  /** Line pattern per pen width chip, keyed by width; a width with no entry is solid. */
+  penWidthPatterns: Record<string, StrokePattern>;
+  /** Gap factor per pen width chip; a width with no entry uses 1. */
+  penWidthSpacings: Record<string, number>;
   highlighterWidths: number[];
   /** Most-recently-used colours, newest first. */
   recentColors: string[];
@@ -112,11 +121,18 @@ export type AppSettings = {
   highlighterOpacity: number;
   highlighterStraighten: boolean;
   highlighterBehindInk: boolean;
+  /** Whether highlighter strokes narrow at both ends. Off keeps a flat, full-width band. */
+  highlighterTaper: boolean;
   /** Explicit shape tool preferences; canonical shapes carry their own resolved style. */
   shapeKind: ShapeKind;
   shapeFill: boolean;
+  /** Line pattern for shapes drawn with the Shapes tool. Held figures follow the pen instead. */
+  shapePattern: StrokePattern;
+  shapePatternSpacing: number;
   shapeConstrain: boolean;
   drawAndHoldShapes: boolean;
+  /** Where the undo and redo buttons sit; `auto` keeps them clear of the palette on their own. */
+  historyCorner: HistoryCorner;
   eraserSize: EraserSize;
   calibration: PressureCalibration;
   undoScope: UndoScope;
@@ -134,27 +150,47 @@ export type AppSettings = {
   pageTextLineWrap: boolean;
   /** Allow downloading Typst Universe packages on a cache miss. */
   remotePackages: boolean;
+  /** One finger draws with the active tool; two fingers still pan and pinch. */
+  drawWithFinger: boolean;
+  penSideButton: PenSideButton;
+  /** After an erase picked from the bar, go back to the tool used before it. */
+  eraserReturns: boolean;
+  eraserReach: EraserReach;
+  /** Palette tiles taken off the bar. Their keyboard shortcuts keep working. */
+  hiddenTools: PaletteCommand[];
 };
 
 export const DEFAULT_SETTINGS: AppSettings = {
   penPresets: [
-    { widthPt: 1.6, color: "#1e232b", type: "fountain", pressure: true },
-    { widthPt: 2.8, color: "#2f6fdb", type: "ballpoint", pressure: false },
+    { widthPt: 1.6, color: "#1e232b", type: "fountain", pressure: true, pattern: "solid" },
+    { widthPt: 2.8, color: "#2f6fdb", type: "ballpoint", pressure: false, pattern: "solid" },
   ],
-  highlighter: { widthPt: 3.78, color: "#e0912b", type: "marker", pressure: false },
+  highlighter: {
+    widthPt: 3.78,
+    color: "#e0912b",
+    type: "marker",
+    pressure: false,
+    pattern: "solid",
+  },
   penSwatches: ["#1e232b", "#4c8df0", "#e5645e"],
   highlighterSwatches: ["#e0912b", "#e9d636", "#57c08a"],
   penWidths: [1.6, 2.8],
+  penWidthPatterns: {},
+  penWidthSpacings: {},
   highlighterWidths: [3.78, 5.2],
   recentColors: [],
   pressureEnabled: true,
   highlighterOpacity: 0.6,
   highlighterStraighten: false,
   highlighterBehindInk: true,
+  highlighterTaper: false,
   shapeKind: "line",
   shapeFill: false,
+  shapePattern: "solid",
+  shapePatternSpacing: 1,
   shapeConstrain: false,
   drawAndHoldShapes: true,
+  historyCorner: "auto",
   eraserSize: "medium",
   calibration: { minimum: 0, maximum: 1, curve: 1, smoothing: 0.2 },
   undoScope: "page",
@@ -166,7 +202,15 @@ export const DEFAULT_SETTINGS: AppSettings = {
   pageTextBaselineGrid: true,
   pageTextLineWrap: true,
   remotePackages: true,
+  drawWithFinger: false,
+  penSideButton: "eraser",
+  eraserReturns: true,
+  eraserReach: "everything",
+  hiddenTools: [],
 };
+
+/** End taper for a highlighter that has it switched on, as a fraction of stroke length. */
+export const HIGHLIGHTER_TAPER = 0.12;
 
 /** Eraser hit-area radius in points for each size. */
 export const ERASER_RADIUS_PT: Record<EraserSize, number> = {
@@ -287,7 +331,8 @@ export type SearchHit = {
 
 export type RecoveryCandidate = {
   fileName: string;
-  pageId: string;
-  confirmedRevision: number;
-  candidateRevision: number;
+  pageId: string | null;
+  confirmedRevision: number | null;
+  candidateRevision: number | null;
+  error: string | null;
 };

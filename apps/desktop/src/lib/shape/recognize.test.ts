@@ -341,3 +341,53 @@ describe("a rectangle as a hand actually draws one", () => {
     expect(Math.max(...ringTurn)).toBeLessThan(Math.min(...boxTurn));
   });
 });
+
+describe("a line keeps the angle it was drawn at", () => {
+  const drawnAt = (degrees: number, length = 160): StrokePoint[] => {
+    const angle = (degrees * Math.PI) / 180;
+    return Array.from({ length: 24 }, (_, index) => {
+      const along = (index / 23) * length;
+      // A hand does not travel perfectly straight, but nowhere near enough to be a curve.
+      const drift = Math.sin((index / 23) * Math.PI) * 0.6;
+      return {
+        x: 100 + Math.cos(angle) * along - Math.sin(angle) * drift,
+        y: 100 + Math.sin(angle) * along + Math.cos(angle) * drift,
+        pressure: 0.5,
+        timeMs: index * 8,
+        tiltX: 0,
+        tiltY: 0,
+      };
+    });
+  };
+
+  const angleOf = (found: ReturnType<typeof recognizeHeldShape>) => {
+    if (found?.draft.geometry.kind !== "line") return Number.NaN;
+    const { start, end } = found.draft.geometry;
+    return (Math.atan2(end.y - start.y, end.x - start.x) * 180) / Math.PI;
+  };
+
+  it("ends where the pen ended, not at the nearest fifteen degrees", () => {
+    // Snapping is a choice the writer makes, not something recognition should do behind them:
+    // a line drawn at twenty degrees that comes back at fifteen has moved away from the pointer
+    // it was drawn to, which is exactly what it looked like on screen.
+    for (const degrees of [8, 20, 37, -22]) {
+      expect(angleOf(recognizeHeldShape(drawnAt(degrees), style))).toBeCloseTo(degrees, 0);
+    }
+  });
+
+  it("puts the ends on the marks the pen actually made", () => {
+    const samples = drawnAt(20);
+    const found = recognizeHeldShape(samples, style);
+    if (!found) throw new Error("expected a line");
+    const { draft } = found;
+    if (draft.geometry.kind !== "line") throw new Error("expected a line");
+    const last = samples[samples.length - 1];
+    expect(draft.x + draft.geometry.end.x).toBeCloseTo(last.x, 0);
+    expect(draft.y + draft.geometry.end.y).toBeCloseTo(last.y, 0);
+  });
+
+  it("still snaps when the writer asks it to", () => {
+    expect(angleOf(recognizeHeldShape(drawnAt(20), style, { snapDegrees: 15 }))).toBeCloseTo(15, 0);
+    expect(angleOf(recognizeHeldShape(drawnAt(37), style, { snapDegrees: 15 }))).toBeCloseTo(30, 0);
+  });
+});

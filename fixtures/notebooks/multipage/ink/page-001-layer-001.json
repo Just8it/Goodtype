@@ -8,6 +8,7 @@
       "tool": "pen",
       "color": "#16212b",
       "widthPt": 1.6,
+      "pattern": "dashed",
       "pressure": true,
       "taper": 0.12,
       "opacity": 1.0,

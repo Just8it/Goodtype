@@ -3,11 +3,16 @@ import { keepsSelection, toolAfterSelection } from "./selection";
 
 describe("lasso hand-over", () => {
   it("reverses only an automatic hand-over when its selection empties", () => {
-    expect(toolAfterSelection("lasso", 3, false)).toEqual({ tool: "select", handedOver: true });
-    expect(toolAfterSelection("select", 0, true)).toEqual({ tool: "lasso", handedOver: false });
-    expect(toolAfterSelection("select", 0, false)).toEqual({ tool: "select", handedOver: false });
-    expect(toolAfterSelection("pen", 0, true)).toEqual({ tool: "pen", handedOver: true });
-    expect(toolAfterSelection("select", 2, true)).toEqual({ tool: "select", handedOver: true });
+    expect(toolAfterSelection("lasso", 3, null)).toEqual({ tool: "select", returnTo: "lasso" });
+    expect(toolAfterSelection("select", 0, "lasso")).toEqual({ tool: "lasso", returnTo: null });
+    expect(toolAfterSelection("select", 0, null)).toEqual({ tool: "select", returnTo: null });
+    expect(toolAfterSelection("pen", 0, "lasso")).toEqual({ tool: "pen", returnTo: "lasso" });
+    expect(toolAfterSelection("select", 2, "lasso")).toEqual({ tool: "select", returnTo: "lasso" });
+  });
+
+  it("gives the brush back after a side-button lasso selection empties", () => {
+    expect(toolAfterSelection("pen", 2, null)).toEqual({ tool: "select", returnTo: "pen" });
+    expect(toolAfterSelection("select", 0, "pen")).toEqual({ tool: "pen", returnTo: null });
   });
 });
 

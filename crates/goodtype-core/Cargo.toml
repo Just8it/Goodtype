@@ -9,3 +9,11 @@ license.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
+
+[dev-dependencies]
+# Benchmark-only DEFLATE baseline for compact JSON; canonical storage remains unchanged.
+miniz_oxide = "0.8"
+
+[[bench]]
+name = "ink_storage"
+harness = false

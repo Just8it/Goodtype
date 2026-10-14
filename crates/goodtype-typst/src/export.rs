@@ -1,8 +1,9 @@
 use std::path::{Path, PathBuf};
 
 use goodtype_core::{
-    PageBackground, PageGeometry, ShapeGeometry, ShapePoint, ShapeStyle,
-    outline::{OutlineOptions, OutlinePoint, outline_points},
+    PageBackground, PageGeometry, ShapeGeometry, ShapePoint, ShapeStyle, StrokePattern,
+    outline::{OutlineOptions, OutlinePoint},
+    pattern::patterned_outline_points,
     template::{Area, Edge, TemplateElement, TemplateShape, resolve},
 };
 
@@ -48,6 +49,8 @@ pub struct ExportStroke {
     pub z_index: i32,
     pub color: String,
     pub width_pt: f64,
+    pub pattern: StrokePattern,
+    pub pattern_spacing: f64,
     /// Whether the nib varied its width with pressure.
     pub pressure: bool,
     /// Fraction of the stroke's length over which each end tapers to a point; 0 disables it.
@@ -180,12 +183,7 @@ pub fn export_pages(
         .map_err(|_| ExportError::InvalidRoot(exports))?;
 
     let destination = canonical_exports.join(output_name);
-    let mut temporary = tempfile::NamedTempFile::new_in(&canonical_exports)?;
-    std::io::Write::write_all(&mut temporary, &pdf_bytes)?;
-    temporary.as_file().sync_all()?;
-    temporary
-        .persist(&destination)
-        .map_err(|error| ExportError::Io(error.error))?;
+    goodtype_core::storage::files::persist_atomic(&destination, &pdf_bytes, true)?;
 
     Ok(ExportResult {
         output_path: destination,
@@ -871,27 +869,32 @@ fn ink_svg_for<'a>(
                 }
             })
             .collect();
-        let polygon = outline_points(
+        let polygons = patterned_outline_points(
             &points,
             &OutlineOptions {
                 width_pt: stroke.width_pt * scale,
                 pressure: stroke.pressure,
                 taper: stroke.taper,
             },
+            stroke.pattern,
+            stroke.pattern_spacing,
         );
-        if polygon.is_empty() {
+        if polygons.is_empty() {
             continue;
         }
         svg.push_str(r#"<path d=""#);
-        for (index, vertex) in polygon.iter().enumerate() {
-            svg.push_str(if index == 0 { "M " } else { " L " });
-            svg.push_str(&format!("{} {}", vertex.x, vertex.y));
+        for polygon in polygons {
+            for (index, vertex) in polygon.iter().enumerate() {
+                svg.push_str(if index == 0 { "M " } else { " L " });
+                svg.push_str(&format!("{} {}", vertex.x, vertex.y));
+            }
+            svg.push_str(" Z ");
         }
         // One filled shape per stroke, so translucency is honest: overlapping segments used to
         // double-darken at every joint, which is why an even alpha was not previously safe.
         let opacity = stroke.opacity.clamp(0.0, 1.0);
         svg.push_str(&format!(
-            r#" Z" fill="{}" fill-opacity="{opacity}" fill-rule="nonzero"/>"#,
+            r#"" fill="{}" fill-opacity="{opacity}" fill-rule="nonzero"/>"#,
             stroke.color
         ));
     }
@@ -955,14 +958,35 @@ fn shape_svg(page: &ExportPage, shapes: &[&ExportShape]) -> String {
     )
 }
 
+/// Mirrors `shapeDashArray` in `apps/desktop/src/lib/shape/geometry.ts`, so a patterned shape
+/// exports with the spacing it shows on screen. Round caps add one width to every visible dash.
+fn shape_dash_array(style: &ShapeStyle) -> Option<[f64; 2]> {
+    let width = style.stroke_width_pt;
+    let spacing = style.pattern_spacing;
+    match style.pattern {
+        StrokePattern::Solid => None,
+        StrokePattern::Dashed => Some([
+            ((width * 4.0).max(6.0) - width).max(0.01),
+            (width * 2.5).max(3.5) * spacing + width,
+        ]),
+        StrokePattern::Dotted => Some([0.01, (width * 2.75).max(4.0) * spacing]),
+    }
+}
+
 fn shape_element(shape: &ExportShape) -> String {
     let fill = shape.style.fill_color.as_deref().unwrap_or("none");
     let transform = format!(
         "translate({} {}) rotate({}) scale({})",
         shape.x, shape.y, shape.rotation_degrees, shape.scale
     );
+    let dash = shape_dash_array(&shape.style)
+        .map(|[dash, gap]| {
+            let tidy = |value: f64| (value * 1000.0).round() / 1000.0;
+            format!(r#" stroke-dasharray="{} {}""#, tidy(dash), tidy(gap))
+        })
+        .unwrap_or_default();
     let common = format!(
-        r#"stroke="{}" stroke-width="{}" stroke-linecap="round" stroke-linejoin="round" opacity="{}" transform="{}""#,
+        r#"stroke="{}" stroke-width="{}"{dash} stroke-linecap="round" stroke-linejoin="round" opacity="{}" transform="{}""#,
         shape.style.stroke_color, shape.style.stroke_width_pt, shape.style.opacity, transform,
     );
     match &shape.geometry {
@@ -1075,6 +1099,8 @@ mod tests {
                 z_index: 3,
                 color: "#111111".to_owned(),
                 width_pt: 2.0,
+                pattern: StrokePattern::Solid,
+                pattern_spacing: 1.0,
                 pressure: false,
                 taper: 0.0,
                 opacity: 1.0,
@@ -1179,6 +1205,8 @@ mod tests {
                 stroke_width_pt: 1.6,
                 fill_color: Some("#16212b24".to_owned()),
                 opacity: 1.0,
+                pattern: StrokePattern::Solid,
+                pattern_spacing: 1.0,
             },
         });
 
@@ -1190,6 +1218,20 @@ mod tests {
             "{svg}"
         );
         assert!(svg.contains(r##"fill="#16212b24""##), "{svg}");
+        assert!(!svg.contains("stroke-dasharray"), "{svg}");
+        let patterned = |pattern| {
+            let mut shape = page.shapes[0].clone();
+            shape.style.pattern = pattern;
+            shape_svg(&page, &[&shape])
+        };
+        // At 1.6pt: dashes of max(6.4, 6) - 1.6 and gaps of max(4, 3.5) + 1.6, as on screen.
+        let dashed = patterned(StrokePattern::Dashed);
+        assert!(dashed.contains(r#"stroke-dasharray="4.8 5.6""#), "{dashed}");
+        let dotted = patterned(StrokePattern::Dotted);
+        assert!(
+            dotted.contains(r#"stroke-dasharray="0.01 4.4""#),
+            "{dotted}"
+        );
         assert!(
             svg.contains(r#"translate(40 50) rotate(12) scale(1.25)"#),
             "{svg}"
@@ -1217,6 +1259,8 @@ mod tests {
                 stroke_width_pt: 1.0,
                 fill_color: None,
                 opacity: 1.0,
+                pattern: StrokePattern::Solid,
+                pattern_spacing: 1.0,
             },
         };
 
@@ -1430,6 +1474,40 @@ mod tests {
 
         page.strokes[0].opacity = 1.0;
         assert!(ink_svg(&page).contains(r#"fill-opacity="1""#));
+    }
+
+    #[test]
+    fn export_keeps_dashed_and_dotted_ink_as_filled_geometry() {
+        let mut page = page();
+        page.strokes[0].transform = ExportTransform {
+            translate_x: 0.0,
+            translate_y: 0.0,
+            scale_x: 1.0,
+            scale_y: 1.0,
+            rotation_degrees: 0.0,
+        };
+        page.strokes[0].points = vec![
+            ExportPoint {
+                x: 0.0,
+                y: 0.0,
+                pressure: 1.0,
+            },
+            ExportPoint {
+                x: 40.0,
+                y: 0.0,
+                pressure: 1.0,
+            },
+        ];
+
+        page.strokes[0].pattern = StrokePattern::Dashed;
+        let dashed = ink_svg(&page);
+        assert!(dashed.matches("M ").count() > 3, "{dashed}");
+        assert!(!dashed.contains("stroke-width"), "{dashed}");
+
+        page.strokes[0].pattern = StrokePattern::Dotted;
+        let dotted = ink_svg(&page);
+        assert!(dotted.matches("M ").count() > 3, "{dotted}");
+        assert!(!dotted.contains("stroke-width"), "{dotted}");
     }
 
     #[test]

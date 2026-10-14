@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   boundedRasterScale,
+  visiblePageRegion,
+  zoomTier,
   clampToPage,
   clampZoom,
   containToPage,
@@ -48,6 +50,32 @@ describe("coordinate authority", () => {
     expect(boundedRasterScale({ width: 595, height: 842 }, 2, 6_000_000)).toBe(2);
     const a2Scale = boundedRasterScale({ width: 1191, height: 1684 }, 2, 6_000_000);
     expect(1191 * 1684 * a2Scale ** 2).toBeCloseTo(6_000_000);
+  });
+
+  it("rounds zoom up to half-octave tiers so pinch steps share one tier", () => {
+    expect(zoomTier(1)).toBe(1);
+    expect(zoomTier(1.05)).toBeCloseTo(Math.SQRT2);
+    expect(zoomTier(1.3)).toBeCloseTo(Math.SQRT2);
+    expect(zoomTier(2)).toBe(2);
+    expect(zoomTier(0.6)).toBeCloseTo(Math.SQRT1_2);
+    // Never below the zoom it stands for, so a raster sized from it is never blurry.
+    for (const zoom of [0.3, 0.9, 1.7, 3.1, 7.5]) expect(zoomTier(zoom)).toBeGreaterThanOrEqual(zoom);
+  });
+
+  it("finds the on-screen part of a zoomed page in page points", () => {
+    const page = { width: 600, height: 800 };
+    // At 4x the page is 2400x3200 px; scrolled so its point (100, 200) sits at the window corner.
+    const pageScreen = { left: -400, top: -800, width: 2400, height: 3200 };
+    const view = { left: 0, top: 0, width: 1200, height: 800 };
+    expect(visiblePageRegion(pageScreen, view, page)).toEqual({ x: 100, y: 200, width: 300, height: 200 });
+    // The margin never reaches past the sheet.
+    expect(visiblePageRegion({ left: 0, top: 0, width: 600, height: 800 }, view, page, 20)).toEqual({
+      x: 0,
+      y: 0,
+      width: 600,
+      height: 800,
+    });
+    expect(visiblePageRegion({ ...pageScreen, left: 1300 }, view, page)).toBeNull();
   });
 
   // Pen samples must not be pinned to the edge: a hand running off the sheet mid-stroke would

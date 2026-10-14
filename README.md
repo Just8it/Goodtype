@@ -26,24 +26,22 @@ no telemetry.
 > [!WARNING]
 > **Goodtype is in alpha and the notebook format is not stable.**
 >
-> The on-disk format changes when a change is worth making, and those changes are **not
-> backwards compatible**: there are no migrations, and a notebook written by one build may not
-> open in the next. Fields get added and made required rather than defaulted, because carrying
-> compatibility shims this early would fix mistakes in place instead of correcting them.
->
-> Do not keep anything you care about only in Goodtype. Expect to lose test notebooks between
-> builds. Once the format settles, this will be replaced by a schema version and real migrations.
-> Until then, treat it as a prototype you write on, not a place you store work.
+> Current builds read notebook schemas 1, 2, and 3. A confirmed page save lazily migrates older
+> ink to schema 3 and preserves the original JSON files. Older builds cannot read schema 3.
+> Future alpha versions may still change the format; keep a separate copy of important work.
+> The [ink format specification](./formats/ink-v1.md) documents binary storage and migration.
 
 ## What it does today
 
 - **Pen input** with pressure, tilt, and palm rejection, on a canvas built for stylus latency.
 - **Vector ink.** A stroke is stored as points and rendered as its silhouette, so pressure and nib
   character survive into the exported PDF instead of flattening to a constant width.
-- **Typst blocks** compiled in-process, with completion driven by the same compiler that renders
-  them, no `typst.exe`, no subprocess, no cold start.
+  Pens and shapes support solid, dashed, and dotted marks with adjustable spacing.
+- **Typst blocks** compiled in-process, without a system Typst installation. Editor intelligence
+  uses the bundled Tinymist helper with an embedded completion/hover/formatting fallback.
 - **Page text**, a Typst writing surface that belongs to the page rather than floating on it, with
   headings and display equations sitting on the paper's own ruling.
+  The sidebar colour picker inserts ordinary Typst source for text, math, and colour values.
 - **Typst Universe packages**, resolved from a local cache first and downloaded only on a miss.
 - **Paper worth writing on.** Ruled, squared, dotted and plain templates in three paper tones, at
   sizes from A6 to Tabloid in either orientation, previewed before the page exists.
@@ -60,8 +58,9 @@ no telemetry.
 ## Local-first
 
 A notebook is a directory of ordinary files, a JSON manifest, one file per page, Typst sources as
-`.typ`, ink layers as JSON, and assets kept beside them. You can read them, diff them, and put them
-in your own version control. Nothing about the format needs Goodtype to be running, or to exist.
+`.typ`, documented binary ink layers, and ordinary assets kept beside them. Older JSON ink stays
+readable. The supplied ink decoder prints binary layers as JSON; see the
+[wire format](./formats/ink-v1.md). Nothing about the format requires Goodtype to be running.
 
 The one outbound network path in the whole application is the Typst package downloader, it only
 fires on a cache miss, and it can be switched off.
@@ -92,14 +91,15 @@ Run it:
 pnpm tauri dev
 ```
 
-Build a release executable, one self-contained binary, Typst compiler included:
+Build the release executable with its embedded Typst compiler and bundled editor helper:
 
 ```powershell
 pnpm tauri build      # -> target\release\goodtype-desktop.exe
 ```
 
 To hand a build to someone else, `scripts\build-windows-demo.ps1` produces
-`target\Goodtype-demo.zip` with a launcher script. The build is not code-signed, so SmartScreen
+`target\Goodtype-Windows-<date>-<time>.zip` with a launcher script, Tinymist, and the ink decoder.
+The build is not code-signed, so SmartScreen
 will warn about an unrecognised app.
 
 ## How it is put together
@@ -113,7 +113,7 @@ will warn about an unrecognised app.
 | `xtask/` | `cargo xtask doctor` and `cargo xtask verify` |
 
 Two decisions shape most of the code. **The Typst compiler is linked in rather than shelled out
-to**, which is what makes rendering feel immediate and keeps the build to a single binary. And
+to**, which keeps preview and export inside Rust; editor intelligence ships a separate helper. And
 **ink geometry is computed identically in Rust and TypeScript**, the live canvas needs it in the
 webview, export needs it in Rust, with both implementations asserted against the same fixture, so
 the two cannot drift apart without failing `cargo xtask verify`.

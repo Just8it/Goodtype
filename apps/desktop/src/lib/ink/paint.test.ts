@@ -51,6 +51,17 @@ describe("paintOrder", () => {
     expect(painted.map((path) => path.color)).toEqual(["#111111", "#e5645e"]);
   });
 
+  it("paints dashed and dotted ink as separated filled subpaths", () => {
+    const [dashed, dotted] = paintOrder([
+      stroke({ id: "dash", pressure: false, pattern: "dashed" }),
+      stroke({ id: "dot", pressure: false, pattern: "dotted", color: "#e5645e" }),
+    ]);
+    expect(dashed.d.match(/M /g)?.length).toBeGreaterThan(3);
+    expect(dotted.d.match(/M /g)?.length).toBeGreaterThan(3);
+    expect(dashed.d).not.toContain("NaN");
+    expect(dotted.d).not.toContain("NaN");
+  });
+
   // Merging across an intervening colour would put the third stroke underneath the second.
   it("does not merge across an intervening colour", () => {
     const painted = paintOrder([

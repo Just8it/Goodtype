@@ -11,7 +11,7 @@
 //! flushed and synced before it is renamed, and refuses a destination that has become a
 //! symbolic link.
 
-use std::{fs, io::Write, path::Path};
+use std::{fs, path::Path};
 
 use serde::Serialize;
 
@@ -33,15 +33,8 @@ pub fn reject_symlink(target: &Path) -> Result<(), String> {
 /// Serialize `value` as the pretty JSON these files are stored in, with the trailing newline a
 /// text file ought to end with, refusing anything past `maximum`.
 pub fn json_bytes<T: Serialize>(value: &T, maximum: usize) -> Result<Vec<u8>, String> {
-    let mut bytes = serde_json::to_vec_pretty(value).map_err(|error| error.to_string())?;
-    bytes.push(b'\n');
-    if bytes.len() > maximum {
-        return Err(format!(
-            "that file is {} bytes; maximum is {maximum}",
-            bytes.len()
-        ));
-    }
-    Ok(bytes)
+    goodtype_core::storage::files::json_bytes(value, true, maximum)
+        .map_err(|error| error.to_string())
 }
 
 /// Replace `target` with `bytes`, or leave it exactly as it was.
@@ -53,16 +46,8 @@ pub fn write_atomic(target: &Path, bytes: &[u8]) -> Result<(), String> {
     reject_symlink(target)?;
     let parent = target.parent().ok_or("that file has no parent directory")?;
     fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    let mut temporary = tempfile::NamedTempFile::new_in(parent).map_err(|e| e.to_string())?;
-    temporary
-        .write_all(bytes)
-        .and_then(|_| temporary.flush())
-        .and_then(|_| temporary.as_file().sync_all())
-        .map_err(|error| error.to_string())?;
-    temporary
-        .persist(target)
-        .map_err(|error| error.error.to_string())?;
-    Ok(())
+    goodtype_core::storage::files::persist_atomic(target, bytes, true)
+        .map_err(|error| error.to_string())
 }
 
 /// Serialize and write in one step, which is what every caller actually wants.

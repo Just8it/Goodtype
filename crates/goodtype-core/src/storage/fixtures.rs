@@ -5,8 +5,8 @@
 
 use crate::{
     InkLayer, InkLayerReference, NotebookManifest, ObjectFields, Page, PageBackground,
-    PageDefaults, PageGeometry, PageObject, PageReference, SCHEMA_VERSION, Stroke, StrokePoint,
-    StrokeTool, Transform,
+    PageDefaults, PageGeometry, PageObject, PageReference, SCHEMA_VERSION, Stroke, StrokePattern,
+    StrokePoint, StrokeTool, Transform,
 };
 
 use super::{NotebookSnapshot, StoredFile};
@@ -86,7 +86,7 @@ pub(super) fn snapshot() -> NotebookSnapshot {
             reading_order: vec!["typst-001".into(), "image-001".into()],
             ink_layers: vec![InkLayerReference {
                 id: "ink-layer-001".into(),
-                path: "ink/page-001-layer-001.json".into(),
+                path: "ink/page-001-layer-001.ink".into(),
             }],
         },
         blocks: vec![StoredFile {
@@ -107,6 +107,8 @@ pub(super) fn snapshot() -> NotebookSnapshot {
                 tool: StrokeTool::Pen,
                 color: "#111111".into(),
                 width_pt: 2.0,
+                pattern: StrokePattern::Solid,
+                pattern_spacing: 1.0,
                 pressure: true,
                 taper: 0.0,
                 opacity: 1.0,
@@ -131,6 +133,17 @@ pub(super) fn snapshot() -> NotebookSnapshot {
     }
 }
 
+pub(super) fn legacy_snapshot() -> NotebookSnapshot {
+    let mut snapshot = snapshot();
+    snapshot.manifest.schema_version = crate::MIN_SUPPORTED_SCHEMA_VERSION;
+    snapshot.page.schema_version = crate::MIN_SUPPORTED_SCHEMA_VERSION;
+    snapshot.page.ink_layers[0].path = crate::layout::legacy_ink_layer_path("page-001", 1);
+    for layer in &mut snapshot.ink_layers {
+        layer.schema_version = crate::MIN_SUPPORTED_SCHEMA_VERSION;
+    }
+    snapshot
+}
+
 /// Samples shaped like the frontend writes them: quantized to the precision in
 /// `apps/desktop/src/lib/ink/pipeline.ts`, so the size this test measures is the
 /// size a real notebook reaches.
@@ -146,6 +159,8 @@ pub(super) fn handwriting_layer(strokes: usize, points_per_stroke: usize) -> Ink
                 tool: StrokeTool::Pen,
                 color: "#101418".into(),
                 width_pt: 1.6,
+                pattern: StrokePattern::Solid,
+                pattern_spacing: 1.0,
                 pressure: true,
                 taper: 0.0,
                 opacity: 1.0,

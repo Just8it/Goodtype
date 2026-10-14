@@ -110,6 +110,7 @@
       aria-label={item.label}
       class:on
       class="toggle"
+      disabled={item.control.locked?.(settings) ?? false}
       onclick={() => apply(item, !on)}
     ><span></span></button>
   {:else if item.control.kind === "action"}
@@ -497,6 +498,7 @@
 
   .toggle.on { background: var(--blueprint); }
   .toggle.on span { background: #fff; transform: translateX(16px); }
+  .toggle:disabled { opacity: 0.45; cursor: not-allowed; }
 
   /* An action is not a preference, so it is a button rather than a control with a state. */
   .run {

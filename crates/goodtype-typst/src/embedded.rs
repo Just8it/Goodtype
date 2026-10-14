@@ -11,6 +11,7 @@
 //! official namespace, and only when the caller allows it.
 
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
@@ -28,6 +29,8 @@ use typst_layout::PagedDocument;
 use typst_svg::SvgOptions;
 
 use crate::{CompileResult, Diagnostic, DiagnosticSeverity};
+
+const MAX_WORLD_FILE_BYTES: usize = 64 * 1024 * 1024;
 
 /// Compile a single wrapped block source in-process and render its first page to SVG.
 pub(crate) fn compile_block(
@@ -326,6 +329,8 @@ struct BlockWorld {
     overlay: HashMap<FileId, Bytes>,
     /// Decoded source cache so repeated `source()` calls during layout stay cheap.
     sources: Mutex<HashMap<FileId, Source>>,
+    /// Raw disk bytes are also requested repeatedly by Typst, especially for images and PDFs.
+    files: Mutex<HashMap<FileId, Bytes>>,
 }
 
 impl BlockWorld {
@@ -344,6 +349,7 @@ impl BlockWorld {
             allow_remote_packages,
             overlay,
             sources: Mutex::new(HashMap::new()),
+            files: Mutex::new(HashMap::new()),
         }
     }
 
@@ -384,6 +390,38 @@ impl BlockWorld {
             }
         }
     }
+
+    fn disk_bytes(&self, id: FileId, maximum: usize) -> FileResult<Bytes> {
+        if let Some(bytes) = self.files.lock().unwrap().get(&id).cloned() {
+            if bytes.len() <= maximum {
+                return Ok(bytes);
+            }
+            let path = self.on_disk(id)?;
+            return Err(FileError::from_io(too_large(maximum), &path));
+        }
+        let path = self.on_disk(id)?;
+        let mut bytes = Vec::new();
+        std::fs::File::open(&path)
+            .and_then(|file| {
+                file.take(maximum as u64 + 1).read_to_end(&mut bytes)?;
+                if bytes.len() > maximum {
+                    Err(too_large(maximum))
+                } else {
+                    Ok(())
+                }
+            })
+            .map_err(|error| FileError::from_io(error, &path))?;
+        let bytes = Bytes::new(bytes);
+        self.files.lock().unwrap().insert(id, bytes.clone());
+        Ok(bytes)
+    }
+}
+
+fn too_large(maximum: usize) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        format!("Typst input exceeds {maximum} bytes"),
+    )
 }
 
 impl World for BlockWorld {
@@ -408,8 +446,10 @@ impl World for BlockWorld {
                 .map_err(|_| FileError::InvalidUtf8)?
                 .to_owned()
         } else {
-            let path = self.on_disk(id)?;
-            std::fs::read_to_string(&path).map_err(|error| FileError::from_io(error, &path))?
+            let bytes = self.disk_bytes(id, crate::MAX_SOURCE_BYTES)?;
+            std::str::from_utf8(&bytes)
+                .map_err(|_| FileError::InvalidUtf8)?
+                .to_owned()
         };
         let source = Source::new(id, text);
         self.sources.lock().unwrap().insert(id, source.clone());
@@ -420,10 +460,7 @@ impl World for BlockWorld {
         if let Some(bytes) = self.overlay.get(&id) {
             return Ok(bytes.clone());
         }
-        let path = self.on_disk(id)?;
-        std::fs::read(&path)
-            .map(Bytes::new)
-            .map_err(|error| FileError::from_io(error, &path))
+        self.disk_bytes(id, MAX_WORLD_FILE_BYTES)
     }
 
     fn font(&self, index: usize) -> Option<Font> {

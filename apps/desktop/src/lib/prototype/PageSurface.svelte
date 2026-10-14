@@ -1,21 +1,25 @@
 <script lang="ts">
-  import type { PageBackground, ShapeStyle, Stroke } from "../model";
+  import type { PageBackground, ShapeStyle, Stroke, StrokePattern } from "../model";
   import PaperLayer from "../page/PaperLayer.svelte";
   import type { StrokePerformance } from "../ink/metrics";
   import type { TypstCompileResult } from "../editor/typst";
   import { getCachedTypst } from "../editor/typstCache";
   import { DEFAULT_PRESET_PATH, pagePresetPath } from "../page/presets";
   import {
+    DEFAULT_POINTER_MAPPING,
     DEFAULT_PRESSURE_CALIBRATION,
     type InkTool,
+    type PointerMapping,
     type PressureCalibration,
   } from "../ink/pipeline";
+  import type { EraserReach } from "../settings";
   import ImageObject from "./ImageObject.svelte";
   import InkSurface from "./InkSurface.svelte";
   import ShapeObject from "./ShapeObject.svelte";
   import PageText from "./PageText.svelte";
   import TypstBlock from "./TypstBlock.svelte";
   import type { ShapeDraft, ShapeKind } from "../shape/geometry";
+  import { topmostShapeAt } from "../shape/hit";
   import type {
     BlockView,
     ImageView,
@@ -54,6 +58,8 @@
     widthPt = 2,
     pressure = true,
     taper = 0,
+    pattern = "solid",
+    patternSpacing = 1,
     opacity = 1,
     straighten = false,
     shapeKind = "line",
@@ -66,11 +72,16 @@
     shapeConstrain = false,
     drawAndHoldShapes = true,
     eraseRadiusPt = 8,
+    eraserReach = "everything",
     calibration = DEFAULT_PRESSURE_CALIBRATION,
+    pointerMapping = DEFAULT_POINTER_MAPPING,
+    onEraseEnd,
+    onEraserEngaged,
     directObjectInput = false,
     selectedBlockId = null,
     selectedImageId = null,
     selectedShapeId = null,
+    shapesGrabbable = true,
     editingShapeId = null,
     onCompile,
     onSourceChange,
@@ -83,6 +94,7 @@
     onSelectShape,
     onChangeShape,
     onEditShape,
+    onEraseShape,
     onStrokeFinalized,
     onShapeFinalized,
     onInkShapeRecognized,
@@ -118,6 +130,8 @@
     /** Nib parameters for the active tool, resolved by the palette and stored on each stroke. */
     pressure?: boolean;
     taper?: number;
+    pattern?: StrokePattern;
+    patternSpacing?: number;
     opacity?: number;
     straighten?: boolean;
     shapeKind?: ShapeKind;
@@ -125,11 +139,17 @@
     shapeConstrain?: boolean;
     drawAndHoldShapes?: boolean;
     eraseRadiusPt?: number;
+    eraserReach?: EraserReach;
     calibration?: PressureCalibration;
+    pointerMapping?: PointerMapping;
+    onEraseEnd?: () => void;
+    onEraserEngaged?: () => void;
     directObjectInput?: boolean;
     selectedBlockId?: string | null;
     selectedImageId?: string | null;
     selectedShapeId?: string | null;
+    /// False while the eraser is out, so it reaches the ink surface under a shape.
+    shapesGrabbable?: boolean;
     editingShapeId?: string | null;
     onCompile: (
       id: string,
@@ -150,6 +170,7 @@
     onSelectShape?: (id: string) => void;
     onChangeShape?: (shape: ShapeView, commit?: ShapeEditCommit) => void;
     onEditShape?: (id: string, editing: boolean) => void;
+    onEraseShape?: (id: string) => void;
     onStrokeFinalized?: (stroke: Stroke) => void;
     onShapeFinalized?: (shape: ShapeDraft) => void;
     onInkShapeRecognized?: (stroke: Stroke, shape: ShapeDraft) => void;
@@ -238,6 +259,7 @@
   {#each shapes as shape (shape.id)}
     <ShapeObject
       {shape}
+      grabbable={interactive && shapesGrabbable}
       selected={interactive && selectedShapeId === shape.id}
       editing={interactive && editingShapeId === shape.id}
       {pageWidthPt}
@@ -268,6 +290,8 @@
     {widthPt}
     {pressure}
     {taper}
+    {pattern}
+    {patternSpacing}
     {opacity}
     {straighten}
     {shapeKind}
@@ -275,7 +299,18 @@
     {shapeConstrain}
     {drawAndHoldShapes}
     {eraseRadiusPt}
+    {eraserReach}
     {calibration}
+    {pointerMapping}
+    shapeAt={interactive
+      ? (point, reachPt) => {
+          const found = topmostShapeAt(shapes, point, reachPt);
+          return found && { id: found.id, zIndex: found.zIndex };
+        }
+      : undefined}
+    onEraseShape={interactive ? (id) => onEraseShape?.(id) : undefined}
+    onEraseEnd={interactive ? () => onEraseEnd?.() : undefined}
+    onEraserEngaged={interactive ? () => onEraserEngaged?.() : undefined}
     onStrokeFinalized={(stroke) => onStrokeFinalized?.(stroke)}
     onShapeFinalized={(shape) => onShapeFinalized?.(shape)}
     onInkShapeRecognized={(stroke, shape) => onInkShapeRecognized?.(stroke, shape)}

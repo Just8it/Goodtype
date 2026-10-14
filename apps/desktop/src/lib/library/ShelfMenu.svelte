@@ -67,8 +67,14 @@
     buttons[next]?.focus();
   }
 
-  function handleFocusout() {
-    queueMicrotask(() => {
+  /// Closes when focus leaves for something outside the menu. The microtask this used to wait for
+  /// runs before the browser has focused the item being pressed, so pressing any item but the
+  /// already-focused first one found nothing focused, closed the menu, and swallowed the click.
+  /// `relatedTarget` names where focus is going; when it is unknown, wait a frame and look.
+  function handleFocusout(event: FocusEvent) {
+    const next = event.relatedTarget;
+    if (next instanceof Node && menuElement?.contains(next)) return;
+    requestAnimationFrame(() => {
       if (menuElement && !menuElement.contains(document.activeElement)) onClose();
     });
   }

@@ -11,9 +11,9 @@ use std::{
 };
 
 use crate::{
-    MIN_SUPPORTED_SCHEMA_VERSION, NotebookManifest, Page, PageBackground, PageObject,
-    PageReference, SCHEMA_VERSION, SHAPE_SCHEMA_VERSION, SourceRef, SourceRole, layout,
-    nonnegative, positive, valid_page_dimension,
+    BINARY_INK_SCHEMA_VERSION, MIN_SUPPORTED_SCHEMA_VERSION, NotebookManifest, Page,
+    PageBackground, PageObject, PageReference, SCHEMA_VERSION, SHAPE_SCHEMA_VERSION, SourceRef,
+    SourceRole, layout, nonnegative, positive, valid_page_dimension,
 };
 
 use super::{
@@ -24,11 +24,10 @@ use super::{
 
 /// The schema version a page's content obliges its notebook to be written at.
 ///
-/// A notebook is not upgraded for being opened, nor for being saved after an unrelated edit. It
-/// rises to a version only when it actually stores something that version introduced, so a
-/// version-1 notebook stays readable by an older build right up until it gains its first shape.
+/// Opening never upgrades a page. A confirmed write first changes legacy ink references to the
+/// binary encoding, which makes version 3 required; untouched sibling pages may stay older.
 pub(crate) fn required_schema_version(page: &Page) -> u32 {
-    if page
+    let object_version = if page
         .objects
         .iter()
         .any(|object| matches!(object, PageObject::Shape { .. }))
@@ -36,6 +35,15 @@ pub(crate) fn required_schema_version(page: &Page) -> u32 {
         SHAPE_SCHEMA_VERSION
     } else {
         MIN_SUPPORTED_SCHEMA_VERSION
+    };
+    if page
+        .ink_layers
+        .iter()
+        .any(|reference| reference.path.ends_with(".ink"))
+    {
+        object_version.max(BINARY_INK_SCHEMA_VERSION)
+    } else {
+        object_version
     }
 }
 
@@ -79,31 +87,47 @@ pub(crate) fn raise_schema_version(snapshot: &mut NotebookSnapshot) {
     }
 }
 
-/// One notebook, one version: the manifest states it, and the page and its ink layers must agree.
+/// The manifest states the newest format used anywhere in the notebook. Untouched pages may stay
+/// on an older supported version until their next confirmed write; a page and its ink layers must
+/// still agree, and content introduced by a newer version is rejected from an older page.
 ///
 /// Checked on the way in as well as the way out, because a snapshot that arrives with mismatched
 /// versions is corrupt whether it came from disk, from a recovery intent, or from the app.
 pub(crate) fn validate_snapshot_versions(snapshot: &NotebookSnapshot) -> Result<(), StorageError> {
     let version = snapshot.manifest.schema_version;
     supported_version(version, "schema")?;
-    if snapshot.page.schema_version != version {
+    let page_version = snapshot.page.schema_version;
+    supported_version(page_version, "page schema")?;
+    if page_version > version {
         return Err(StorageError::InvalidNotebook(format!(
-            "page schema version {} does not match notebook version {version}",
-            snapshot.page.schema_version
+            "page schema version {page_version} is newer than notebook version {version}",
         )));
     }
+    validate_page_bundle_versions(snapshot)?;
+    Ok(())
+}
+
+/// Validate the submitted page bundle before notebook-wide bookkeeping is rebased. A supported
+/// stale page is legitimate in a newer mixed-version manifest; corrupt or future page/layer
+/// versions must be rejected rather than normalized into the current version.
+pub(crate) fn validate_page_bundle_versions(
+    snapshot: &NotebookSnapshot,
+) -> Result<(), StorageError> {
+    let page_version = snapshot.page.schema_version;
+    supported_version(page_version, "page schema")?;
     for layer in &snapshot.ink_layers {
-        if layer.schema_version != version {
+        supported_version(layer.schema_version, "ink schema")?;
+        if layer.schema_version != page_version {
             return Err(StorageError::InvalidNotebook(format!(
-                "ink schema version {} does not match notebook version {version}",
-                layer.schema_version
+                "ink schema version {} does not match page version {page_version}",
+                layer.schema_version,
             )));
         }
     }
     let required = required_schema_version(&snapshot.page);
-    if version < required {
+    if page_version < required {
         return Err(StorageError::InvalidNotebook(format!(
-            "this page needs schema version {required}, but the notebook is version {version}"
+            "this page needs schema version {required}, but the page is version {page_version}"
         )));
     }
     Ok(())
@@ -152,10 +176,6 @@ pub(crate) fn validate_snapshot(
     validate_snapshot_versions(snapshot)?;
     validate_page_content(snapshot)?;
     json_bytes(&snapshot.page, true, MAX_JSON_BYTES)?;
-    for layer in &snapshot.ink_layers {
-        json_bytes(layer, false, MAX_INK_BYTES)?;
-    }
-
     let block_paths = referenced_paths(&snapshot.manifest, &snapshot.page, SourceRole::Block);
     let asset_paths = referenced_paths(&snapshot.manifest, &snapshot.page, SourceRole::Asset);
     validate_files(root, &snapshot.blocks, &block_paths, SourceRole::Block)?;
@@ -193,6 +213,22 @@ pub(crate) fn validate_snapshot(
                 "ink layer {} does not match its reference",
                 reference.id
             )));
+        }
+        let layer = snapshot
+            .ink_layers
+            .iter()
+            .find(|layer| layer.id == reference.id)
+            .expect("validated matching ink layer");
+        if reference.path.ends_with(".ink") {
+            crate::ink_codec::encoded_len(layer)?;
+        } else if reference.path.ends_with(".json") {
+            json_bytes(layer, false, MAX_INK_BYTES)?;
+        } else {
+            return invalid("ink layer path must end in .ink or .json");
+        }
+        let binary = reference.path.ends_with(".ink");
+        if binary != (snapshot.page.schema_version >= BINARY_INK_SCHEMA_VERSION) {
+            return invalid("ink layer encoding does not match its page schema version");
         }
     }
     Ok(())
@@ -283,8 +319,11 @@ fn validate_groups(objects: &HashMap<&str, &PageObject>) -> Result<(), StorageEr
             let parent = objects
                 .get(parent_id)
                 .ok_or_else(|| invalid_error("group parent does not exist"))?;
-            if !matches!(parent, PageObject::Group { .. }) {
+            let PageObject::Group { child_ids, .. } = parent else {
                 return invalid("group parent must reference a group object");
+            };
+            if !child_ids.contains(&current.id) {
+                return invalid("group membership must agree in parent and child");
             }
             current = parent.fields();
         }
@@ -317,56 +356,16 @@ pub(crate) fn validate_ink(
     let mut layers = HashMap::new();
     let mut strokes = HashMap::new();
     for layer in &snapshot.ink_layers {
-        if layer.id.is_empty() || layers.insert(layer.id.as_str(), layer).is_some() {
+        validate_ink_layer(layer)?;
+        if layers.insert(layer.id.as_str(), layer).is_some() {
             return invalid("ink-layer IDs must be non-empty and unique");
         }
-        // Refuse an oversized layer here, before `save_to_root` writes anything. Relying on the
-        // read ceiling alone would let a commit write a layer it can never read back, which
-        // leaves the notebook unopenable.
-        if layer.strokes.len() > MAX_INK_STROKES_PER_LAYER {
-            return Err(StorageError::InvalidNotebook(format!(
-                "ink layer {} holds {} strokes; maximum is {MAX_INK_STROKES_PER_LAYER}",
-                layer.id,
-                layer.strokes.len(),
-            )));
-        }
-        let points = layer
-            .strokes
-            .iter()
-            .map(|stroke| stroke.points.len())
-            .sum::<usize>();
-        if points > MAX_INK_POINTS_PER_LAYER {
-            return Err(StorageError::InvalidNotebook(format!(
-                "ink layer {} holds {points} samples; maximum is {MAX_INK_POINTS_PER_LAYER}",
-                layer.id,
-            )));
-        }
         for stroke in &layer.strokes {
-            if stroke.id.is_empty()
-                || strokes
-                    .insert(stroke.id.as_str(), (layer.id.as_str(), stroke))
-                    .is_some()
-                || !positive(stroke.width_pt)
-                || !(0.0..=1.0).contains(&stroke.taper)
-                || !(0.0..=1.0).contains(&stroke.opacity)
-                || stroke.points.is_empty()
-                || !positive(stroke.transform.scale_x)
-                || !positive(stroke.transform.scale_y)
-                || !stroke.transform.translate_x.is_finite()
-                || !stroke.transform.translate_y.is_finite()
-                || !stroke.transform.rotation.is_finite()
+            if strokes
+                .insert(stroke.id.as_str(), (layer.id.as_str(), stroke))
+                .is_some()
             {
-                return invalid("stroke IDs, points, widths, tapers, and transforms must be valid");
-            }
-            if stroke.points.iter().any(|point| {
-                !point.x.is_finite()
-                    || !point.y.is_finite()
-                    || !(0.0..=1.0).contains(&point.pressure)
-                    || !nonnegative(point.time_ms)
-                    || !(-90.0..=90.0).contains(&point.tilt_x)
-                    || !(-90.0..=90.0).contains(&point.tilt_y)
-            }) {
-                return invalid("stroke samples must be finite and calibrated");
+                return invalid("stroke IDs must be unique across ink layers");
             }
         }
     }
@@ -412,6 +411,63 @@ pub(crate) fn validate_ink(
             if ink_layer_id != layer_id || !stroke_ids.iter().any(|id| id == &stroke.id) {
                 return invalid("stroke group membership is incomplete");
             }
+        }
+    }
+    Ok(())
+}
+
+/// Validate one self-contained ink layer. Page/reference and object/group relationships remain
+/// the snapshot validator's responsibility; the binary codec calls this before emitting bytes
+/// and after reconstructing a layer.
+pub(crate) fn validate_ink_layer(layer: &crate::InkLayer) -> Result<(), StorageError> {
+    if layer.id.is_empty() || layer.page_id.is_empty() {
+        return invalid("ink-layer ID and page ID must be non-empty");
+    }
+    if layer.strokes.len() > MAX_INK_STROKES_PER_LAYER {
+        return Err(StorageError::InvalidNotebook(format!(
+            "ink layer {} holds {} strokes; maximum is {MAX_INK_STROKES_PER_LAYER}",
+            layer.id,
+            layer.strokes.len(),
+        )));
+    }
+    let points = layer.strokes.iter().try_fold(0usize, |total, stroke| {
+        total
+            .checked_add(stroke.points.len())
+            .ok_or_else(|| invalid_error("ink sample count overflow"))
+    })?;
+    if points > MAX_INK_POINTS_PER_LAYER {
+        return Err(StorageError::InvalidNotebook(format!(
+            "ink layer {} holds {points} samples; maximum is {MAX_INK_POINTS_PER_LAYER}",
+            layer.id,
+        )));
+    }
+
+    let mut stroke_ids = HashSet::new();
+    for stroke in &layer.strokes {
+        if stroke.id.is_empty()
+            || !stroke_ids.insert(stroke.id.as_str())
+            || !positive(stroke.width_pt)
+            || !(0.0..=1.0).contains(&stroke.taper)
+            || !(0.0..=1.0).contains(&stroke.opacity)
+            || !crate::valid_pattern_spacing(stroke.pattern_spacing)
+            || stroke.points.is_empty()
+            || !positive(stroke.transform.scale_x)
+            || !positive(stroke.transform.scale_y)
+            || !stroke.transform.translate_x.is_finite()
+            || !stroke.transform.translate_y.is_finite()
+            || !stroke.transform.rotation.is_finite()
+        {
+            return invalid("stroke IDs, points, widths, tapers, and transforms must be valid");
+        }
+        if stroke.points.iter().any(|point| {
+            !point.x.is_finite()
+                || !point.y.is_finite()
+                || !(0.0..=1.0).contains(&point.pressure)
+                || !nonnegative(point.time_ms)
+                || !(-90.0..=90.0).contains(&point.tilt_x)
+                || !(-90.0..=90.0).contains(&point.tilt_y)
+        }) {
+            return invalid("stroke samples must be finite and calibrated");
         }
     }
     Ok(())
@@ -545,6 +601,25 @@ mod tests {
         PageObject, layout,
         storage::{fixtures::*, *},
     };
+
+    #[test]
+    fn every_grouped_child_must_be_listed_by_its_parent() {
+        let mut candidate = snapshot();
+        for object in &mut candidate.page.objects {
+            object.fields_mut().group_id = Some("group-001".into());
+        }
+        candidate.page.objects.push(PageObject::Group {
+            fields: fields("group-001", 0),
+            child_ids: vec!["image-001".into()],
+        });
+        candidate.page.reading_order = vec!["group-001".into()];
+        assert!(super::validate_page_content(&candidate).is_err());
+        let PageObject::Group { child_ids, .. } = candidate.page.objects.last_mut().unwrap() else {
+            unreachable!()
+        };
+        child_ids.push("typst-001".into());
+        assert!(super::validate_page_content(&candidate).is_ok());
+    }
 
     #[test]
     fn rejects_inconsistent_canonical_page_content() {

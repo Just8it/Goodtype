@@ -15,9 +15,31 @@ use std::time::Duration;
 const TINYMIST_VERSION: &str = "0.15.2";
 const TINYMIST_SHA256: &str = "8780ed5076135f5afb11a03e6215d43659c193bc649634aff9b9dc91d77200a8";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_LSP_HEADER_BYTES: usize = 8 * 1024;
+const MAX_LSP_BODY_BYTES: usize = 16 * 1024 * 1024;
 const EDITOR_FILE: &str = "__goodtype_editor.typ";
 type Pending = Arc<Mutex<HashMap<u64, mpsc::Sender<Result<Value, String>>>>>;
-type PublishedDiagnostics = Arc<(Mutex<Option<Value>>, Condvar)>;
+type PublishedDiagnostics = Arc<(Mutex<DiagnosticState>, Condvar)>;
+
+struct DiagnosticState {
+    document_uri: String,
+    version: u64,
+    published: Option<Value>,
+}
+
+impl DiagnosticState {
+    fn publish(&mut self, params: &Value) -> bool {
+        if params.get("uri").and_then(Value::as_str) != Some(self.document_uri.as_str())
+            || params
+                .get("version")
+                .is_some_and(|version| version.as_u64() != Some(self.version))
+        {
+            return false;
+        }
+        self.published = Some(params.clone());
+        true
+    }
+}
 
 #[derive(Clone, Default)]
 pub struct Tinymist(Arc<Mutex<Option<Client>>>);
@@ -88,7 +110,7 @@ impl Tinymist {
         cursor: usize,
         _explicit: bool,
     ) -> Result<Vec<Completion>, String> {
-        self.run(root, |client| {
+        self.run(root, source, |client| {
             client.sync(source)?;
             let position = byte_offset_to_position(source, cursor);
             let response = client.request(
@@ -104,7 +126,7 @@ impl Tinymist {
     }
 
     pub fn hover(&self, root: &Path, source: &str, cursor: usize) -> Result<Option<Hover>, String> {
-        self.run(root, |client| {
+        self.run(root, source, |client| {
             client.sync(source)?;
             let response = client.request(
                 "textDocument/hover",
@@ -118,7 +140,7 @@ impl Tinymist {
     }
 
     pub fn format(&self, root: &Path, source: &str) -> Result<String, String> {
-        self.run(root, |client| {
+        self.run(root, source, |client| {
             client.sync(source)?;
             let response = client.request(
                 "textDocument/formatting",
@@ -132,12 +154,29 @@ impl Tinymist {
     }
 
     pub fn analyze(&self, root: &Path, source: &str) -> Result<Analysis, String> {
-        self.run(root, |client| {
+        self.run(root, source, |client| {
             client.sync(source)?;
-            let response = client.request(
-                "textDocument/semanticTokens/full",
-                json!({ "textDocument": { "uri": client.document_uri } }),
-            )?;
+            // Tinymist answers `null` until it has analysed the latest revision. Asking again
+            // shortly is the cheap path; restarting the sidecar on the first `null` is what
+            // flashed a console window on every edit.
+            let mut response = Value::Null;
+            for attempt in 0..SEMANTIC_TOKEN_ATTEMPTS {
+                if attempt > 0 {
+                    std::thread::sleep(SEMANTIC_TOKEN_RETRY * attempt);
+                }
+                response = client.request(
+                    "textDocument/semanticTokens/full",
+                    json!({ "textDocument": { "uri": client.document_uri } }),
+                )?;
+                if !response.is_null() {
+                    break;
+                }
+            }
+            // Still nothing after the whole window means this instance is not going to answer;
+            // `run` starts a fresh process on this error, now without a console to flash.
+            if response.is_null() {
+                return Err("Tinymist produced no semantic tokens for this revision".into());
+            }
             Ok(Analysis {
                 highlights: parse_semantic_tokens(
                     source,
@@ -154,8 +193,16 @@ impl Tinymist {
     fn run<T>(
         &self,
         root: &Path,
+        source: &str,
         mut operation: impl FnMut(&mut Client) -> Result<T, String>,
     ) -> Result<T, String> {
+        if source.len() > goodtype_typst::MAX_SOURCE_BYTES {
+            return Err(format!(
+                "Typst source exceeds {} bytes: {}",
+                goodtype_typst::MAX_SOURCE_BYTES,
+                source.len()
+            ));
+        }
         let mut slot = self.0.lock().map_err(|_| "Tinymist state is unavailable")?;
         let mut last_error = String::new();
         for _ in 0..2 {
@@ -190,6 +237,11 @@ struct Client {
     proxy_alive: Arc<AtomicBool>,
 }
 
+/// A warm edit is answered within a retry or two; a cold first analysis on a busy machine can
+/// take over a second. The delay grows each attempt, about 1.6 s in all.
+const SEMANTIC_TOKEN_ATTEMPTS: u32 = 12;
+const SEMANTIC_TOKEN_RETRY: Duration = Duration::from_millis(25);
+
 impl Client {
     fn start(root: PathBuf) -> Result<Self, String> {
         let binary = verified_binary()?;
@@ -202,7 +254,16 @@ impl Client {
         let settings = settings(&root);
         let (proxy_url, proxy_alive) = local_proxy_sink()?;
 
-        let mut child = Command::new(binary)
+        let mut command = Command::new(binary);
+        // The release app has no console, so Windows would give the sidecar a console window of
+        // its own and flash it over the canvas every time Tinymist starts.
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            command.creation_flags(CREATE_NO_WINDOW);
+        }
+        let mut child = command
             .arg("lsp")
             .current_dir(&root)
             .env("TINYMIST_LOG", "error")
@@ -228,7 +289,14 @@ impl Client {
             .take()
             .ok_or("Tinymist stdout is unavailable")?;
         let pending = Arc::new(Mutex::new(HashMap::new()));
-        let diagnostics = Arc::new((Mutex::new(None), Condvar::new()));
+        let diagnostics = Arc::new((
+            Mutex::new(DiagnosticState {
+                document_uri: document_uri.clone(),
+                version: 0,
+                published: None,
+            }),
+            Condvar::new(),
+        ));
         spawn_reader(
             output,
             input.clone(),
@@ -311,41 +379,55 @@ impl Client {
     }
 
     fn sync(&mut self, source: &str) -> Result<(), String> {
-        if !self.opened {
-            self.clear_diagnostics();
-            self.version = 1;
-            self.notify(
-                "textDocument/didOpen",
-                json!({
-                    "textDocument": {
-                        "uri": self.document_uri,
-                        "languageId": "typst",
-                        "version": self.version,
-                        "text": source,
-                    }
-                }),
-            )?;
-            self.opened = true;
-            self.source = source.to_owned();
-        } else if self.source != source {
-            self.clear_diagnostics();
-            self.version += 1;
-            self.notify(
-                "textDocument/didChange",
-                json!({
-                    "textDocument": { "uri": self.document_uri, "version": self.version },
-                    "contentChanges": [{ "text": source }],
-                }),
-            )?;
-            self.source = source.to_owned();
+        if self.opened && self.source == source {
+            return Ok(());
         }
+        let previous = self.opened.then(|| self.document_uri.clone());
+        self.version += 1;
+        // Tinymist 0.15.2 publishes no diagnostic version. A fresh virtual URI binds each
+        // publication to an immutable source revision while keeping only one document open.
+        self.document_uri = tauri::Url::from_file_path(
+            self.root
+                .join(format!("__goodtype_editor-{}.typ", self.version)),
+        )
+        .map_err(|_| "Typst editor path cannot be represented as a file URL")?
+        .to_string();
+        self.clear_diagnostics()?;
+        self.notify(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": self.document_uri,
+                    "languageId": "typst",
+                    "version": self.version,
+                    "text": source,
+                }
+            }),
+        )?;
+        // Close the old revision only once the new one is open. Closing first left Tinymist with
+        // no document for a moment, and the revision opened after that never received semantic
+        // tokens: every edit after the first lost its highlighting.
+        if let Some(previous) = previous {
+            self.notify(
+                "textDocument/didClose",
+                json!({ "textDocument": { "uri": previous } }),
+            )?;
+        }
+        self.opened = true;
+        self.source = source.to_owned();
         Ok(())
     }
 
-    fn clear_diagnostics(&self) {
-        if let Ok(mut diagnostics) = self.diagnostics.0.lock() {
-            *diagnostics = None;
-        }
+    fn clear_diagnostics(&self) -> Result<(), String> {
+        let mut diagnostics = self
+            .diagnostics
+            .0
+            .lock()
+            .map_err(|_| "Tinymist diagnostic state is unavailable")?;
+        diagnostics.version = self.version;
+        diagnostics.document_uri.clone_from(&self.document_uri);
+        diagnostics.published = None;
+        Ok(())
     }
 
     fn diagnostics(&self, source: &str) -> Result<Vec<Diagnostic>, String> {
@@ -354,9 +436,12 @@ impl Client {
             .lock()
             .map_err(|_| "Tinymist diagnostic state is unavailable")?;
         let (diagnostics, _) = ready
-            .wait_timeout_while(diagnostics, Duration::from_secs(1), |value| value.is_none())
+            .wait_timeout_while(diagnostics, Duration::from_secs(1), |value| {
+                value.published.is_none()
+            })
             .map_err(|_| "Tinymist diagnostic state is unavailable")?;
         diagnostics
+            .published
             .as_ref()
             .map(|params| parse_diagnostics(source, params))
             .transpose()
@@ -506,8 +591,9 @@ fn spawn_reader(
             {
                 if let Some(params) = message.get("params") {
                     let (slot, ready) = &*diagnostics;
-                    if let Ok(mut published) = slot.lock() {
-                        *published = Some(params.clone());
+                    if let Ok(mut published) = slot.lock()
+                        && published.publish(params)
+                    {
                         ready.notify_all();
                     }
                 }
@@ -536,11 +622,18 @@ fn spawn_reader(
 
 fn read_message(reader: &mut impl BufRead) -> Result<Option<Value>, String> {
     let mut length = None;
+    let mut header_bytes = 0;
     loop {
         let mut header = String::new();
-        let read = reader
+        let remaining = MAX_LSP_HEADER_BYTES - header_bytes;
+        let read = (&mut *reader)
+            .take(remaining as u64 + 1)
             .read_line(&mut header)
             .map_err(|error| error.to_string())?;
+        header_bytes += read;
+        if header_bytes > MAX_LSP_HEADER_BYTES {
+            return Err("Tinymist LSP headers are too large".into());
+        }
         if read == 0 {
             return Ok(None);
         }
@@ -548,6 +641,9 @@ fn read_message(reader: &mut impl BufRead) -> Result<Option<Value>, String> {
             break;
         }
         if let Some(value) = header.strip_prefix("Content-Length:") {
+            if length.is_some() {
+                return Err("Tinymist sent duplicate Content-Length headers".into());
+            }
             length = Some(
                 value
                     .trim()
@@ -557,6 +653,9 @@ fn read_message(reader: &mut impl BufRead) -> Result<Option<Value>, String> {
         }
     }
     let length = length.ok_or("Tinymist sent an LSP frame without Content-Length")?;
+    if length > MAX_LSP_BODY_BYTES {
+        return Err("Tinymist LSP response is too large".into());
+    }
     let mut body = vec![0; length];
     reader
         .read_exact(&mut body)
@@ -647,6 +746,10 @@ fn parse_semantic_tokens(
     modifier_legend: &[String],
     response: Value,
 ) -> Result<Vec<Highlight>, String> {
+    // `null` is a valid answer: Tinymist has no tokens for this revision yet.
+    if response.is_null() {
+        return Ok(Vec::new());
+    }
     let data = response
         .get("data")
         .and_then(Value::as_array)
@@ -901,6 +1004,87 @@ mod tests {
     use super::*;
 
     #[test]
+    fn diagnostics_only_accept_the_expected_document_version() {
+        let mut state = DiagnosticState {
+            document_uri: "file:///notebook/editor-2.typ".into(),
+            version: 2,
+            published: None,
+        };
+        for params in [
+            json!({ "uri": state.document_uri, "version": 1, "diagnostics": [] }),
+            json!({ "uri": "file:///notebook/import.typ", "version": 2, "diagnostics": [] }),
+            json!({ "uri": "file:///notebook/editor-1.typ", "diagnostics": [] }),
+        ] {
+            assert!(!state.publish(&params));
+            assert!(state.published.is_none());
+        }
+        assert!(
+            state.publish(&json!({ "uri": state.document_uri, "version": 2, "diagnostics": [] }))
+        );
+        assert!(state.publish(&json!({ "uri": state.document_uri, "diagnostics": [] })));
+        assert!(state.published.is_some());
+    }
+
+    #[test]
+    fn oversized_sources_are_refused_without_starting_the_sidecar() {
+        let source = "x".repeat(goodtype_typst::MAX_SOURCE_BYTES + 1);
+        let tinymist = Tinymist::default();
+        let root = Path::new("not-a-notebook");
+        assert!(
+            tinymist
+                .complete(root, &source, 0, true)
+                .unwrap_err()
+                .contains("source exceeds")
+        );
+        assert!(
+            tinymist
+                .hover(root, &source, 0)
+                .unwrap_err()
+                .contains("source exceeds")
+        );
+        assert!(
+            tinymist
+                .format(root, &source)
+                .unwrap_err()
+                .contains("source exceeds")
+        );
+        assert!(
+            tinymist
+                .analyze(root, &source)
+                .unwrap_err()
+                .contains("source exceeds")
+        );
+        assert!(tinymist.0.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn lsp_frames_are_bounded_before_body_allocation() {
+        let oversized = format!("Content-Length: {}\r\n\r\n", MAX_LSP_BODY_BYTES + 1);
+        assert!(
+            read_message(&mut std::io::Cursor::new(oversized))
+                .unwrap_err()
+                .contains("response is too large")
+        );
+        let oversized_header = "x".repeat(MAX_LSP_HEADER_BYTES + 1);
+        assert!(
+            read_message(&mut std::io::Cursor::new(oversized_header))
+                .unwrap_err()
+                .contains("headers are too large")
+        );
+        assert!(
+            read_message(&mut std::io::Cursor::new(
+                "Content-Length: 2\r\nContent-Length: 2\r\n\r\n{}"
+            ))
+            .is_err()
+        );
+        assert!(read_message(&mut std::io::Cursor::new("Content-Length: 3\r\n\r\n{}")).is_err());
+        assert_eq!(
+            read_message(&mut std::io::Cursor::new("Content-Length: 2\r\n\r\n{}")).unwrap(),
+            Some(json!({}))
+        );
+    }
+
+    #[test]
     fn utf16_positions_and_edits_preserve_unicode() {
         let source = "a\u{1d55c}\n\u{2211} x";
         let prefix = "a\u{1d55c}\n\u{2211}";
@@ -986,5 +1170,49 @@ mod tests {
                 .any(|diagnostic| diagnostic.severity == "error" && diagnostic.from < diagnostic.to)
         );
         assert!(!root.join(EDITOR_FILE).exists());
+    }
+
+    #[test]
+    fn successive_edits_reuse_one_tinymist_process() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../fixtures/typst")
+            .canonicalize()
+            .unwrap();
+        let tinymist = Tinymist::default();
+        let process = |tinymist: &Tinymist| {
+            tinymist
+                .0
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|client| client.child.id())
+        };
+        tinymist.analyze(&root, "= Title").unwrap();
+        let first = process(&tinymist).expect("Tinymist should be running");
+        // Every request the editors make while typing and pointing, including hovers over
+        // nothing, must leave the same process running.
+        for source in [
+            "= Title
+$ x $",
+            "= Title
+$ x^2 $",
+            "#let a = 1",
+            "#let a = 1
+#a",
+        ] {
+            let analysis = tinymist.analyze(&root, source).unwrap();
+            assert!(
+                !analysis.highlights.is_empty(),
+                "every revision must be highlighted: {source:?}"
+            );
+            tinymist
+                .complete(&root, source, source.len(), false)
+                .unwrap();
+            for cursor in [0, 1, source.len() / 2, source.len()] {
+                tinymist.hover(&root, source, cursor).unwrap();
+            }
+            tinymist.format(&root, source).unwrap();
+        }
+        assert_eq!(process(&tinymist), Some(first));
     }
 }
