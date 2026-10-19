@@ -13,6 +13,7 @@ export type Recognition = { draft: ShapeDraft; confidence: number };
 export type RecognitionOptions = {
   /** Round a recognised line to a multiple of this angle. Zero, the default, keeps what was drawn. */
   snapDegrees?: number;
+  minimumLineLengthPt?: number;
 };
 
 const MIN_RECOGNITION_SIZE_PT = 24;
@@ -80,10 +81,9 @@ export function recognizeHeldShape(
   options: RecognitionOptions = {},
 ): Recognition | null {
   const points = deduplicate(samples.map(({ x, y }) => ({ x, y })));
-  if (points.length < 3) return null;
+  if (points.length < 2) return null;
   const bounds = pointBounds(points);
   const diagonal = Math.hypot(bounds.width, bounds.height);
-  if (diagonal < MIN_RECOGNITION_SIZE_PT) return null;
 
   // Straightening decides whether this was a line and where its ends are; it is deliberately not
   // allowed to decide the angle. Rounding to the nearest fifteen degrees moves the far end away
@@ -92,11 +92,16 @@ export function recognizeHeldShape(
   const snapped = straightenStroke(samples.slice(), {
     ...DEFAULT_STRAIGHTEN,
     snapDegrees: options.snapDegrees ?? 0,
+    minimumLengthPt: 4,
   });
   if (snapped.length === 2) {
+    if (distance(snapped[0], snapped[1]) < (options.minimumLineLengthPt ?? 6)) return null;
     const draft = shapeFromDrag("line", snapped[0], snapped[1], style);
     return draft ? { draft, confidence: 0.98 } : null;
   }
+
+  // Only held lines get the lower threshold; small handwriting loops still remain ink.
+  if (diagonal < MIN_RECOGNITION_SIZE_PT) return null;
 
   // What gets fitted is the outline, not the stroke: an overshoot past the start is part of the
   // gesture that closed the shape, not part of the shape.

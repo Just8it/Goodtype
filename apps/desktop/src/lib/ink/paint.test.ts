@@ -39,8 +39,8 @@ describe("paintOrder", () => {
     ]);
     expect(painted).toHaveLength(1);
     expect(painted[0].key).toBe("a");
-    // Three subpaths, so the strokes stay three separate shapes inside the one node.
-    expect(painted[0].d.match(/M /g)).toHaveLength(3);
+    // Each rounded stroke is compound geometry; all three still share just one painted node.
+    expect(painted[0].d.match(/M /g)!.length).toBeGreaterThan(3);
   });
 
   it("keeps colours apart", () => {
@@ -82,6 +82,16 @@ describe("paintOrder", () => {
     expect(painted.every((path) => path.opacity === 0.6)).toBe(true);
   });
 
+  it("rounds pen caps while keeping highlighter bands flat", () => {
+    const points = [{ x: 0, y: 0, pressure: 1, timeMs: 0, tiltX: 0, tiltY: 0 },
+      { x: 10, y: 0, pressure: 1, timeMs: 10, tiltX: 0, tiltY: 0 }];
+    const [pen] = paintOrder([stroke({ points, pressure: false, tool: "pen" })]);
+    const [highlighter] = paintOrder([stroke({ points, pressure: false, tool: "highlighter" })]);
+    expect(pen.d.match(/M /g)).toHaveLength(3);
+    expect(highlighter.d.match(/M /g)).toHaveLength(1);
+    expect(highlighter.d).toBe("M 0 1 L 10 1 L 10 -1 L 0 -1 Z");
+  });
+
   it("skips a stroke with nothing to draw", () => {
     expect(paintOrder([stroke({ points: [] })])).toEqual([]);
   });
@@ -101,6 +111,16 @@ describe("paintOrder", () => {
     expect(strata.map(({ key, zIndex }) => ({ key, zIndex }))).toEqual([
       { key: "below", zIndex: 1 },
       { key: "above", zIndex: 3 },
+    ]);
+  });
+
+  it("splits ink at fixed Page text so behind highlights cannot pull pen ink underneath", () => {
+    const strata = paintStrata([
+      stroke({ id: "pen", zIndex: 3 }),
+      stroke({ id: "sweep", zIndex: -1, tool: "highlighter", opacity: 0.6 }),
+    ], [0, 2]);
+    expect(strata.map(({ key, zIndex }) => ({ key, zIndex }))).toEqual([
+      { key: "sweep", zIndex: -1 }, { key: "pen", zIndex: 3 },
     ]);
   });
 });

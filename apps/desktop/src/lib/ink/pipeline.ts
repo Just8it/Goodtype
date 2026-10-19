@@ -100,6 +100,8 @@ export function pointerRole(
   // finger or hidden modifier to mean it. Finger drawing, when the writer asks for it, hands one
   // finger the tool in hand; the workspace still claims a second finger for pan and pinch.
   if (pointer.pointerType === "touch" && tool !== "shape" && !mapping.fingerDraws) return "ignore";
+  // The right and middle mouse buttons open the context menu and pan; only the primary one acts.
+  if (pointer.pointerType === "mouse" && pointer.button > 0) return "ignore";
   const pen = pointer.pointerType === "pen";
   const barrelHeld =
     pen &&

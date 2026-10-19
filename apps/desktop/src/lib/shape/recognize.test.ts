@@ -20,6 +20,18 @@ const samples = (points: [number, number][]): StrokePoint[] =>
   }));
 
 describe("draw-and-hold shape recognition", () => {
+  it("recognizes lines four times shorter without lowering the handwriting-loop threshold", () => {
+    expect(recognizeHeldShape(samples([[0, 0], [3, 0], [6, 0]]), style)?.draft.geometry.kind).toBe("line");
+    expect(recognizeHeldShape(samples([[0, 0], [6, 0]]), style)?.draft.geometry.kind).toBe("line");
+    expect(recognizeHeldShape(samples([[0, 0], [2, 0], [5, 0]]), style)).toBeNull();
+    expect(recognizeHeldShape(samples([[0, 0], [4, -4], [8, 0], [4, 4], [0, 0]]), style)).toBeNull();
+  });
+
+  it("honors the chosen line threshold rather than converting a short line into a spline", () => {
+    const line = samples([[0, 0], [20, 0], [40, 0]]);
+    expect(recognizeHeldShape(line, style, { minimumLineLengthPt: 48 })).toBeNull();
+    expect(recognizeHeldShape(line, style, { minimumLineLengthPt: 24 })?.draft.geometry.kind).toBe("line");
+  });
   it("uses the existing conservative straight-line judgement", () => {
     const found = recognizeHeldShape(samples([[10, 10], [50, 11], [100, 10]]), style);
     expect(found?.draft.geometry.kind).toBe("line");

@@ -47,6 +47,7 @@ function silhouette(stroke: Stroke, minimumWidthPt: number): string {
     { widthPt, pressure: stroke.pressure, taper: stroke.taper },
     stroke.pattern ?? "solid",
     stroke.patternSpacing ?? 1,
+    stroke.tool === "pen",
   )
     .map(outlinePath)
     .join(" ");

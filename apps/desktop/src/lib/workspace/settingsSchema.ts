@@ -151,6 +151,17 @@ export const SETTING_GROUPS: SettingGroup[] = [
         },
       },
       {
+        id: "touchHistory",
+        label: "Double-tap with two fingers to undo",
+        hint: "Three fingers redo. Use two quick taps on the canvas; ignored while the pen is near the screen",
+        keywords: ["touch", "gesture", "redo", "history", "fingers", "double tap"],
+        control: {
+          kind: "toggle",
+          read: (settings) => settings.touchHistory,
+          write: (settings, value) => ({ ...settings, touchHistory: value }),
+        },
+      },
+      {
         id: "penSideButton",
         label: "Pen side button",
         hint: "Hold the button on the barrel while writing. The eraser end always erases",
@@ -166,35 +177,6 @@ export const SETTING_GROUPS: SettingGroup[] = [
           write: (settings, value) => ({
             ...settings,
             penSideButton: value as AppSettings["penSideButton"],
-          }),
-        },
-      },
-      {
-        id: "eraserReturns",
-        label: "Eraser goes back to your pen",
-        hint: "After each erase — from the eraser tile, the pen's eraser end, or its side button — return to the tool you had before",
-        keywords: ["auto deselect", "switch back", "previous tool"],
-        control: {
-          kind: "toggle",
-          read: (settings) => settings.eraserReturns,
-          write: (settings, value) => ({ ...settings, eraserReturns: value }),
-        },
-      },
-      {
-        id: "eraserReach",
-        label: "Eraser reaches",
-        hint: "Highlighter only clears highlights and leaves writing and shapes alone",
-        keywords: ["erase", "highlight", "protect ink"],
-        control: {
-          kind: "choice",
-          options: [
-            { value: "everything", label: "Everything" },
-            { value: "highlighter", label: "Highlighter only" },
-          ],
-          read: (settings) => settings.eraserReach,
-          write: (settings, value) => ({
-            ...settings,
-            eraserReach: value as AppSettings["eraserReach"],
           }),
         },
       },
@@ -229,6 +211,17 @@ export const SETTING_GROUPS: SettingGroup[] = [
             ...settings,
             undoScope: value as AppSettings["undoScope"],
           }),
+        },
+      },
+      {
+        id: "pullToAddPage",
+        label: "Pull past the last page to add one",
+        hint: "Keep scrolling at the end of the notebook; when the ring fills, a page in the notebook paper is added",
+        keywords: ["new page", "add page", "overscroll", "scroll", "goodnotes"],
+        control: {
+          kind: "toggle",
+          read: (settings) => settings.pullToAddPage,
+          write: (settings, value) => ({ ...settings, pullToAddPage: value }),
         },
       },
       {

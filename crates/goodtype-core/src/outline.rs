@@ -2,7 +2,8 @@
 //!
 //! A stroke is not a stroked centreline: `stroke-width` is constant along a path, so a stroked
 //! polyline can never vary with pressure. Instead this computes the ink's silhouette — offset the
-//! centreline by half the local width on each side, and close the two sides into one polygon.
+//! centreline by half the local width on each side. Writing pens add rounded caps and outer
+//! join arcs as consistently wound subpaths, filled once; highlighters retain their flat band.
 //!
 //! This mirrors `apps/desktop/src/lib/ink/outline.ts`. The two are pinned together by
 //! `fixtures/ink/outline.json`, so a change to one that is not made to the other fails
@@ -74,9 +75,21 @@ pub(crate) fn width_at(point: &OutlinePoint, options: &OutlineOptions) -> f64 {
     options.width_pt * (MIN_PRESSURE_SCALE + (1.0 - MIN_PRESSURE_SCALE) * clamped)
 }
 
-/// The closed silhouette of a stroke. Empty when there is nothing to draw; a single point becomes
-/// a small square so a tap still leaves a mark.
-pub fn outline_points(points: &[OutlinePoint], options: &OutlineOptions) -> Vec<Vertex> {
+/// Round mark, with the same winding as a stroke silhouette.
+pub(crate) fn outline_dot(center: OutlinePoint, radius: f64) -> Vec<Vertex> {
+    (0..12)
+        .map(|index| {
+            let angle = -std::f64::consts::TAU * index as f64 / 12.0;
+            Vertex {
+                x: quantize(center.x + radius * angle.cos()),
+                y: quantize(center.y + radius * angle.sin()),
+            }
+        })
+        .collect()
+}
+
+/// Resolve filtered samples and their pressure/taper radii for both nib projections.
+fn outline_samples(points: &[OutlinePoint], options: &OutlineOptions) -> Vec<(OutlinePoint, f64)> {
     if points.is_empty() {
         return Vec::new();
     }
@@ -92,27 +105,24 @@ pub fn outline_points(points: &[OutlinePoint], options: &OutlineOptions) -> Vec<
         }
     }
 
-    if path.len() == 1 {
-        let half = width_at(&path[0], options) / 2.0;
-        let (x, y) = (path[0].x, path[0].y);
-        return vec![
-            Vertex {
-                x: quantize(x - half),
-                y: quantize(y - half),
+    if path
+        .iter()
+        .all(|point| span(*point, path[0]) <= options.width_pt / 2.0)
+    {
+        return vec![(path[0], options.width_pt / 2.0)];
+    }
+
+    // Two tapered endpoints have zero width; retain a middle section without a move sample.
+    if path.len() == 2 && options.taper > 0.0 {
+        let (first, last) = (path[0], path[1]);
+        path.insert(
+            1,
+            OutlinePoint {
+                x: (first.x + last.x) / 2.0,
+                y: (first.y + last.y) / 2.0,
+                pressure: (first.pressure + last.pressure) / 2.0,
             },
-            Vertex {
-                x: quantize(x + half),
-                y: quantize(y - half),
-            },
-            Vertex {
-                x: quantize(x + half),
-                y: quantize(y + half),
-            },
-            Vertex {
-                x: quantize(x - half),
-                y: quantize(y + half),
-            },
-        ];
+        );
     }
 
     // Arc length drives the taper, so a slow stroke and a fast one taper over the same distance.
@@ -130,6 +140,30 @@ pub fn outline_points(points: &[OutlinePoint], options: &OutlineOptions) -> Vec<
         0.0
     };
 
+    path.iter()
+        .enumerate()
+        .map(|(index, point)| {
+            let ramp = if taper_length > 0.0 {
+                1.0_f64
+                    .min(cumulative[index] / taper_length)
+                    .min((total - cumulative[index]) / taper_length)
+            } else {
+                1.0
+            };
+            (*point, width_at(point, options) / 2.0 * ramp)
+        })
+        .collect()
+}
+
+pub fn outline_points(points: &[OutlinePoint], options: &OutlineOptions) -> Vec<Vertex> {
+    let samples = outline_samples(points, options);
+    if samples.is_empty() {
+        return Vec::new();
+    }
+    if samples.len() == 1 {
+        return outline_dot(samples[0].0, samples[0].1);
+    }
+    let path: Vec<OutlinePoint> = samples.iter().map(|(point, _)| *point).collect();
     let mut left = Vec::with_capacity(path.len());
     let mut right = Vec::with_capacity(path.len());
 
@@ -161,15 +195,7 @@ pub fn outline_points(points: &[OutlinePoint], options: &OutlineOptions) -> Vec<
             (dx, dy) = heading;
         }
 
-        let mut half = width_at(&path[index], options) / 2.0;
-        if taper_length > 0.0 {
-            let from_start = cumulative[index];
-            let from_end = total - cumulative[index];
-            let ramp = 1.0_f64
-                .min(from_start / taper_length)
-                .min(from_end / taper_length);
-            half *= ramp;
-        }
+        let half = samples[index].1;
 
         // Normal is the direction rotated a quarter turn.
         let nx = -dy * half;
@@ -187,6 +213,67 @@ pub fn outline_points(points: &[OutlinePoint], options: &OutlineOptions) -> Vec<
     right.reverse();
     left.extend(right);
     left
+}
+
+/// Round pen geometry: consistently wound strips and outside arcs, filled once as one path.
+pub fn rounded_outline_points(
+    points: &[OutlinePoint],
+    options: &OutlineOptions,
+) -> Vec<Vec<Vertex>> {
+    use std::f64::consts::{FRAC_PI_2, PI};
+    let samples = outline_samples(points, options);
+    if samples.is_empty() {
+        return Vec::new();
+    }
+    if samples.len() == 1 {
+        return vec![outline_dot(samples[0].0, samples[0].1)];
+    }
+    let at = |index: usize, angle: f64| Vertex {
+        x: quantize(samples[index].0.x + samples[index].1 * angle.cos()),
+        y: quantize(samples[index].0.y + samples[index].1 * angle.sin()),
+    };
+    let mut polygons = Vec::new();
+    let mut angles = Vec::new();
+    for index in 0..samples.len() - 1 {
+        let (from, to) = (samples[index].0, samples[index + 1].0);
+        let angle = (to.y - from.y).atan2(to.x - from.x);
+        angles.push(angle);
+        polygons.push(vec![
+            at(index, angle + FRAC_PI_2),
+            at(index + 1, angle + FRAC_PI_2),
+            at(index + 1, angle - FRAC_PI_2),
+            at(index, angle - FRAC_PI_2),
+        ]);
+    }
+    let mut arc = |index: usize, start: f64, sweep: f64| {
+        if samples[index].1 <= 0.0 || sweep <= 0.0 {
+            return;
+        }
+        let steps = (sweep / (PI / 6.0)).ceil().max(1.0) as usize;
+        let mut polygon = vec![Vertex {
+            x: quantize(samples[index].0.x),
+            y: quantize(samples[index].0.y),
+        }];
+        polygon
+            .extend((0..=steps).map(|step| at(index, start - sweep * step as f64 / steps as f64)));
+        polygons.push(polygon);
+    };
+    arc(0, angles[0] - FRAC_PI_2, PI);
+    arc(samples.len() - 1, angles[angles.len() - 1] + FRAC_PI_2, PI);
+    for index in 1..samples.len() - 1 {
+        let (before, after) = (angles[index - 1], angles[index]);
+        let turn = (after - before).sin().atan2((after - before).cos());
+        arc(
+            index,
+            if turn > 0.0 {
+                after - FRAC_PI_2
+            } else {
+                before + FRAC_PI_2
+            },
+            turn.abs(),
+        );
+    }
+    polygons
 }
 
 #[cfg(test)]
@@ -261,6 +348,46 @@ mod tests {
     }
 
     #[test]
+    fn rounded_geometry_matches_the_shared_fixture() {
+        #[derive(Deserialize)]
+        struct RoundedCase {
+            name: String,
+            points: Vec<[f64; 3]>,
+            width_pt: f64,
+            pressure: bool,
+            taper: f64,
+            expected: Vec<Vec<[f64; 2]>>,
+        }
+        let cases: Vec<RoundedCase> =
+            serde_json::from_str(include_str!("../../../fixtures/ink/rounded-outline.json"))
+                .unwrap();
+        for case in cases {
+            let points: Vec<OutlinePoint> = case
+                .points
+                .iter()
+                .map(|p| OutlinePoint {
+                    x: p[0],
+                    y: p[1],
+                    pressure: p[2],
+                })
+                .collect();
+            let polygons = rounded_outline_points(
+                &points,
+                &OutlineOptions {
+                    width_pt: case.width_pt,
+                    pressure: case.pressure,
+                    taper: case.taper,
+                },
+            );
+            let actual: Vec<Vec<[f64; 2]>> = polygons
+                .iter()
+                .map(|polygon| polygon.iter().map(|p| [p.x, p.y]).collect())
+                .collect();
+            assert_eq!(actual, case.expected, "{}", case.name);
+        }
+    }
+
+    #[test]
     fn a_single_point_still_leaves_a_mark() {
         let polygon = outline_points(
             &[OutlinePoint {
@@ -274,6 +401,6 @@ mod tests {
                 taper: 0.0,
             },
         );
-        assert_eq!(polygon.len(), 4);
+        assert_eq!(polygon.len(), 12);
     }
 }

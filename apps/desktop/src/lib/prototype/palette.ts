@@ -41,7 +41,7 @@ export const PALETTE_TOOLS: readonly PaletteTool[] = [
   { id: "pen-1", label: "Pen 1", title: "Pen 1 (1) — press again for settings", group: "marking", context: "ink" },
   { id: "pen-2", label: "Pen 2", title: "Pen 2 (2) — press again for settings", group: "marking", context: "ink" },
   { id: "highlighter", label: "Highlighter", title: "Highlighter (3) — press again for settings", group: "marking", context: "ink" },
-  { id: "eraser", label: "Eraser", title: "Erase whole strokes (4) — choose a size on the rail", group: "marking" },
+  { id: "eraser", label: "Eraser", title: "Erase ink and shapes (4) — press again for settings", group: "marking", context: "eraser" },
   // Freehand marking above, deliberate construction below: the lasso and the shape tool both act
   // on the page rather than laying ink down on it. This also puts the tiles in the order their
   // number keys are in.

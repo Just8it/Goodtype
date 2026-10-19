@@ -1,5 +1,5 @@
 import type { Point } from "../geometry/coordinates";
-import type { Stroke, StrokePoint } from "../model";
+import type { Stroke, StrokePattern, StrokePoint } from "../model";
 import type { InkTool } from "./pipeline";
 
 export type Bounds = {
@@ -90,6 +90,47 @@ export function eraseStrokeAt(
 ): Stroke[] {
   const hit = hitStroke(strokes, point, radius, reaches);
   return hit ? strokes.filter((stroke) => stroke.id !== hit.id) : strokes;
+}
+
+/** What restyling a selection may change. Absent fields are left as they are. */
+export type StylePatch = {
+  color?: string;
+  widthPt?: number;
+  pattern?: StrokePattern;
+  patternSpacing?: number;
+};
+
+/**
+ * Apply a style to the selected strokes only, as new stroke objects so every cache keyed on a
+ * stroke's identity rebuilds. Highlighter sweeps take colour and width but stay solid, the same
+ * rule the highlighter follows when it draws.
+ */
+export function restyleStrokes(
+  strokes: Stroke[],
+  selectedIds: Iterable<string>,
+  patch: StylePatch,
+): Stroke[] {
+  const selected = new Set(selectedIds);
+  return strokes.map((stroke) => {
+    if (!selected.has(stroke.id)) return stroke;
+    const next: Stroke = { ...stroke };
+    if (patch.color !== undefined) next.color = patch.color;
+    if (patch.widthPt !== undefined) next.widthPt = patch.widthPt;
+    if (stroke.tool === "pen") {
+      if (patch.pattern !== undefined) next.pattern = patch.pattern;
+      if (patch.patternSpacing !== undefined) {
+        if (patch.patternSpacing === 1) delete next.patternSpacing;
+        else next.patternSpacing = patch.patternSpacing;
+      }
+    }
+    return next;
+  });
+}
+
+/** The value every item shares, or undefined when they differ or there are none. */
+export function shared<T>(values: T[]): T | undefined {
+  if (values.length === 0) return undefined;
+  return values.every((value) => value === values[0]) ? values[0] : undefined;
 }
 
 export function moveSelected(

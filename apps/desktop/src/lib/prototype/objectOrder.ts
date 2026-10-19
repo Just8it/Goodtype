@@ -2,6 +2,12 @@ import { DEFAULT_INK_Z_INDEX, type Page, type PageObject, type Stroke } from "..
 
 export type VisualMove = "forward" | "backward" | "front" | "back";
 
+/** Negative ink order is above paper but below fixed Page text (order zero). */
+export function newInkZIndex(objectZIndices: number[], strokes: Stroke[], behind: boolean): number {
+  const indices = [...objectZIndices, ...strokes.map((stroke) => stroke.zIndex ?? DEFAULT_INK_Z_INDEX)];
+  return behind ? Math.min(0, ...indices) - 1 : Math.max(0, ...indices) + 1;
+}
+
 type VisualEntry = {
   kind: "object" | "stroke";
   id: string;

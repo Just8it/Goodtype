@@ -40,11 +40,13 @@
   } from "../ipc/workspace";
   import { clampZoom, dampedVelocity, pannedScroll, type Point } from "../geometry/coordinates";
   import { placeFloatingToolbar, type ViewRect } from "../geometry/placement";
+  import { dismissable } from "../workspace/dismiss";
   import {
     DEFAULT_INK_Z_INDEX,
     SCHEMA_VERSION,
     type NotebookManifest,
     type PageBackground,
+    type PageDefaults,
     type PageGeometry,
     type PageObject,
     type PagePosition,
@@ -76,18 +78,22 @@
     summarizeMetric,
     type StrokePerformance,
   } from "../ink/metrics";
-  import { DEFAULT_POINTER_MAPPING, type InkTool, type PointerMapping } from "../ink/pipeline";
+  import { DEFAULT_POINTER_MAPPING, pointerRole, type InkTool, type PointerMapping } from "../ink/pipeline";
   import {
     keepsSelection,
     moveSelected,
+    restyleStrokes,
     scaleSelected,
     selectionBounds,
+    shared,
     transformedPoint,
     toolAfterSelection,
+    type StylePatch,
   } from "../ink/selection";
   import ColorPanel from "./ColorPanel.svelte";
   import WidthPanel from "./WidthPanel.svelte";
   import PaletteEditor from "./PaletteEditor.svelte";
+  import EraserPanel from "./EraserPanel.svelte";
   import ToolCard from "./ToolCard.svelte";
   import ShapeCard from "./ShapeCard.svelte";
   import PageSurface from "./PageSurface.svelte";
@@ -134,6 +140,7 @@
   import type { ShapeDraft } from "../shape/geometry";
   import { recognizeHeldShape } from "../shape/recognize";
   import { createCommitTimer } from "./commitTimer";
+  import { createTouchTaps, type TouchHistoryAction } from "./touchTaps";
   import { blankNotebookSnapshot } from "./newNotebook";
   import { createInkCommitter, type InkCommitter } from "./inkCommitter";
   import {
@@ -149,9 +156,27 @@
   import {
     moveReadingObject,
     moveVisualItems,
+    newInkZIndex,
     type VisualMove,
   } from "./objectOrder";
   import { closedTab, cycledTab, openedTab, type NotebookTab } from "./tabs";
+  import {
+    clipboardMarker,
+    isEmptyBundle,
+    pasteOffset,
+    pastedShapes,
+    pastedStrokes,
+    shiftTo,
+    type ClipboardBundle,
+  } from "./clipboard";
+  import {
+    atScrollEnd,
+    PULL_WHEEL_IDLE_MS,
+    pullProgress,
+    rubberBand,
+    wheelPixels,
+    type PullSource,
+  } from "./pullToAdd";
   import {
     addWidth as addRowWidth,
     canRemoveWidth,
@@ -552,6 +577,7 @@
     anchor: number;
   } | null>(null);
   let shapeCard = $state<{ anchor: number } | null>(null);
+  let eraserEditor = $state<HTMLElement | null>(null);
   let paletteEditor = $state<{ kind: "width" | "color"; index: number; anchor: HTMLElement; adding?: boolean } | null>(null);
 
   function closePaletteEditor() {
@@ -574,6 +600,13 @@
     toolCard = null;
     shapeCard = null;
     paletteEditor = null;
+    eraserEditor = null;
+  }
+
+  function closeEraserEditor() {
+    const anchor = eraserEditor;
+    closeToolCard();
+    void tick().then(() => anchor?.isConnected && anchor.focus());
   }
 
   /// First press selects the tool; pressing the one already held opens its card — the same
@@ -591,13 +624,15 @@
     toolCard = toolCard ? null : { kind, slot, anchor: swatchAnchor(tile) };
   }
 
-  /// The eraser's every setting already fits in the pocket, so a second press has nothing to
-  /// open. It gets a card when the queued eraser settings land (AGENT_DOC §3.9).
-  function selectEraser() {
+  function selectEraser(tile: HTMLElement) {
     if (tool !== "eraser") {
       closeToolCard();
       activateTool("eraser");
+      return;
     }
+    const alreadyOpen = eraserEditor === tile;
+    closeToolCard();
+    if (!alreadyOpen) eraserEditor = tile;
   }
 
   function selectOrOpenShape(tile: HTMLElement) {
@@ -616,24 +651,6 @@
     activate();
   }
 
-  /// Opened from the pocket rather than from a tile. It still anchors to the held tool's tile, so
-  /// the card points at the thing whose settings it carries wherever the button happens to be.
-  function openCardForHeldTool() {
-    paletteEditor = null;
-    const tile = document.querySelector<HTMLElement>(".instrument-palette .tool-tile.active");
-    if (tool === "shape") {
-      toolCard = null;
-      shapeCard = { anchor: tile ? swatchAnchor(tile) : 0 };
-      return;
-    }
-    shapeCard = null;
-    toolCard = {
-      kind: tool === "highlighter" ? "highlighter" : "pen",
-      slot: tool === "highlighter" ? 1 : penPreset,
-      anchor: tile ? swatchAnchor(tile) : 0,
-    };
-  }
-
   const paletteCommands: Record<PaletteCommand, (tile: HTMLElement) => void> = {
     "pen-1": (tile) => selectOrOpenTool("pen", 1, tile),
     "pen-2": (tile) => selectOrOpenTool("pen", 2, tile),
@@ -641,7 +658,7 @@
     shape: selectOrOpenShape,
     eraser: selectEraser,
     lasso: () => selectPlainTool(() => activateTool("lasso")),
-    "page-text": () => selectPlainTool(openPageText),
+    "page-text": () => selectPlainTool(() => editingPageText ? closeSideEditor() : openPageText()),
     "typst-block": () => selectPlainTool(addTypstBlock),
   };
 
@@ -656,13 +673,17 @@
     ...(editingPageText ? (["page-text"] as const) : []),
   ]);
   const expandedPaletteCommand = $derived<PaletteCommand | null>(
-    toolCard || shapeCard ? activePaletteCommand() : null,
+    toolCard || shapeCard || eraserEditor ? activePaletteCommand() : null,
   );
 
   /// Which quick controls the pocket carries for the tool in hand. Absent for tools that have
   /// nothing to set, so the rail shrinks back to bare tiles rather than showing an empty tray.
+  /// Whether the pocket edits a selection rather than the pen (specs/qol-wave.md section 2).
+  const selectedInk = $derived(strokes.filter((stroke) => selectedStrokeIds.includes(stroke.id)));
+  const selectedShape = $derived(shapes.find((shape) => shape.id === selectedShapeId) ?? null);
+  const restyling = $derived(selectedInk.length > 0 || selectedShape !== null);
   const paletteContext = $derived<"ink" | "eraser" | null>(
-    tool === "pen" || tool === "highlighter" || tool === "shape"
+    restyling || tool === "pen" || tool === "highlighter" || tool === "shape"
       ? "ink"
       : tool === "eraser"
         ? "eraser"
@@ -708,6 +729,10 @@
   );
   let metricsOpen = $state(false);
   const touchPoints = new Map<number, Point>();
+  const touchTaps = createTouchTaps();
+  let tapScrollOrigin: { left: number; top: number } | null = null;
+  let touchHistoryToast = $state<{ label: "Undo" | "Redo" } | null>(null);
+  let touchHistoryToastTimer: ReturnType<typeof setTimeout> | undefined;
   let pinchStart: PinchStart | null = null;
   let touchPanStart: TouchPanStart | null = null;
   let automaticPageFocusLocked = false;
@@ -779,7 +804,9 @@
   onMount(() => {
     void initialize();
     window.addEventListener("keydown", historyShortcut);
-    window.addEventListener("resize", scheduleSelectionToolbar);
+    // On the window, not on <main>: with focus on the body a paste never reaches <main>.
+    window.addEventListener("paste", handlePaste);
+    window.addEventListener("resize", onResizeToolbar);
     if (tauriAvailable) {
       const appWindow = getCurrentWindow();
       void appWindow
@@ -814,10 +841,12 @@
     if (metricsTimer) clearTimeout(metricsTimer);
     if (selectionToolbarFrame) cancelAnimationFrame(selectionToolbarFrame);
     if (touchInertiaFrame) cancelAnimationFrame(touchInertiaFrame);
+    if (touchHistoryToastTimer) clearTimeout(touchHistoryToastTimer);
     if (pendingZoomFrame) cancelAnimationFrame(pendingZoomFrame);
     removeCloseListener?.();
     window.removeEventListener("keydown", historyShortcut);
-    window.removeEventListener("resize", scheduleSelectionToolbar);
+    window.removeEventListener("paste", handlePaste);
+    window.removeEventListener("resize", onResizeToolbar);
     revokeImageUrl();
   });
 
@@ -841,7 +870,7 @@
     void sideEditorOpen;
     void settings.sideEditorWidth;
     selectionToolbarPosition = { left: 0, top: 0, ready: false };
-    if (selected) void tick().then(scheduleSelectionToolbar);
+    if (selected) void tick().then(() => scheduleSelectionToolbar());
   });
 
   async function initialize() {
@@ -1940,6 +1969,21 @@
       onSelect: (position, count) =>
         void addPage(position, { kind: "template", template: source }, geometry, count),
     });
+    // The notebook's paper for new pages: what it was created with, then whatever was added last
+    // (Rust moves it on every add with a chosen paper). The panel opens on it.
+    const next = notebookManifest?.defaultPage ?? null;
+    const nextUsable = next && next.background.kind !== "pdf" ? next : null;
+    const paperPreview = (paper: PageDefaults) =>
+      paper.background.kind === "template"
+        ? templatePreviewSvg(paper.background.template, paper.geometry)
+        : paper.background.kind === "plain"
+          ? templatePreviewSvg(
+              { id: "next-plain", name: "Plain", backgroundColor: paper.background.color, elements: [] },
+              paper.geometry,
+            )
+          : undefined;
+    const paperName = (paper: PageDefaults) =>
+      paper.background.kind === "template" ? paper.background.template.name : "Plain";
     return [
       {
         id: "import",
@@ -1949,7 +1993,7 @@
           {
             id: "pdf",
             label: "Import PDF",
-            detail: "Add every PDF page to the notebook",
+            detail: "Brings in every page",
             disabled: !tauriAvailable,
             compact: true,
             preview:
@@ -1960,44 +2004,21 @@
       },
       {
         id: "current",
-        title: "This page",
+        title: "Notebook paper",
         lane: "current",
         sources: [
-          {
-            id: "same",
-            label: "Same paper",
-            detail:
-              activeBackground.kind === "pdf"
-                ? `Blank, ${describeGeometry(activeGeometry)}`
-                : describeGeometry(activeGeometry),
-            // A plain page is still a page worth previewing. Drawn through the same helper with
-            // an empty template, so its paper colour comes from the page rather than from the
-            // panel's own idea of what white is.
-            preview:
-              activeBackground.kind === "template"
-                ? templatePreviewSvg(activeBackground.template, activeGeometry)
-                : activeBackground.kind === "plain"
-                  ? templatePreviewSvg(
-                      {
-                        id: "same-plain",
-                        name: "Plain",
-                        backgroundColor: activeBackground.color,
-                        elements: [],
-                      },
-                      activeGeometry,
-                    )
-                  : undefined,
-            // Matches this page's paper and its size, rather than picking up whatever size is
-            // selected above. A PDF-backed page hands over its size only: the paper is what is
-            // being copied, and the document printed on it is not part of that.
-            onSelect: (position, count) =>
-              void addPage(
-                position,
-                activeBackground.kind === "pdf" ? null : activeBackground,
-                activeGeometry,
-                count,
-              ),
-          },
+          ...(nextUsable
+            ? [
+                {
+                  id: "next",
+                  label: "Notebook paper",
+                  detail: `${paperName(nextUsable)}, ${describeGeometry(nextUsable.geometry)}`,
+                  preview: paperPreview(nextUsable),
+                  onSelect: (position: PagePosition, count: number) =>
+                    void addPage(position, nextUsable.background, nextUsable.geometry, count),
+                } satisfies AddPageSource,
+              ]
+            : []),
         ],
       },
       ...templateGroups(PAPER_TONES.find((paper) => paper.id === addPageToneId) ?? PAPER_TONES[0]).map((group) => ({
@@ -2194,14 +2215,6 @@
     ) + 1;
   }
 
-  function nextSnapshotVisualZIndex(snapshot: NotebookSnapshot, pageStrokes: Stroke[]): number {
-    return Math.max(
-      0,
-      ...snapshot.page.objects.map((object) => object.zIndex),
-      ...pageStrokes.map((stroke) => stroke.zIndex ?? DEFAULT_INK_Z_INDEX),
-    ) + 1;
-  }
-
   function flushTypstCommit() {
     if (typstCommitTimer) clearTimeout(typstCommitTimer);
     typstCommitTimer = undefined;
@@ -2321,17 +2334,67 @@
   // stay in the Settings window.
   // Chips now read from the writer's curated rows rather than frozen constants, which is what
   // makes a colour or width added here actually appear — and stay — on the bar.
+  /**
+   * Restyling a selection (specs/qol-wave.md section 2). While ink or a shape is selected the
+   * pocket edits that selection instead of the pen: it shows what the selection shares, and every
+   * pick changes the selection while the pen keeps its own settings.
+   */
+  const selectionStyle = $derived.by(() => {
+    const ink = selectedInk;
+    const shape = selectedShape;
+    const widths = [...ink.map((stroke) => stroke.widthPt), ...(shape ? [shape.style.strokeWidthPt] : [])];
+    const colors = [...ink.map((stroke) => stroke.color.toLowerCase()), ...(shape ? [shape.style.strokeColor.toLowerCase()] : [])];
+    const pens = ink.filter((stroke) => stroke.tool === "pen");
+    const patterns = [...pens.map((stroke) => stroke.pattern ?? "solid"), ...(shape ? [shape.style.pattern ?? "solid"] : [])];
+    const spacings = [...pens.map((stroke) => stroke.patternSpacing ?? 1), ...(shape ? [shape.style.patternSpacing ?? 1] : [])];
+    return {
+      widthPt: shared(widths),
+      color: shared(colors),
+      pattern: shared(patterns) ?? "solid",
+      spacing: shared(spacings) ?? 1,
+    };
+  });
+
+  function restyleSelection(patch: StylePatch) {
+    if (selectedInk.length > 0) {
+      changeStrokes(restyleStrokes(strokes, selectedStrokeIds, patch), "Restyled selection");
+    }
+    const shape = selectedShape;
+    if (shape) {
+      const style = { ...shape.style };
+      if (patch.color !== undefined) {
+        style.strokeColor = patch.color;
+        if (style.fillColor) style.fillColor = `${patch.color}24`;
+      }
+      if (patch.widthPt !== undefined) style.strokeWidthPt = patch.widthPt;
+      if (patch.pattern !== undefined) style.pattern = patch.pattern;
+      if (patch.patternSpacing !== undefined) style.patternSpacing = patch.patternSpacing;
+      changeShape({ ...shape, style });
+    }
+    const count = selectedInk.length + (shape ? 1 : 0);
+    status = `Restyled ${count} selected item${count === 1 ? "" : "s"}`;
+  }
+
   const activeWidthChips = $derived(
-    tool === "highlighter" ? settings.highlighterWidths : settings.penWidths,
+    tool === "highlighter" && !restyling ? settings.highlighterWidths : settings.penWidths,
   );
   const activeColorChips = $derived(
-    tool === "highlighter" ? settings.highlighterSwatches : settings.penSwatches,
+    tool === "highlighter" && !restyling ? settings.highlighterSwatches : settings.penSwatches,
   );
+  // A mixed selection shares no width or colour, so nothing on the row reads as selected.
   const activeWidth = $derived(
-    tool === "highlighter" ? settings.highlighter.widthPt : settings.penPresets[penPreset - 1].widthPt,
+    restyling
+      ? (selectionStyle.widthPt ?? Number.NaN)
+      : tool === "highlighter"
+        ? settings.highlighter.widthPt
+        : settings.penPresets[penPreset - 1].widthPt,
   );
   const activeInkColor = $derived(
-    tool === "highlighter" ? settings.highlighter.color : settings.penPresets[penPreset - 1].color,
+    restyling
+      ? (selectionStyle.color ?? "")
+      : tool === "highlighter"
+        ? settings.highlighter.color
+        : settings.penPresets[penPreset - 1].color,
   );
 
   function nearestChip(chips: readonly number[], value: number): number {
@@ -2342,6 +2405,16 @@
 
   /// Picking a pen chip takes its pattern too: the pattern belongs to that width, not the pen.
   function setActiveWidth(widthPt: number) {
+    if (restyling) {
+      // A chip is a whole stroke — width, pattern and spacing — so picking it hands all three to
+      // the selection, as it does to the pen.
+      restyleSelection({
+        widthPt,
+        pattern: patternForWidth(settings.penWidthPatterns, widthPt),
+        patternSpacing: spacingForWidth(settings.penWidthSpacings, widthPt),
+      });
+      return;
+    }
     if (tool === "highlighter") {
       changeSettings({ ...settings, highlighter: { ...settings.highlighter, widthPt } });
     } else {
@@ -2361,6 +2434,10 @@
   }
 
   function setActiveSpacing(spacing: number) {
+    if (restyling) {
+      restyleSelection({ patternSpacing: spacing });
+      return;
+    }
     if (!settings.penWidths.some((width) => Math.abs(width - activeWidth) < 0.001)) return;
     changeSettings({
       ...settings,
@@ -2370,6 +2447,10 @@
 
   /// Sets the pattern of the chip being edited and draws with it, leaving the other widths alone.
   function setActivePattern(pattern: StrokePattern) {
+    if (restyling) {
+      restyleSelection({ pattern });
+      return;
+    }
     const onRow = settings.penWidths.some((width) => Math.abs(width - activeWidth) < 0.001);
     changeSettings({
       ...settings,
@@ -2385,6 +2466,11 @@
   /// Point the active tool at a colour, and remember it as recently used. This changes which
   /// colour the pen writes with; it does not touch the swatch row.
   function setActiveColor(color: string) {
+    if (restyling) {
+      changeSettings({ ...settings, recentColors: withRecentColor(settings.recentColors, color) });
+      restyleSelection({ color });
+      return;
+    }
     const next = { ...settings, recentColors: withRecentColor(settings.recentColors, color) };
     if (tool === "highlighter") {
       changeSettings({ ...next, highlighter: { ...settings.highlighter, color } });
@@ -2521,15 +2607,31 @@
   }
 
   function routeObjectPointer(event: PointerEvent) {
+    // Explicit handles own contact, even with a brush or the Shape tool in hand.
+    if (event.target instanceof Element && event.target.closest(".shape-controls .control-hit")) {
+      directObjectInput = true;
+      const role = pointerRole(event, tool, pointerMapping);
+      if (event.type === "pointerdown" && (role === "erase" || role === "lasso" || role === "ignore" && event.pointerType === "pen")) {
+        // The eraser end and barrel mappings still take precedence over a handle.
+        const ink = event.target.closest(".page")?.querySelector(".ink-surface");
+        directObjectInput = false;
+        event.preventDefault();
+        event.stopPropagation();
+        ink?.dispatchEvent(new PointerEvent(event.type, event));
+      }
+      return;
+    }
     // A stylus is for writing, so ink takes it and you can write straight over a block. That was
     // unconditional, which meant a block could never be picked up with the pen that wrote it —
     // there was no tool that gave the stylus the object layer. A selection tool now does.
     //
     // Mouse and touch keep reaching objects under any tool: clicking a block to grab it is how
     // this has always worked, and a brush is no reason to take it away.
+    // The bar and its editors restyle whatever is selected, so pressing them must not re-route
+    // the press to the page and deselect the very shape about to be restyled.
     if (
       event.target instanceof Element &&
-      event.target.closest(".selection-actions")
+      event.target.closest(".selection-actions, .instrument-palette, .palette-editor")
     ) {
       return;
     }
@@ -2586,7 +2688,7 @@
       ((event.pointerType === "pen" || fingerDraws(event)) && !keepsSelection(tool)) ||
       (event.target instanceof Element &&
         event.target.closest(
-          ".typst-block, .image-object, .shape-object, .typst-size-control, .selection-actions, .overflow-menu, [data-preserve-selection]",
+          ".typst-block, .image-object, .shape-object, .typst-size-control, .selection-actions, .overflow-menu, .instrument-palette, .palette-editor, [data-preserve-selection]",
         ))
     ) {
       return;
@@ -2655,7 +2757,34 @@
   let lastPenSeenAt = -Infinity;
 
   function notePen(event: PointerEvent) {
-    if (event.pointerType === "pen") lastPenSeenAt = event.timeStamp;
+    if (event.pointerType === "pen") {
+      lastPenSeenAt = event.timeStamp;
+      touchTaps.cancel();
+    }
+  }
+
+  $effect(() => {
+    settings.touchHistory;
+    root;
+    activePageId;
+    touchTaps.reset();
+    tapScrollOrigin = null;
+  });
+
+  function touchHistoryAllowed(event: PointerEvent): boolean {
+    return settings.touchHistory && event.timeStamp - lastPenSeenAt > PALM_REJECTION_MS;
+  }
+
+  function applyTouchHistory(action: TouchHistoryAction) {
+    if (busy || transactionFailed || !(action === "undo" ? canUndo : canRedo)) return;
+    void routeHistory(action === "undo" ? "undo_notebook" : "redo_notebook",
+      action === "undo" ? "Undid change" : "Redid change", true);
+  }
+
+  function announceTouchHistory(label: "Undo" | "Redo") {
+    if (touchHistoryToastTimer) clearTimeout(touchHistoryToastTimer);
+    touchHistoryToast = { label };
+    touchHistoryToastTimer = setTimeout(() => { touchHistoryToast = null; }, 1000);
   }
 
   /** Whether this press is a finger the writer has asked to draw with. */
@@ -2676,15 +2805,35 @@
     if (
       event.target instanceof Element &&
       event.target.closest(".selection-actions, .page-number button")
-    ) return;
+    ) {
+      if (event.pointerType === "touch") touchTaps.cancel();
+      return;
+    }
     routeObjectPointer(event);
-    if (
-      tool === "shape" &&
-      event.target instanceof Element &&
-      event.target.closest(".ink-surface")
-    ) return;
     if (event.pointerType !== "touch") return;
+    const onInk = event.target instanceof Element && Boolean(event.target.closest(".ink-surface"));
+    touchTaps.start(event, touchHistoryAllowed(event) && onInk && !directObjectInput);
+    if (touchPoints.size === 0 && pageViewport) {
+      tapScrollOrigin = { left: pageViewport.scrollLeft, top: pageViewport.scrollTop };
+    }
     touchPoints.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    if (tool === "shape" && onInk && touchPoints.size === 1) return;
+    // A still finger held on the page opens the context menu. Not while a finger draws: there a
+    // held finger is a dot being written.
+    cancelLongPress();
+    if (touchPoints.size === 1 && !fingerDraws(event)) {
+      const { pointerId, clientX, clientY } = event;
+      longPress = {
+        pointerId,
+        x: clientX,
+        y: clientY,
+        timer: setTimeout(() => {
+          longPress = null;
+          touchPanStart = null;
+          openContextMenu(clientX, clientY);
+        }, LONG_PRESS_MS),
+      };
+    }
     // A drawing finger is left to the ink surface. Only a second finger is claimed here, and
     // capturing it for the pinch takes the first away from the surface, which drops that stroke.
     if (
@@ -2709,9 +2858,21 @@
       event.stopPropagation();
       return;
     }
+    if (touchPoints.size > 2) {
+      workspace?.setPointerCapture(event.pointerId);
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
     if (touchPoints.size !== 2 || !workspace) return;
+    // Undo a tap's tiny first-finger pan; larger motion has already rejected the tap candidate.
+    if (touchTaps.isMultiTapCandidate(event.timeStamp) && tapScrollOrigin && pageViewport) {
+      pageViewport.scrollLeft = tapScrollOrigin.left;
+      pageViewport.scrollTop = tapScrollOrigin.top;
+    }
     automaticPageFocusLocked = true;
     touchPanStart = null;
+    if (pull?.source === "touch") releasePull(false);
     const points = [...touchPoints.values()];
     const center = {
       x: (points[0].x + points[1].x) / 2,
@@ -2735,10 +2896,24 @@
 
   function workspacePointerMove(event: PointerEvent) {
     notePen(event);
+    if (event.pointerType === "touch") touchTaps.move(event, touchHistoryAllowed(event));
+    if (
+      longPress?.pointerId === event.pointerId &&
+      Math.hypot(event.clientX - longPress.x, event.clientY - longPress.y) > LONG_PRESS_SLOP_PX
+    ) {
+      cancelLongPress();
+    }
     if (continuePan(event)) return;
     routeObjectPointer(event);
     if (!touchPoints.has(event.pointerId)) return;
     touchPoints.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    // Jitter during a possible history tap must not zoom. Once the tap limits are exceeded,
+    // the existing pan/pinch uses the complete movement from its original anchor.
+    if (touchTaps.isMultiTapCandidate(event.timeStamp)) {
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
     if (touchPanStart && event.pointerId === touchPanStart.pointerId && pageViewport) {
       const now = performance.now();
       const next = pannedScroll(touchPanStart.scroll, touchPanStart.pointer, {
@@ -2756,6 +2931,13 @@
       };
       touchPanStart.lastPointer = { x: event.clientX, y: event.clientY };
       touchPanStart.lastTime = now;
+      // Past the end the finger pulls against resistance instead of scrolling into nothing.
+      const end = pageViewport.scrollHeight - pageViewport.clientHeight;
+      if (canPull() && (next.y > end || pull?.source === "touch")) {
+        const raw = next.y - end;
+        pull = raw > 0 ? { raw, source: "touch" } : null;
+        next.y = Math.min(next.y, end);
+      }
       pageViewport.scrollLeft = next.x;
       pageViewport.scrollTop = next.y;
       event.preventDefault();
@@ -2776,12 +2958,33 @@
   }
 
   function workspacePointerEnd(event: PointerEvent) {
+    notePen(event);
+    if (longPress?.pointerId === event.pointerId) cancelLongPress();
     if (endPan(event)) return;
     if (event.pointerType !== "touch") return;
+    const tapCandidate = touchTaps.isMultiTapCandidate(event.timeStamp);
+    const tap = touchTaps.end(event, event.type !== "pointerup", touchHistoryAllowed(event));
     touchPoints.delete(event.pointerId);
+    if (touchPoints.size === 0) tapScrollOrigin = null;
+    if (tapCandidate || tap) {
+      touchPanStart = null;
+      pinchStart = null;
+      if (pull?.source === "touch") releasePull(false);
+      event.preventDefault();
+      event.stopPropagation();
+      if (tap?.action) applyTouchHistory(tap.action);
+      return;
+    }
     if (touchPanStart?.pointerId === event.pointerId) {
       const finishedPan = touchPanStart;
       touchPanStart = null;
+      if (pull?.source === "touch") {
+        // A pull ends in the page or in nothing; it never hands off to a glide.
+        releasePull(event.type === "pointerup");
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
       if (event.type === "pointerup" && performance.now() - finishedPan.lastTime < 80) {
         startTouchInertia(finishedPan.velocity);
       }
@@ -3156,6 +3359,291 @@
     queueCommit("Ungrouped ink and Typst");
   }
 
+  /**
+   * Copy, cut, paste and duplicate (specs/qol-wave.md section 3). The bundle lives in the app so it
+   * survives page and notebook switches; the system clipboard only carries a marker, so a paste
+   * after copying something in another program does not bring back a stale Goodtype copy.
+   */
+  // Raw: a bundle is replaced whole, never edited in place, and may carry image bytes.
+  let clipboard = $state.raw<ClipboardBundle | null>(null);
+  let pasteCount = 0;
+
+  function hasCopyableSelection(): boolean {
+    return (
+      selectedStrokeIds.length > 0 ||
+      selectedShapeId !== null ||
+      selectedTypstId !== null ||
+      selectedImageId !== null
+    );
+  }
+
+  async function imageBytes(url: string): Promise<{ bytes: Uint8Array; mime: string } | null> {
+    try {
+      const response = await fetch(url);
+      const blob = await response.blob();
+      return { bytes: new Uint8Array(await blob.arrayBuffer()), mime: blob.type || "image/png" };
+    } catch {
+      return null;
+    }
+  }
+
+  async function bundleSelection(): Promise<ClipboardBundle | null> {
+    const ids = new Set(selectedStrokeIds);
+    const block = selectedTypstId ? typstBlocks.find((entry) => entry.id === selectedTypstId) : undefined;
+    const shape = selectedShapeId ? shapes.find((entry) => entry.id === selectedShapeId) : undefined;
+    const image = selectedImageId ? images.find((entry) => entry.id === selectedImageId) : undefined;
+    const imageData = image ? await imageBytes(image.url) : null;
+    const bundle: ClipboardBundle = {
+      token: crypto.randomUUID(),
+      pageId: activePageId,
+      strokes: strokes.filter((stroke) => ids.has(stroke.id)),
+      shapes: shape ? [shape] : [],
+      blocks: block
+        ? [{
+            source: block.source,
+            x: block.transform.x,
+            y: block.transform.y,
+            layoutWidthPt: block.transform.layoutWidthPt,
+            heightPt:
+              workspace?.querySelector<HTMLElement>(`.active-page [data-object-id="${CSS.escape(block.id)}"]`)
+                ?.offsetHeight ?? 0,
+            scale: block.transform.scale,
+          }]
+        : [],
+      images:
+        image && imageData
+          ? [{
+              ...imageData,
+              alt: image.alt,
+              x: image.x,
+              y: image.y,
+              widthPt: image.widthPt,
+              heightPt: image.heightPt,
+              scale: image.scale,
+            }]
+          : [],
+    };
+    return isEmptyBundle(bundle) ? null : bundle;
+  }
+
+  async function copySelection(cut = false) {
+    const bundle = await bundleSelection();
+    if (!bundle) {
+      status = "Nothing to copy";
+      return;
+    }
+    clipboard = bundle;
+    pasteCount = 0;
+    // Not awaited: without window focus the write can stay pending forever, and the copy itself
+    // is already done. The marker only guards a later paste against stale content.
+    void navigator.clipboard?.writeText(clipboardMarker(bundle)).catch(() => {});
+    if (cut) {
+      deleteSelection();
+      status = "Cut to the clipboard";
+    } else {
+      status = "Copied";
+    }
+  }
+
+  /// `at` centres the copy on a page point (the spot the context bar was opened at).
+  async function duplicateSelection(at: Point | null = null) {
+    const bundle = await bundleSelection();
+    if (!bundle) return;
+    clipboard = bundle;
+    pasteCount = 0;
+    await pasteBundle(bundle, at);
+  }
+
+  function freshObjectId(prefix: string): string {
+    const taken = new Set([
+      ...typstBlocks.map((entry) => entry.id),
+      ...images.map((entry) => entry.id),
+      ...shapes.map((entry) => entry.id),
+      ...(activeSnapshot?.page.objects.map((object) => object.id) ?? []),
+    ]);
+    let number = 1;
+    while (taken.has(`${prefix}-${String(number).padStart(3, "0")}`)) number += 1;
+    return `${prefix}-${String(number).padStart(3, "0")}`;
+  }
+
+  /// `at` is a page point to centre the paste on (from the context menu); without it a paste
+  /// steps away from its original on the same page and keeps its place on any other.
+  async function pasteBundle(bundle: ClipboardBundle, at: Point | null = null) {
+    pasteCount += 1;
+    const shift = at ? shiftTo(bundle, at) : pasteOffset(bundle, activePageId, pasteCount);
+    let zIndex = nextVisualZIndex();
+    let readingOrder = nextReadingOrder();
+
+    const newStrokes = pastedStrokes(bundle.strokes, shift, zIndex, () => crypto.randomUUID());
+    zIndex += newStrokes.length;
+    const newShapes = pastedShapes(bundle.shapes, shift, zIndex, readingOrder, () => crypto.randomUUID());
+    zIndex += newShapes.length;
+    readingOrder += newShapes.length;
+
+    let lastObject: { kind: "typst" | "image" | "shape"; id: string } | null =
+      newShapes.length > 0 ? { kind: "shape", id: newShapes.at(-1)!.id } : null;
+    if (newShapes.length > 0) shapes = [...shapes, ...newShapes];
+
+    for (const block of bundle.blocks) {
+      const id = freshObjectId("typst");
+      typstBlocks = [
+        ...typstBlocks,
+        {
+          id,
+          path: `blocks/${activePageId}-${id}.typ`,
+          source: block.source,
+          transform: {
+            x: block.x + shift.dx,
+            y: block.y + shift.dy,
+            layoutWidthPt: block.layoutWidthPt,
+            scale: block.scale,
+          },
+          result: null,
+          zIndex: zIndex++,
+          readingOrder: readingOrder++,
+        },
+      ];
+      lastObject = { kind: "typst", id };
+    }
+
+    for (const image of bundle.images) {
+      const filename = `pasted-${Date.now()}.${extensionForMime(image.mime)}`;
+      let path = `assets/${filename}`;
+      if (tauriAvailable && root) {
+        try {
+          path = await storePastedImage(root, filename, image.bytes);
+        } catch (error) {
+          status = `The image could not be pasted: ${message(error)}`;
+          continue;
+        }
+      }
+      const id = freshObjectId("image");
+      images = [
+        ...images,
+        {
+          id,
+          path,
+          url: URL.createObjectURL(new Blob([image.bytes.slice()], { type: image.mime })),
+          alt: image.alt,
+          x: image.x + shift.dx,
+          y: image.y + shift.dy,
+          widthPt: image.widthPt,
+          heightPt: image.heightPt,
+          scale: image.scale,
+          zIndex: zIndex++,
+          readingOrder: readingOrder++,
+        },
+      ];
+      lastObject = { kind: "image", id };
+    }
+
+    if (newStrokes.length > 0) changeStrokes([...strokes, ...newStrokes], "Pasted ink");
+    if (lastObject) queueCommit("Pasted");
+
+    // The paste stays selected, ready to be dragged into place.
+    selectedTypstId = lastObject?.kind === "typst" ? lastObject.id : null;
+    selectedImageId = lastObject?.kind === "image" ? lastObject.id : null;
+    selectedShapeId = lastObject?.kind === "shape" ? lastObject.id : null;
+    editingShapeId = null;
+    updateInkSelection(lastObject ? [] : newStrokes.map((stroke) => stroke.id));
+    const count =
+      newStrokes.length + newShapes.length + bundle.blocks.length + bundle.images.length;
+    status = `Pasted ${count} item${count === 1 ? "" : "s"}`;
+  }
+
+  /**
+   * The canvas context menu: right-click, or a long press with a finger. Paste lands where it was
+   * opened; with something selected it also offers the selection's own actions.
+   */
+  let contextMenu = $state<{ x: number; y: number; at: Point | null } | null>(null);
+  let longPress: { pointerId: number; x: number; y: number; timer: ReturnType<typeof setTimeout> } | null =
+    null;
+  const LONG_PRESS_MS = 500;
+  const LONG_PRESS_SLOP_PX = 10;
+
+  /**
+   * The point on the active page nearest a viewport point, in page points: under it on the page,
+   * pulled to the edge when it is in the margin, so a paste there still lands by the pointer.
+   */
+  function pagePointAt(clientX: number, clientY: number): Point | null {
+    const frame = pageFrame?.getBoundingClientRect();
+    if (!frame) return null;
+    const x = Math.min(Math.max(clientX, frame.left), frame.right);
+    const y = Math.min(Math.max(clientY, frame.top), frame.bottom);
+    return { x: (x - frame.left) / zoom, y: (y - frame.top) / zoom };
+  }
+
+  function openContextMenu(clientX: number, clientY: number) {
+    closeToolCard();
+    contextMenu = { x: clientX, y: clientY, at: pagePointAt(clientX, clientY) };
+  }
+
+  function canvasContextMenu(event: MouseEvent) {
+    // A pen's barrel press is a tool, handled on the ink surface, which cancels the menu there.
+    if (event.defaultPrevented) return;
+    const target = event.target instanceof Element ? event.target : null;
+    if (!target?.closest(".page-scroll-content")) return;
+    if (target.closest(".cm-editor, input, textarea, [contenteditable=true]")) return;
+    event.preventDefault();
+    openContextMenu(event.clientX, event.clientY);
+  }
+
+  function cancelLongPress() {
+    if (longPress) clearTimeout(longPress.timer);
+    longPress = null;
+  }
+
+  let contextBarElement = $state<HTMLElement>();
+  let contextBarPosition = $state({ left: 0, top: 0, ready: false });
+
+  /// The context bar is the selection toolbar, opened at the pointer instead of over the
+  /// selection, so right-click and the lasso offer the same controls in the same place style.
+  $effect(() => {
+    const menu = contextMenu;
+    const bar = contextBarElement;
+    if (!menu || !bar || !workspace) {
+      contextBarPosition = { left: 0, top: 0, ready: false };
+      return;
+    }
+    const placed = placeFloatingToolbar(
+      { left: menu.x, top: menu.y, right: menu.x, bottom: menu.y, width: 0, height: 0 },
+      bar.getBoundingClientRect(),
+      workspace.getBoundingClientRect(),
+    );
+    contextBarPosition = { left: placed.left, top: placed.top, ready: true };
+  });
+
+  /** Closes the bar and runs a context-bar action, handing it the page point the bar opened at. */
+  function fromContext(action: (at: Point | null) => unknown) {
+    return () => {
+      const at = contextMenu?.at ?? null;
+      contextMenu = null;
+      void action(at);
+    };
+  }
+
+  async function handlePaste(event: ClipboardEvent) {
+    // Text fields and editors paste their own way.
+    if (
+      event.target instanceof Element &&
+      event.target.closest(".cm-editor, input, textarea, [contenteditable=true]")
+    ) {
+      return;
+    }
+    const hasImageFile = Array.from(event.clipboardData?.files ?? []).some((item) =>
+      item.type.startsWith("image/"),
+    );
+    if (hasImageFile) {
+      await pasteImage(event);
+      return;
+    }
+    const text = event.clipboardData?.getData("text/plain") ?? "";
+    if (clipboard && (text === clipboardMarker(clipboard) || text === "")) {
+      event.preventDefault();
+      await pasteBundle(clipboard);
+    }
+  }
+
   async function pasteImage(event: ClipboardEvent) {
     const file = Array.from(event.clipboardData?.files ?? []).find((item) =>
       item.type.startsWith("image/"),
@@ -3498,16 +3986,21 @@
     status = direction < 0 ? "Moved selected ink back" : "Moved selected ink forward";
   }
 
-  function scheduleSelectionToolbar() {
+  function scheduleSelectionToolbar(attempt = 0) {
     if (selectionToolbarFrame) cancelAnimationFrame(selectionToolbarFrame);
     selectionToolbarFrame = requestAnimationFrame(() => {
       selectionToolbarFrame = undefined;
-      positionSelectionToolbar();
+      // A block just created or pasted is selected before it is on the page: its element appears
+      // a few frames later. Keep looking briefly instead of leaving the toolbar hidden for good.
+      if (!positionSelectionToolbar() && attempt < 30) scheduleSelectionToolbar(attempt + 1);
     });
   }
 
-  function positionSelectionToolbar() {
-    if (!workspace || !selectionToolbarElement) return;
+  const onResizeToolbar = () => scheduleSelectionToolbar();
+
+  /** Places the toolbar; false when the selection's element is not on the page yet. */
+  function positionSelectionToolbar(): boolean {
+    if (!workspace || !selectionToolbarElement) return false;
     let anchor: ViewRect | null = null;
     const objectId = selectedObjectId();
     if (objectId) {
@@ -3528,7 +4021,7 @@
         };
       }
     }
-    if (!anchor) return;
+    if (!anchor) return false;
     const boundary = workspace.getBoundingClientRect();
     if (
       anchor.right < boundary.left ||
@@ -3537,7 +4030,7 @@
       anchor.top > boundary.bottom
     ) {
       selectionToolbarPosition = { left: 0, top: 0, ready: false };
-      return;
+      return true;
     }
     const placed = placeFloatingToolbar(
       anchor,
@@ -3545,6 +4038,7 @@
       boundary,
     );
     selectionToolbarPosition = { left: placed.left, top: placed.top, ready: true };
+    return true;
   }
 
   function applyObjectOrder(page: NonNullable<typeof activeSnapshot>["page"], label: string) {
@@ -3605,6 +4099,7 @@
   async function routeHistory(
     command: "undo_notebook" | "redo_notebook",
     label: string,
+    announce = false,
   ) {
     if (!(await persist())) return;
     const order = command === "undo_notebook" ? notebookUndoOrder : notebookRedoOrder;
@@ -3613,6 +4108,7 @@
       queueStructureHistory(
         command === "undo_notebook" ? "undo_page_structure" : "redo_page_structure",
         label,
+        announce,
       );
       return;
     }
@@ -3623,7 +4119,7 @@
         scrollToPage(target.pageId);
       }
     }
-    queueHistory(command, label);
+    queueHistory(command, label, announce);
   }
 
   function lastPageActionIndex(actions: NotebookAction[], pageId: string): number {
@@ -3641,7 +4137,7 @@
     return -1;
   }
 
-  function queueHistory(command: "undo_notebook" | "redo_notebook", label: string) {
+  function queueHistory(command: "undo_notebook" | "redo_notebook", label: string, announce = false) {
     if (!tauriAvailable || transactionFailed) return;
     flushInkCommit();
     flushTypstCommit();
@@ -3664,6 +4160,7 @@
           canUndo = result.canUndo || notebookUndoOrder.length > 0;
           canRedo = result.canRedo || notebookRedoOrder.length > 0;
           status = `${label}; saved revision ${revision}`;
+          if (announce) announceTouchHistory(command === "undo_notebook" ? "Undo" : "Redo");
         } catch (error) {
           reportCommitFailure(label, error);
         }
@@ -3676,6 +4173,7 @@
   function queueStructureHistory(
     command: "undo_page_structure" | "redo_page_structure",
     label: string,
+    announce = false,
   ) {
     if (!tauriAvailable || transactionFailed) return;
     pendingTransactions += 1;
@@ -3704,6 +4202,7 @@
           await tick();
           scrollToPage(result.snapshot.page.id);
           status = `${label} page-list change`;
+          if (announce) announceTouchHistory(command === "undo_page_structure" ? "Undo" : "Redo");
         } catch (error) {
           reportCommitFailure(label, error);
         }
@@ -3790,6 +4289,15 @@
       event.preventDefault();
       searchOpen = true;
       return;
+    }
+    if ((event.ctrlKey || event.metaKey) && !event.shiftKey && !event.altKey) {
+      const key = event.key.toLowerCase();
+      if ((key === "c" || key === "x" || key === "d") && hasCopyableSelection()) {
+        event.preventDefault();
+        if (key === "d") void duplicateSelection();
+        else void copySelection(key === "x");
+        return;
+      }
     }
     if (
       (event.ctrlKey || event.metaKey) &&
@@ -4107,10 +4615,72 @@
     if (collectMetrics) zoomFrameMs = performance.now() - startedAt;
   }
 
+  /**
+   * Pull past the last page to add one (specs/qol-wave.md section 1).
+   *
+   * A finger pull is measured from the pan and decided on release; a wheel or trackpad pull fills
+   * as it scrolls and adds the moment the ring is full, because a wheel has no release. After a
+   * wheel add the pull stays disarmed until the wheel goes quiet, so a trackpad's momentum tail
+   * cannot add a second page behind the first.
+   */
+  let pull = $state<{ raw: number; source: PullSource } | null>(null);
+  let pullIdleTimer: ReturnType<typeof setTimeout> | undefined;
+  let pullDisarmed = false;
+  const pullFill = $derived(pull ? pullProgress(pull.raw, pull.source) : 0);
+  const pullShift = $derived(pull && !settings.reducedMotion ? rubberBand(pull.raw) : 0);
+  const pullPaper = $derived.by(() => {
+    const paper = notebookManifest?.defaultPage;
+    return paper && paper.background.kind !== "pdf" ? paper : null;
+  });
+
+  function canPull(): boolean {
+    return settings.pullToAddPage && tauriAvailable && !busy && notebookManifest !== null && pageOpen;
+  }
+
+  function pullFromWheel(event: WheelEvent) {
+    const viewport = pageViewport;
+    if (!viewport) return;
+    const delta = wheelPixels(event.deltaY, event.deltaMode, viewport.clientHeight);
+    clearTimeout(pullIdleTimer);
+    pullIdleTimer = setTimeout(() => {
+      pullDisarmed = false;
+      if (pull?.source === "wheel") pull = null;
+    }, PULL_WHEEL_IDLE_MS);
+    if (pullDisarmed || !canPull()) return;
+    if (pull?.source === "wheel") {
+      const raw = pull.raw + delta;
+      pull = raw > 0 ? { raw, source: "wheel" } : null;
+    } else if (
+      delta > 0 &&
+      atScrollEnd(viewport.scrollTop, viewport.clientHeight, viewport.scrollHeight)
+    ) {
+      pull = { raw: delta, source: "wheel" };
+    } else {
+      return;
+    }
+    event.preventDefault();
+    if (pull && pullProgress(pull.raw, "wheel") >= 1) {
+      pull = null;
+      pullDisarmed = true;
+      void addPageFromPull();
+    }
+  }
+
+  function releasePull(add: boolean) {
+    const ready = pull !== null && pullProgress(pull.raw, pull.source) >= 1;
+    pull = null;
+    if (add && ready) void addPageFromPull();
+  }
+
+  async function addPageFromPull() {
+    await addPage({ kind: "last" }, pullPaper?.background ?? null, pullPaper?.geometry ?? null);
+  }
+
   function wheelZoom(event: WheelEvent) {
     stopTouchInertia();
     if (!event.ctrlKey) {
       automaticPageFocusLocked = false;
+      pullFromWheel(event);
       return;
     }
     event.preventDefault();
@@ -4253,11 +4823,11 @@
       .replaceAll("&", "&amp;")
       .replaceAll("<", "&lt;")
       .replaceAll(">", "&gt;");
-    return `<svg xmlns="http://www.w3.org/2000/svg" width="${widthPt}pt" height="64pt"><rect width="100%" height="100%" fill="white"/><text x="8" y="32" font-family="sans-serif" font-size="14">${escaped}</text></svg>`;
+    return `<svg xmlns="http://www.w3.org/2000/svg" width="${widthPt}pt" height="64pt"><text x="8" y="32" font-family="sans-serif" font-size="14">${escaped}</text></svg>`;
   }
 </script>
 
-<main class="workspace-app" onpaste={pasteImage} onpointerdowncapture={closeObjectSelection} onwheel={wheelZoom}>
+<main class="workspace-app" onpointerdowncapture={closeObjectSelection} onwheel={wheelZoom}>
   {#if !notebookChosen}
     <div class="start-slot">
       <LibrarySurface
@@ -4424,12 +4994,17 @@
       bind:this={workspace}
       aria-label="Fixed page workspace"
       onpointerdowncapture={workspacePointerDown}
+      oncontextmenu={canvasContextMenu}
       onpointermovecapture={workspacePointerMove}
       onpointerupcapture={workspacePointerEnd}
       onpointercancelcapture={workspacePointerEnd}
     >
-      <div class="page-scroll-content" bind:this={pageViewport} onscroll={scheduleSelectionToolbar}>
-        <div class="page-pan-field">
+      <div class="page-scroll-content" bind:this={pageViewport} onscroll={() => scheduleSelectionToolbar()}>
+        <div
+          class="page-pan-field"
+          class:pulling={pull !== null}
+          style:transform={pullShift > 0 ? `translateY(${-pullShift}px)` : undefined}
+        >
         {#each pageEntries as entry, index (entry.id)}
           {@const active = entry.id === activePageId}
           <!-- The active page's own state wins; a neighbour that has loaded knows its real size,
@@ -4480,9 +5055,12 @@
                     shapes={active ? shapes : shapeViewsFromSnapshot(entry.snapshot!)}
                     results={active ? activeResults : (neighborResults[entry.id] ?? {})}
                     strokes={active ? strokes : neighborStrokesFor(entry)}
-                    newStrokeZIndex={active
-                      ? nextVisualZIndex()
-                      : nextSnapshotVisualZIndex(entry.snapshot!, neighborStrokesFor(entry))}
+                    newStrokeZIndex={newInkZIndex(
+                      active ? [...typstBlocks, ...images, ...shapes].map((object) => object.zIndex)
+                        : entry.snapshot!.page.objects.map((object) => object.zIndex),
+                      active ? strokes : neighborStrokesFor(entry),
+                      tool === "highlighter" && settings.highlighterBehindInk,
+                    )}
                     selectedStrokeIds={active ? selectedStrokeIds : []}
                     background={active ? activeBackground : (entry.snapshot?.page.background ?? { kind: "plain", color: "#ffffff" })}
                     pageWidthPt={box.widthPt}
@@ -4500,6 +5078,7 @@
                     widthPt={inkWidthPt()}
                     pressure={inkPressure()}
                     taper={inkTaper()}
+                    taperLengthWidths={activePreset().taperLengthWidths ?? 3}
                     pattern={inkPattern()}
                     patternSpacing={inkPatternSpacing()}
                     opacity={inkOpacity()}
@@ -4508,6 +5087,7 @@
                     shapeStyle={currentShapeStyle()}
                     shapeConstrain={settings.shapeConstrain}
                     drawAndHoldShapes={settings.drawAndHoldShapes}
+                    heldLineMinimumPt={settings.heldLineMinimumPt}
                     eraseRadiusPt={ERASER_RADIUS_PT[settings.eraserSize]}
                     eraserReach={settings.eraserReach}
                     calibration={settings.calibration}
@@ -4583,6 +5163,50 @@
         </div>
       </div>
 
+      {#if touchHistoryToast}
+        {#key touchHistoryToast}
+          <div class="touch-history-toast" class:below-palette={paletteDock === "top"}
+            class:reduced-motion={settings.reducedMotion} role="status" aria-live="polite">
+            {touchHistoryToast.label}
+          </div>
+        {/key}
+      {/if}
+
+      {#if pull}
+        <!-- Above the palette when it is docked at the bottom, so the bar never hides the ring. -->
+        <div
+          class="pull-badge"
+          class:ready={pullFill >= 1}
+          class:over-palette={paletteDock === "bottom"}
+          style:opacity={Math.min(1, pullFill * 3)}
+          role="status"
+          aria-live="polite"
+        >
+          <svg viewBox="0 0 40 40" aria-hidden="true">
+            <circle class="track" cx="20" cy="20" r="17" />
+            <circle
+              class="fill"
+              cx="20"
+              cy="20"
+              r="17"
+              pathLength="100"
+              stroke-dasharray={`${pullFill * 100} 100`}
+              transform="rotate(-90 20 20)"
+            />
+            {#if pullFill >= 1}
+              <path class="mark" d="M13 20.5l5 5 9-10" />
+            {:else}
+              <path class="mark" d="M20 13v14M13 20h14" />
+            {/if}
+          </svg>
+          <span>
+            {pullFill >= 1
+              ? `Release to add · ${pullPaper ? (pullPaper.background.kind === "template" ? pullPaper.background.template.name : "Plain") : "new page"}`
+              : "Pull to add a page"}
+          </span>
+        </div>
+      {/if}
+
       <!-- One grid owns the canvas chrome. Corner controls reserve their intrinsic row/column,
            so the palette can never be positioned through them by an unrelated fixed offset. -->
       <div bind:this={workspaceChrome} class="workspace-chrome">
@@ -4638,21 +5262,30 @@
         style:top={paletteDrag ? `${paletteY}px` : null}
         aria-label="Canvas tools"
       >
+        {#if eraserEditor}
+          <PaletteEditor title="Eraser" anchor={eraserEditor} dock={paletteDock}
+            onClose={closeEraserEditor} onDismiss={closeToolCard}>
+            <EraserPanel highlightsOnly={settings.eraserReach === "highlighter"} returns={settings.eraserReturns}
+              onHighlightsChange={(enabled) => changeSettings({ ...settings, eraserReach: enabled ? "highlighter" : "everything" })}
+              onReturnsChange={(eraserReturns) => changeSettings({ ...settings, eraserReturns })} />
+          </PaletteEditor>
+        {/if}
         {#if paletteEditor}
           {#key paletteEditor.anchor}
             <PaletteEditor title={paletteEditor.kind === "width" ? "Stroke" : paletteEditor.adding ? "Add colour" : "Colour"}
               anchor={paletteEditor.anchor} dock={paletteDock} onClose={closePaletteEditor} onDismiss={closeToolCard}>
               {#if paletteEditor.kind === "width"}
-                <WidthPanel embedded widthPt={activeWidth} kind={tool === "highlighter" ? "highlighter" : "pen"}
-                  minimumMm={WIDTH_BOUNDS_MM[tool === "highlighter" ? "highlighter" : "pen"].minimum}
-                  maximumMm={WIDTH_BOUNDS_MM[tool === "highlighter" ? "highlighter" : "pen"].maximum}
-                  pattern={inkPattern()}
-                  onPatternChange={tool === "pen" ? setActivePattern : undefined}
-                  spacing={inkPatternSpacing()}
-                  onSpacingChange={tool === "pen" ? setActiveSpacing : undefined}
-                  canRemove={paletteEditor.index >= 0 && canRemoveWidth(activeWidthChips)}
-                  onCommit={(width) => { if (!paletteEditor) return; paletteEditor.index < 0 ? addWidth(width) : editWidth(paletteEditor.index, width); closePaletteEditor(); }}
-                  onAdd={activeWidthChips.length < MAX_WIDTHS ? (width) => { addWidth(width); closePaletteEditor(); } : undefined}
+                {@const penLike = tool === "pen" || restyling}
+                <WidthPanel embedded widthPt={Number.isFinite(activeWidth) ? activeWidth : settings.penWidths[0]} kind={tool === "highlighter" && !restyling ? "highlighter" : "pen"}
+                  minimumMm={WIDTH_BOUNDS_MM[tool === "highlighter" && !restyling ? "highlighter" : "pen"].minimum}
+                  maximumMm={WIDTH_BOUNDS_MM[tool === "highlighter" && !restyling ? "highlighter" : "pen"].maximum}
+                  pattern={restyling ? selectionStyle.pattern : inkPattern()}
+                  onPatternChange={penLike ? setActivePattern : undefined}
+                  spacing={restyling ? selectionStyle.spacing : inkPatternSpacing()}
+                  onSpacingChange={penLike ? setActiveSpacing : undefined}
+                  canRemove={!restyling && paletteEditor.index >= 0 && canRemoveWidth(activeWidthChips)}
+                  onCommit={(width) => { if (!paletteEditor) return; if (restyling) setActiveWidth(width); else if (paletteEditor.index < 0) addWidth(width); else editWidth(paletteEditor.index, width); closePaletteEditor(); }}
+                  onAdd={!restyling && activeWidthChips.length < MAX_WIDTHS ? (width) => { addWidth(width); closePaletteEditor(); } : undefined}
                   onRemove={() => { if (paletteEditor) removeWidth(paletteEditor.index); closePaletteEditor(); }}
                   onClose={closePaletteEditor} />
               {:else}
@@ -4675,6 +5308,8 @@
               fill={settings.shapeFill}
               constrain={settings.shapeConstrain}
               drawAndHold={settings.drawAndHoldShapes}
+              minimumLineLengthPt={settings.heldLineMinimumPt}
+              onMinimumLineLengthChange={(heldLineMinimumPt) => changeSettings({ ...settings, heldLineMinimumPt })}
               strokeColor={currentShapeStyle().strokeColor}
               strokeWidthPt={currentShapeStyle().strokeWidthPt}
               pattern={settings.shapePattern}
@@ -4761,8 +5396,10 @@
               opacity={tool === "highlighter" ? settings.highlighterOpacity : 1}
               eraserSizes={ERASER_SIZE_OPTIONS}
               eraserSize={settings.eraserSize}
-              pattern={inkPattern()}
-              patternOf={tool === "pen" ? (width) => patternForWidth(settings.penWidthPatterns, width) : undefined}
+              pattern={restyling ? selectionStyle.pattern : inkPattern()}
+              patternOf={tool === "pen" || restyling ? (width) => patternForWidth(settings.penWidthPatterns, width) : undefined}
+              tag={restyling ? "Selection" : undefined}
+              matchPattern={restyling}
               expandedEditor={paletteEditor?.adding ? null : paletteEditor?.kind ?? null}
               addingColor={paletteEditor?.adding ?? false}
               onPickWidth={(width) => { closeToolCard(); setActiveWidth(width); }}
@@ -4772,14 +5409,61 @@
               onPickEraserSize={setEraserSize}
               canAddColor={activeColorChips.length < MAX_SWATCHES}
               onAddColor={(tile) => openPaletteEditor("color", -1, tile, true)}
-              onOpenCard={paletteContext === "ink" ? () => openCardForHeldTool() : undefined}
             />
           {/if}
         </div>
 
       </nav>
 
-      {#if selectedStrokeIds.length > 0 || groupedStrokeIds.length > 0}
+      {#if contextMenu}
+        <div class="context-actions" use:dismissable={{ onClose: () => (contextMenu = null), swallow: true }}>
+          {#if selectedStrokeIds.length > 0 || groupedStrokeIds.length > 0}
+            <SelectionActions
+              bind:element={contextBarElement}
+              subject="ink"
+              left={contextBarPosition.left}
+              top={contextBarPosition.top}
+              ready={contextBarPosition.ready}
+              canMoveBack={canMoveInkVisual(-1)}
+              canMoveForward={canMoveInkVisual(1)}
+              onMove={(direction) => fromContext(() => changeInkVisualOrder(direction))()}
+              onCut={fromContext(() => copySelection(true))}
+              onCopy={fromContext(() => copySelection())}
+              onPaste={fromContext((at) => clipboard && pasteBundle(clipboard, at))}
+              pasteDisabled={!clipboard}
+              onDuplicate={fromContext(duplicateSelection)}
+              onDelete={fromContext(deleteSelection)}
+            />
+          {:else if selectedImageId || selectedTypstId || selectedShapeId}
+            <SelectionActions
+              bind:element={contextBarElement}
+              subject={selectedImageId ? "image" : selectedShapeId ? "shape" : "Typst block"}
+              left={contextBarPosition.left}
+              top={contextBarPosition.top}
+              ready={contextBarPosition.ready}
+              canMoveBack={canMoveVisual(-1)}
+              canMoveForward={canMoveVisual(1)}
+              onMove={(direction) => fromContext(() => changeVisualOrder(direction < 0 ? "backward" : "forward"))()}
+              onCut={fromContext(() => copySelection(true))}
+              onCopy={fromContext(() => copySelection())}
+              onPaste={fromContext((at) => clipboard && pasteBundle(clipboard, at))}
+              pasteDisabled={!clipboard}
+              onDuplicate={fromContext(duplicateSelection)}
+              onDelete={fromContext(deleteSelection)}
+            />
+          {:else}
+            <SelectionActions
+              bind:element={contextBarElement}
+              subject="page"
+              left={contextBarPosition.left}
+              top={contextBarPosition.top}
+              ready={contextBarPosition.ready}
+              onPaste={fromContext((at) => clipboard && pasteBundle(clipboard, at))}
+              pasteDisabled={!clipboard}
+            />
+          {/if}
+        </div>
+      {:else if selectedStrokeIds.length > 0 || groupedStrokeIds.length > 0}
         <SelectionActions
           bind:element={selectionToolbarElement}
           subject="ink"
@@ -4796,6 +5480,8 @@
               ? groupSelectedInk
               : undefined}
           onConvert={selectedStrokeIds.length === 1 ? convertSelectedInkToShape : undefined}
+          onCopy={() => void copySelection()}
+          onDuplicate={() => void duplicateSelection()}
           onDelete={selectedStrokeIds.length > 0 ? () => void deleteSelection() : undefined}
         />
       {:else if selectedImageId || selectedTypstId || selectedShapeId}
@@ -4808,6 +5494,8 @@
           canMoveBack={canMoveVisual(-1)}
           canMoveForward={canMoveVisual(1)}
           onMove={(direction) => changeVisualOrder(direction < 0 ? "backward" : "forward")}
+          onCopy={() => void copySelection()}
+          onDuplicate={() => void duplicateSelection()}
           onDelete={() => void deleteSelection()}
         />
       {/if}
@@ -5161,6 +5849,52 @@
     gap: 46px;
   }
   .page-stack-item { position: relative; flex: none; }
+  /* Springs back when a pull is let go; follows the finger without lag while it lasts. */
+  .page-pan-field { transition: transform 220ms cubic-bezier(0.2, 0.9, 0.3, 1.2); }
+  .page-pan-field.pulling { transition: none; }
+  .touch-history-toast {
+    position: absolute;
+    top: 16px;
+    left: 50%;
+    z-index: 20;
+    transform: translateX(-50%);
+    padding: 8px 18px;
+    border-radius: var(--radius-pill);
+    background: var(--panel);
+    color: var(--text);
+    box-shadow: 0 4px 16px rgb(0 0 0 / 28%);
+    font-size: var(--text-md);
+    pointer-events: none;
+    animation: touch-history-fade 1s ease-out;
+  }
+  .touch-history-toast.below-palette { top: 90px; }
+  .touch-history-toast.reduced-motion { animation: none; }
+  @keyframes touch-history-fade { 0%, 75% { opacity: 1; } 100% { opacity: 0; } }
+  .pull-badge {
+    position: absolute;
+    left: 50%;
+    bottom: 28px;
+    z-index: 5;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 14px 6px 6px;
+    border: 1px solid var(--edge);
+    border-radius: var(--radius-pill);
+    background: var(--panel);
+    box-shadow: 0 10px 28px rgb(0 0 0 / 45%);
+    color: var(--text);
+    font-size: var(--text-sm);
+    pointer-events: none;
+    transform: translateX(-50%);
+  }
+  .pull-badge.over-palette { bottom: 104px; }
+  .pull-badge svg { width: 30px; height: 30px; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+  .pull-badge .track { stroke: rgb(255 255 255 / 14%); stroke-width: 3; }
+  .pull-badge .fill { stroke: var(--blueprint); stroke-width: 3; }
+  .pull-badge .mark { stroke: var(--text); stroke-width: 2; }
+  .pull-badge.ready { border-color: var(--blueprint); }
+  .pull-badge.ready .mark { stroke: var(--blueprint-light); }
   .page-stack-item.active-page .page-number { color: var(--blueprint-light); }
   .page-number {
     position: absolute;

@@ -51,7 +51,8 @@
     aria-label={definition.label}
     aria-pressed={definition.action ? undefined : active}
     aria-expanded={definition.context && active ? expandedCommand === definition.id : undefined}
-    title={definition.title}
+    title={definition.id === "eraser" && settings.eraserReach === "highlighter"
+      ? "Erase highlights only (4) — press again for settings" : definition.title}
     onclick={(event) => onActivate(definition.id, event.currentTarget)}
   >
     {#if definition.id === "pen-1"}

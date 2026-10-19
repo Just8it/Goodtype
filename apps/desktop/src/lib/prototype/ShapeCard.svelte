@@ -13,6 +13,8 @@
     fill,
     constrain,
     drawAndHold,
+    minimumLineLengthPt = 6,
+    onMinimumLineLengthChange,
     strokeColor,
     strokeWidthPt,
     pattern,
@@ -30,6 +32,8 @@
     fill: boolean;
     constrain: boolean;
     drawAndHold: boolean;
+    minimumLineLengthPt?: number;
+    onMinimumLineLengthChange?: (length: number) => void;
     strokeColor: string;
     strokeWidthPt: number;
     pattern: StrokePattern;
@@ -202,11 +206,23 @@
         false,
         () => onDrawAndHoldChange(!drawAndHold),
       )}
+      {#if drawAndHold}
+        <label class="slider">
+          <span>Held line minimum <span>{(minimumLineLengthPt * MM_PER_PT).toFixed(1)} mm</span></span>
+          <input type="range" min="4" max="96" step="1" value={minimumLineLengthPt}
+            aria-label="Minimum held line length" aria-valuetext={`${(minimumLineLengthPt * MM_PER_PT).toFixed(1)} millimetres`}
+            oninput={(event) => onMinimumLineLengthChange?.(Number(event.currentTarget.value))} />
+        </label>
+      {/if}
     </section>
   </div>
 </div>
 
 <style>
+  .slider { display: flex; flex-direction: column; gap: 6px; font-size: var(--text-md); }
+  .slider > span { display: flex; justify-content: space-between; gap: 8px; }
+  .slider > span > span { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .slider input { width: 100%; accent-color: var(--blueprint); }
   .shape-card {
     position: relative;
     display: flex;

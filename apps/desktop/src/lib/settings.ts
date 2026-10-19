@@ -12,6 +12,8 @@ import type { ShapeKind } from "./shape/geometry";
  * and a technical pen.
  */
 export type PenPreset = {
+  /** Maximum end taper in nib widths; absent older settings use three. */
+  taperLengthWidths?: number;
   widthPt: number;
   color: string;
   type: PenTypeId;
@@ -131,6 +133,7 @@ export type AppSettings = {
   shapePatternSpacing: number;
   shapeConstrain: boolean;
   drawAndHoldShapes: boolean;
+  heldLineMinimumPt: number;
   /** Where the undo and redo buttons sit; `auto` keeps them clear of the palette on their own. */
   historyCorner: HistoryCorner;
   eraserSize: EraserSize;
@@ -150,8 +153,11 @@ export type AppSettings = {
   pageTextLineWrap: boolean;
   /** Allow downloading Typst Universe packages on a cache miss. */
   remotePackages: boolean;
+  /** Scrolling on past the last page, against resistance, adds a page in the notebook paper. */
+  pullToAddPage: boolean;
   /** One finger draws with the active tool; two fingers still pan and pinch. */
   drawWithFinger: boolean;
+  touchHistory: boolean;
   penSideButton: PenSideButton;
   /** After an erase picked from the bar, go back to the tool used before it. */
   eraserReturns: boolean;
@@ -190,6 +196,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   shapePatternSpacing: 1,
   shapeConstrain: false,
   drawAndHoldShapes: true,
+  heldLineMinimumPt: 6,
   historyCorner: "auto",
   eraserSize: "medium",
   calibration: { minimum: 0, maximum: 1, curve: 1, smoothing: 0.2 },
@@ -202,7 +209,9 @@ export const DEFAULT_SETTINGS: AppSettings = {
   pageTextBaselineGrid: true,
   pageTextLineWrap: true,
   remotePackages: true,
+  pullToAddPage: true,
   drawWithFinger: false,
+  touchHistory: true,
   penSideButton: "eraser",
   eraserReturns: true,
   eraserReach: "everything",

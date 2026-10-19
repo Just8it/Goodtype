@@ -37,7 +37,8 @@
     onPickEraserSize,
     canAddColor = true,
     onAddColor,
-    onOpenCard,
+    tag,
+    matchPattern = false,
   }: {
     kind: "ink" | "eraser";
     horizontal?: boolean;
@@ -63,8 +64,13 @@
     canAddColor?: boolean;
     /** Opens a colour picker attached to the add button. */
     onAddColor?: (tile: HTMLElement) => void;
-    /** Absent for tools whose card holds nothing the pocket does not already show. */
-    onOpenCard?: () => void;
+    /** A short word naming what the pocket edits when it is not the held tool, e.g. "Selection". */
+    tag?: string;
+    /**
+     * Count a chip as current only when its pattern matches too. Used for a selection, where a
+     * solid stroke at a dashed chip's width must not light up that chip.
+     */
+    matchPattern?: boolean;
   } = $props();
 
   const mm = (pt: number) => `${(pt * MM_PER_PT).toFixed(2)} mm`;
@@ -91,12 +97,19 @@
 
 </script>
 
-<div class:horizontal class="pocket">
+<div
+  class:horizontal
+  class:tagged={Boolean(tag)}
+  class="pocket"
+  role="group"
+  aria-label={tag ? `Style for the ${tag.toLowerCase()}` : undefined}
+  title={tag ? `Changes apply to the ${tag.toLowerCase()}` : undefined}
+>
   {#if kind === "ink"}
     <div class="grid widths" role="group" aria-label="Stroke size">
       {#each visibleWidths as width, index (width)}
-        {@const selected = Math.abs(width - activeWidth) < 0.001}
         {@const linePattern = chipPattern(width, index)}
+        {@const selected = Math.abs(width - activeWidth) < 0.001 && (!matchPattern || linePattern === pattern)}
         <button
           type="button"
           class:current={selected}
@@ -162,19 +175,11 @@
     </div>
   {/if}
 
-  {#if onOpenCard}
-    <button type="button" class="more" aria-label="All settings for this tool" title="All settings" onclick={onOpenCard}>
-      <svg viewBox="0 0 24 24" aria-hidden="true">
-        <path d="M4 8h8M17 8h3M4 16h3M12 16h8" />
-        <circle cx="14.5" cy="8" r="2.2" />
-        <circle cx="9.5" cy="16" r="2.2" />
-      </svg>
-    </button>
-  {/if}
 </div>
 
 <style>
   .pocket {
+    position: relative;
     display: flex;
     flex-direction: column;
     padding-top: 7px;
@@ -288,22 +293,18 @@
     border-radius: 50%;
   }
 
-  /* Full width of the rail: it is the way out of the pocket, not one more chip in it. */
-  .more {
-    width: 100%;
-    height: 22px;
-    background: rgb(255 255 255 / 5%);
+  /* Editing a selection: nothing is added to the rail. The divider the pocket already draws turns
+     blue, matching the lasso tile and the rings on the selection's own width and colour. */
+  .pocket.tagged {
+    padding-bottom: 7px;
+    border-bottom: 1px solid var(--blueprint);
+    border-color: var(--blueprint);
   }
-
-  .horizontal .more { width: 22px; height: 100%; min-height: 22px; }
-
-  .more:hover { background: var(--wash); color: var(--text); }
-  .more svg {
-    width: 15px;
-    height: 15px;
-    fill: none;
-    stroke: currentColor;
-    stroke-linecap: round;
-    stroke-width: var(--stroke-dense);
+  /* Closed on the far side too, so the two lines bracket exactly what the selection controls. */
+  .pocket.tagged.horizontal {
+    padding-bottom: 0;
+    padding-right: 7px;
+    border-bottom: 0;
+    border-right: 1px solid var(--blueprint);
   }
 </style>

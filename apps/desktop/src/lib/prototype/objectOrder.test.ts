@@ -3,6 +3,7 @@ import type { Page, PageObject, Stroke } from "../model";
 import {
   moveReadingObject,
   moveVisualItems,
+  newInkZIndex,
   visualOrder,
 } from "./objectOrder";
 
@@ -39,6 +40,15 @@ const stroke = (id: string, zIndex: number): Stroke => ({
 });
 
 describe("object order", () => {
+  it("inserts behind-highlighter ink below text and ink without changing existing items", () => {
+    const ink = [stroke("pen", 5), stroke("old-sweep", -2)];
+    expect(newInkZIndex([1, 4], ink, true)).toBe(-3);
+    expect(newInkZIndex([1, 4], ink, false)).toBe(6);
+    expect(ink.map((item) => item.zIndex)).toEqual([5, -2]);
+    expect(newInkZIndex([], [], true)).toBe(-1);
+    expect(newInkZIndex([], [], false)).toBe(1);
+    expect(newInkZIndex([], [{ ...stroke("legacy", 1), zIndex: undefined }], false)).toBe(1_000_001);
+  });
   const page = (): Page => ({
     schemaVersion: 1,
     id: "page-001",

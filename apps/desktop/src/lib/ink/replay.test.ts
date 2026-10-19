@@ -12,6 +12,8 @@ import {
 import {
   eraseStrokeAt,
   hitStroke,
+  restyleStrokes,
+  shared,
   moveSelected,
   scaleSelected,
   selectStrokesInLasso,
@@ -53,6 +55,8 @@ describe("deterministic pen replay", () => {
     expect(pointerRole({ pointerType: "mouse", button: 0, buttons: 1 }, "shape")).toBe(
       "shape",
     );
+    // A right-click opens the context menu; it never starts a stroke.
+    expect(pointerRole({ pointerType: "mouse", button: 2, buttons: 2 }, "pen")).toBe("ignore");
     expect(pointerRole({ pointerType: "pen", button: 5, buttons: 32 }, "pen")).toBe(
       "erase",
     );
@@ -99,6 +103,28 @@ describe("deterministic pen replay", () => {
     ).toBe(false);
     expect(eraserInHand({ pointerType: "mouse", button: 0, buttons: 0 }, "eraser")).toBe(true);
     expect(eraserInHand({ pointerType: "mouse", button: 0, buttons: 0 }, "pen")).toBe(false);
+  });
+
+  it("restyles only the selected strokes and keeps highlighter sweeps solid", () => {
+    const pen = makeStroke("pen", [{ x: 0, y: 0 }]);
+    const other = makeStroke("other", [{ x: 5, y: 5 }]);
+    const sweep = { ...makeStroke("sweep", [{ x: 9, y: 9 }]), tool: "highlighter" as const };
+    const next = restyleStrokes([pen, other, sweep], ["pen", "sweep"], {
+      color: "#e5645e",
+      widthPt: 3,
+      pattern: "dotted",
+      patternSpacing: 2,
+    });
+    expect(next[0]).toMatchObject({ color: "#e5645e", widthPt: 3, pattern: "dotted", patternSpacing: 2 });
+    expect(next[0]).not.toBe(pen);
+    expect(next[1]).toBe(other);
+    expect(next[2]).toMatchObject({ color: "#e5645e", widthPt: 3 });
+    expect(next[2].pattern).toBeUndefined();
+    // Back to the default spacing leaves no field behind.
+    expect(restyleStrokes(next, ["pen"], { patternSpacing: 1 })[0].patternSpacing).toBeUndefined();
+    expect(shared([2, 2])).toBe(2);
+    expect(shared([2, 3])).toBeUndefined();
+    expect(shared([])).toBeUndefined();
   });
 
   it("selects, hits, moves, and uniformly scales complete strokes", () => {

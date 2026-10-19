@@ -31,6 +31,7 @@
     type PressureCalibration,
   } from "../ink/pipeline";
   import { patternedOutlinePoints } from "../ink/pattern";
+  import { limitedTaper, outlinePath } from "../ink/outline";
   import { paintStrata } from "../ink/paint";
   import { straightenStroke } from "../ink/straighten";
   import type { EraserReach } from "../settings";
@@ -68,6 +69,7 @@
     pressure?: boolean;
     /** Fraction of the stroke's length over which each end tapers to a point. */
     taper?: number;
+    taperLengthWidths?: number;
     /** Solid, dashed, or dotted; resolved into the stroke at pen-up. */
     pattern?: StrokePattern;
     /** Gap factor for the pattern, resolved into the stroke with it. */
@@ -80,6 +82,7 @@
     shapeStyle?: ShapeStyle;
     shapeConstrain?: boolean;
     drawAndHoldShapes?: boolean;
+    heldLineMinimumPt?: number;
     eraseRadiusPt?: number;
     /** Highlighter-only leaves pen ink and shapes alone. */
     eraserReach?: EraserReach;
@@ -114,6 +117,7 @@
     widthPt = 2,
     pressure = true,
     taper = 0,
+    taperLengthWidths = 3,
     pattern = "solid",
     patternSpacing = 1,
     opacity = 1,
@@ -127,6 +131,7 @@
     },
     shapeConstrain = false,
     drawAndHoldShapes = true,
+    heldLineMinimumPt = 6,
     eraseRadiusPt = 8,
     eraserReach = "everything",
     calibration = DEFAULT_PRESSURE_CALIBRATION,
@@ -671,7 +676,7 @@
           color,
           liveWidthPt(gesture.strokeTool),
           pressure,
-          taper,
+          gesture.strokeTool === "pen" ? limitedTaper(gesture.points, taper, widthPt * taperLengthWidths) : taper,
           gesture.strokeTool === "pen" ? pattern : "solid",
           opacity,
         );
@@ -710,16 +715,13 @@
       widthPt: Math.max(baseWidthPt, 0.5 / zoom),
       pressure: usePressure,
       taper: strokeTaper,
-    }, strokePattern, patternSpacing);
+    }, strokePattern, patternSpacing, gesture?.kind === "draw" && gesture.strokeTool === "pen");
     if (polygons.length === 0) return;
     context.save();
     context.fillStyle = strokeColor;
     context.globalAlpha = Math.min(1, Math.max(0, strokeOpacity));
-    for (const polygon of polygons) {
-      path(context, polygon);
-      context.closePath();
-      context.fill();
-    }
+    // Fill the complete stroke once: overlapping joins must not darken translucent ink.
+    context.fill(new Path2D(polygons.map(outlinePath).join(" ")));
     context.restore();
   }
 
@@ -750,7 +752,7 @@
         ? { patternSpacing }
         : {}),
       pressure,
-      taper,
+      taper: strokeTool === "pen" ? limitedTaper(points, taper, widthPt * taperLengthWidths) : taper,
       opacity,
       groupId: null,
       points,
@@ -793,7 +795,7 @@
       active.shapePreview = recognizeHeldShape(
         smoothPoints(active.points, calibration.smoothing),
         shapeStyle,
-        { snapDegrees: shapeConstrain ? SHAPE_SNAP_DEGREES : 0 },
+        { snapDegrees: shapeConstrain ? SHAPE_SNAP_DEGREES : 0, minimumLineLengthPt: heldLineMinimumPt },
       )?.draft ?? null;
       if (active.shapePreview) {
         status = `Release to use ${active.shapePreview.geometry.kind}; continue drawing to keep ink`;
@@ -882,6 +884,12 @@
     {/each}
   </svg>
 {/each}
+<canvas
+  bind:this={immediateCanvas}
+  class="immediate"
+  style:z-index={tool === "highlighter" && newStrokeZIndex < 0 ? newStrokeZIndex : 2147483645}
+  aria-hidden="true"
+></canvas>
 <div
   bind:this={surface}
   class="ink-surface"
@@ -904,7 +912,6 @@
   }}
   onkeydown={keyDown}
 >
-  <canvas bind:this={immediateCanvas} aria-hidden="true"></canvas>
   {#if selectedBounds}
     <svg
       class="selection-overlay"
@@ -991,6 +998,8 @@
     inset: 0;
     display: block;
   }
+
+  .immediate { pointer-events: none; }
 
   /* Ink is painted here; input is handled by the surface itself, which sits above it. */
   .committed {

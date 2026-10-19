@@ -132,6 +132,7 @@ fn export_page_from_bundle(
         .iter()
         .flat_map(|layer| &layer.strokes)
         .map(|stroke| ExportStroke {
+            tool: stroke.tool.clone(),
             z_index: stroke.z_index,
             color: stroke.color.clone(),
             width_pt: stroke.width_pt,

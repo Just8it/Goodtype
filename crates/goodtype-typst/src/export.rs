@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use goodtype_core::{
-    PageBackground, PageGeometry, ShapeGeometry, ShapePoint, ShapeStyle, StrokePattern,
+    PageBackground, PageGeometry, ShapeGeometry, ShapePoint, ShapeStyle, StrokePattern, StrokeTool,
     outline::{OutlineOptions, OutlinePoint},
     pattern::patterned_outline_points,
     template::{Area, Edge, TemplateElement, TemplateShape, resolve},
@@ -46,6 +46,7 @@ pub struct ExportTypstBlock {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExportStroke {
+    pub tool: StrokeTool,
     pub z_index: i32,
     pub color: String,
     pub width_pt: f64,
@@ -494,17 +495,17 @@ fn generated_typst_source(page: &ExportPage, page_index: usize) -> String {
             page.height_pt
         ));
     }
-    if page.page_typst.is_some() {
-        let layout = page_text_layout(page);
-        source.push_str(&format!(
-            "#place(top + left, dx: {}pt, dy: {}pt)[#block(width: {}pt)[#include \"page-text-{page_index}.typ\"]]\n",
-            layout.x, layout.y, layout.width,
-        ));
-    }
     let strata = ink_strata(page);
     let shapes = shape_strata(page);
     let mut objects =
-        Vec::with_capacity(page.blocks.len() + page.images.len() + shapes.len() + strata.len());
+        Vec::with_capacity(page.blocks.len() + page.images.len() + shapes.len() + strata.len() + 1);
+    if page.page_typst.is_some() {
+        let layout = page_text_layout(page);
+        objects.push((0, 0, format!(
+            "#place(top + left, dx: {}pt, dy: {}pt)[#block(width: {}pt)[#include \"page-text-{page_index}.typ\"]]\n",
+            layout.x, layout.y, layout.width,
+        )));
+    }
     for (index, block) in page.blocks.iter().enumerate() {
         objects.push((
             block.z_index,
@@ -577,6 +578,7 @@ fn ink_strata(page: &ExportPage) -> Vec<InkStratum<'_>> {
         .map(|block| block.z_index)
         .chain(page.images.iter().map(|image| image.z_index))
         .chain(page.shapes.iter().map(|shape| shape.z_index))
+        .chain(page.page_typst.as_ref().map(|_| 0))
         .collect();
     boundaries.sort_unstable();
     let mut strokes: Vec<(usize, &ExportStroke)> = page.strokes.iter().enumerate().collect();
@@ -878,6 +880,7 @@ fn ink_svg_for<'a>(
             },
             stroke.pattern,
             stroke.pattern_spacing,
+            stroke.tool == StrokeTool::Pen,
         );
         if polygons.is_empty() {
             continue;
@@ -920,6 +923,7 @@ fn shape_strata(page: &ExportPage) -> Vec<ShapeStratum<'_>> {
         .map(|block| block.z_index)
         .chain(page.images.iter().map(|image| image.z_index))
         .chain(page.strokes.iter().map(|stroke| stroke.z_index))
+        .chain(page.page_typst.as_ref().map(|_| 0))
         .collect();
     boundaries.sort_unstable();
     let mut shapes: Vec<&ExportShape> = page.shapes.iter().collect();
@@ -1096,6 +1100,7 @@ mod tests {
                 source: include_str!("../../../fixtures/pdf/phase0b/block.typ").to_owned(),
             }],
             strokes: vec![ExportStroke {
+                tool: StrokeTool::Pen,
                 z_index: 3,
                 color: "#111111".to_owned(),
                 width_pt: 2.0,
@@ -1183,6 +1188,39 @@ mod tests {
             above.find("block-0-0.typ").unwrap() < above.find("ink-0-0.svg").unwrap(),
             "higher ink must be emitted after the block: {above}"
         );
+    }
+
+    #[test]
+    fn rounds_saved_pen_ink_without_rounding_highlighter_bands() {
+        let mut page = page();
+        page.strokes[0].opacity = 0.6;
+        let pen = ink_svg(&page);
+        assert_eq!(pen.matches("M ").count(), 3);
+        assert_eq!(
+            pen.matches("<path ").count(),
+            1,
+            "joins must share one fill"
+        );
+        assert!(pen.contains("fill-opacity=\"0.6\""));
+        page.strokes[0].tool = StrokeTool::Highlighter;
+        assert_eq!(ink_svg(&page).matches("M ").count(), 1);
+    }
+
+    #[test]
+    fn saved_behind_ink_is_emitted_below_page_text_and_pen_ink() {
+        let mut page = page();
+        page.page_typst = Some("Visible text".to_owned());
+        let mut sweep = page.strokes[0].clone();
+        sweep.z_index = -1;
+        sweep.opacity = 0.6;
+        page.strokes.insert(0, sweep);
+        let source = generated_typst_source(&page, 0);
+        let behind = source.find("ink-0-0.svg").unwrap();
+        let text = source.find("page-text-0.typ").unwrap();
+        let above = source.find("ink-0-1.svg").unwrap();
+        assert!(behind < text && text < above, "{source}");
+        assert!(text < source.find("block-0-0.typ").unwrap(), "{source}");
+        assert_eq!(ink_strata(&page).len(), 2);
     }
 
     #[test]

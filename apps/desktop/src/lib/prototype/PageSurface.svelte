@@ -58,6 +58,7 @@
     widthPt = 2,
     pressure = true,
     taper = 0,
+    taperLengthWidths = 3,
     pattern = "solid",
     patternSpacing = 1,
     opacity = 1,
@@ -71,6 +72,7 @@
     },
     shapeConstrain = false,
     drawAndHoldShapes = true,
+    heldLineMinimumPt = 6,
     eraseRadiusPt = 8,
     eraserReach = "everything",
     calibration = DEFAULT_PRESSURE_CALIBRATION,
@@ -130,6 +132,7 @@
     /** Nib parameters for the active tool, resolved by the palette and stored on each stroke. */
     pressure?: boolean;
     taper?: number;
+    taperLengthWidths?: number;
     pattern?: StrokePattern;
     patternSpacing?: number;
     opacity?: number;
@@ -138,6 +141,7 @@
     shapeStyle?: ShapeStyle;
     shapeConstrain?: boolean;
     drawAndHoldShapes?: boolean;
+    heldLineMinimumPt?: number;
     eraseRadiusPt?: number;
     eraserReach?: EraserReach;
     calibration?: PressureCalibration;
@@ -280,6 +284,7 @@
       ...blocks.map((block) => block.zIndex),
       ...images.map((image) => image.zIndex),
       ...shapes.map((shape) => shape.zIndex),
+      ...(pageTypst ? [0] : []),
     ]}
     {selectedStrokeIds}
     {pageWidthPt}
@@ -290,6 +295,7 @@
     {widthPt}
     {pressure}
     {taper}
+    {taperLengthWidths}
     {pattern}
     {patternSpacing}
     {opacity}
@@ -298,6 +304,7 @@
     {shapeStyle}
     {shapeConstrain}
     {drawAndHoldShapes}
+    {heldLineMinimumPt}
     {eraseRadiusPt}
     {eraserReach}
     {calibration}
@@ -329,7 +336,7 @@
   }
 
   .page-text-layer {
-    z-index: 1;
+    z-index: 0;
     overflow: hidden;
     pointer-events: none;
   }
