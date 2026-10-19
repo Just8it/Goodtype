@@ -369,7 +369,7 @@
     z-index: -1;
     border: 1px solid rgb(30 35 43 / 14%);
     border-radius: var(--radius);
-    background: #fff;
+    background: transparent;
     content: "";
     inset: calc(-1 * var(--block-gutter));
   }

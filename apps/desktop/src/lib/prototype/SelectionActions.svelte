@@ -1,16 +1,24 @@
 <script lang="ts">
   type Props = {
-    subject: "ink" | "image" | "shape" | "Typst block";
+    /** "page" is the context bar over empty canvas, where only Paste applies. */
+    subject: "ink" | "image" | "shape" | "Typst block" | "page";
     left: number;
     top: number;
     ready: boolean;
-    canMoveBack: boolean;
-    canMoveForward: boolean;
-    onMove: (direction: -1 | 1) => void;
+    canMoveBack?: boolean;
+    canMoveForward?: boolean;
+    /** Absent over empty canvas: there is nothing to move between layers. */
+    onMove?: (direction: -1 | 1) => void;
     onDelete?: () => void;
     grouped?: boolean;
     onGroup?: () => void;
     onConvert?: () => void;
+    onCut?: () => void;
+    onCopy?: () => void;
+    /** Shown greyed when nothing has been copied, so the bar keeps its shape. */
+    onPaste?: () => void;
+    pasteDisabled?: boolean;
+    onDuplicate?: () => void;
     element?: HTMLElement;
   };
 
@@ -19,13 +27,18 @@
     left,
     top,
     ready,
-    canMoveBack,
-    canMoveForward,
+    canMoveBack = false,
+    canMoveForward = false,
     onMove,
     onDelete,
     grouped = false,
     onGroup,
     onConvert,
+    onCut,
+    onCopy,
+    onPaste,
+    pasteDisabled = false,
+    onDuplicate,
     element = $bindable(),
   }: Props = $props();
 </script>
@@ -36,8 +49,9 @@
   class="selection-actions"
   style:left={`${left}px`}
   style:top={`${top}px`}
-  aria-label={`Selected ${subject} actions`}
+  aria-label={subject === "page" ? "Page actions" : `Selected ${subject} actions`}
 >
+  {#if onMove}
   <button
     type="button"
     title={`Move selected ${subject} back one layer`}
@@ -64,6 +78,7 @@
       <path d="m15 11 3-3 3 3M18 8v5"></path>
     </svg>
   </button>
+  {/if}
   {#if onGroup}
     <button
       type="button"
@@ -98,6 +113,56 @@
       <svg viewBox="0 0 24 24" aria-hidden="true">
         <path d="M4 17.5 9.5 5 14 16l3-8 3 9.5"></path>
         <path d="m17 14 3 3-3 3"></path>
+      </svg>
+    </button>
+  {/if}
+  {#if onCut}
+    <button type="button" title="Cut (Ctrl+X)" aria-label={`Cut selected ${subject}`} onclick={onCut}>
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <circle class="ring" cx="6.5" cy="7" r="2.5"></circle>
+        <circle class="ring" cx="6.5" cy="17" r="2.5"></circle>
+        <path d="M8.6 8.4 19 16M8.6 15.6 19 8"></path>
+      </svg>
+    </button>
+  {/if}
+  {#if onCopy}
+    <button
+      type="button"
+      title={`Copy (Ctrl+C)`}
+      aria-label={`Copy selected ${subject}`}
+      onclick={onCopy}
+    >
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <rect x="8.5" y="8.5" width="11" height="11" rx="2"></rect>
+        <path d="M15.5 8.5V6.5a2 2 0 0 0-2-2h-7a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h2"></path>
+      </svg>
+    </button>
+  {/if}
+  {#if onPaste}
+    <button
+      type="button"
+      title={pasteDisabled ? "Nothing copied yet" : "Paste here (Ctrl+V)"}
+      aria-label="Paste here"
+      disabled={pasteDisabled}
+      onclick={onPaste}
+    >
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <rect x="8.5" y="3.5" width="7" height="3.5" rx="1"></rect>
+        <path d="M8.5 5.25H6.5a1.5 1.5 0 0 0-1.5 1.5v12.5a1.5 1.5 0 0 0 1.5 1.5h11a1.5 1.5 0 0 0 1.5-1.5V6.75a1.5 1.5 0 0 0-1.5-1.5h-2"></path>
+      </svg>
+    </button>
+  {/if}
+  {#if onDuplicate}
+    <button
+      type="button"
+      title={`Duplicate (Ctrl+D)`}
+      aria-label={`Duplicate selected ${subject}`}
+      onclick={onDuplicate}
+    >
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <rect x="8.5" y="8.5" width="11" height="11" rx="2"></rect>
+        <path d="M15.5 8.5V6.5a2 2 0 0 0-2-2h-7a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h2"></path>
+        <path d="M14 12v4M12 14h4"></path>
       </svg>
     </button>
   {/if}
@@ -155,4 +220,6 @@
     stroke-linecap: round;
     stroke-linejoin: round;
   }
+  /* The scissors' finger loops are outlines, not the filled dots other icons use. */
+  svg circle.ring { fill: none; stroke: currentColor; }
 </style>

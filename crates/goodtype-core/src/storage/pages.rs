@@ -12,8 +12,8 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    IdRemap, InkLayer, InkLayerReference, NotebookManifest, Page, PageBackground, PageGeometry,
-    PageReference, SourceRole, layout,
+    IdRemap, InkLayer, InkLayerReference, NotebookManifest, Page, PageBackground, PageDefaults,
+    PageGeometry, PageReference, SourceRole, layout,
 };
 
 use super::{
@@ -219,11 +219,21 @@ pub fn create_page(
         PagePosition::Before { page_id } => neighbour_index(manifest, page_id)?,
         PagePosition::After { page_id } => neighbour_index(manifest, page_id)? + 1,
     };
-    // The notebook default is the fallback, not the rule: picking a size or a template for one
-    // page should not change what the next page comes out as.
     let geometry = geometry
         .cloned()
         .unwrap_or_else(|| manifest.default_page.geometry.clone());
+    let background = background
+        .cloned()
+        .unwrap_or_else(|| manifest.default_page.background.clone());
+    // The paper chosen for this page becomes the notebook's paper for new pages: the writer asked
+    // for whatever they added last to be what the next add offers, starting from the paper the
+    // notebook was created with. A PDF page is a document, not paper, so it never becomes it.
+    if !matches!(background, PageBackground::Pdf { .. }) {
+        manifest.default_page = PageDefaults {
+            geometry: geometry.clone(),
+            background: background.clone(),
+        };
+    }
     manifest.pages.insert(
         insert_at,
         PageReference {
@@ -238,11 +248,7 @@ pub fn create_page(
         id: id.clone(),
         revision: 1,
         geometry,
-        // The notebook default is the fallback, not the rule: picking a template for one page
-        // should not change what the next blank page looks like.
-        background: background
-            .cloned()
-            .unwrap_or_else(|| manifest.default_page.background.clone()),
+        background,
         objects: Vec::new(),
         reading_order: Vec::new(),
         ink_layers: vec![InkLayerReference {
@@ -860,6 +866,42 @@ mod tests {
         let redone = redo_structure(&root, "2026-10-12T10:03:00Z", &mut structure).unwrap();
         assert_eq!(redone.snapshot.manifest.pages.len(), 2);
         assert_eq!(redone.snapshot.manifest.schema_version, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn the_paper_last_added_becomes_the_paper_for_new_pages() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("notebook");
+        create_notebook(&root, &snapshot()).unwrap();
+        let dotted = PageBackground::Plain {
+            color: "#f4efe3".into(),
+        };
+        let a5 = PageGeometry {
+            width_pt: 419.528,
+            height_pt: 595.276,
+        };
+        let added = create_page(
+            &root,
+            "2026-10-14T10:00:00Z",
+            &PagePosition::Last,
+            Some(&dotted),
+            Some(&a5),
+        )
+        .unwrap();
+        assert_eq!(added.manifest.default_page.background, dotted);
+        assert_eq!(added.manifest.default_page.geometry.width_pt, a5.width_pt);
+
+        // A page added without a choice comes out as that paper.
+        let next = create_page(
+            &root,
+            "2026-10-14T10:01:00Z",
+            &PagePosition::Last,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(next.page.background, dotted);
+        assert_eq!(next.page.geometry.height_pt, a5.height_pt);
     }
 
     #[test]

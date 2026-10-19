@@ -52,6 +52,7 @@ pub struct AppSettings {
     pub shape_constrain: bool,
     /// Pen shortcut: pause at the end of a deliberate mark to promote it into a shape.
     pub draw_and_hold_shapes: bool,
+    pub held_line_minimum_pt: f64,
     /// Where the undo and redo buttons sit; `auto` keeps them clear of the palette on their own.
     pub history_corner: String,
     pub eraser_size: String,
@@ -72,8 +73,12 @@ pub struct AppSettings {
     /// Allow downloading Typst Universe packages on a cache miss. Cached packages
     /// keep working either way.
     pub remote_packages: bool,
+    /// Scrolling on past the last page, against resistance, adds a page in the notebook paper.
+    pub pull_to_add_page: bool,
     /// Whether one finger draws with the active tool. Off keeps touch for navigation only.
     pub draw_with_finger: bool,
+    /// Two-finger double tap undoes; three-finger double tap redoes outside the palm window.
+    pub touch_history: bool,
     /// What the stylus barrel button does: "eraser", "lasso" or "none". The eraser end of the
     /// pen always erases.
     pub pen_side_button: String,
@@ -88,6 +93,8 @@ pub struct AppSettings {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PenPreset {
+    #[serde(default = "default_taper_length_widths")]
+    pub taper_length_widths: f64,
     pub width_pt: f64,
     pub color: String,
     /// Which nib from the pen library this slot is set to.
@@ -103,6 +110,10 @@ pub struct PenPreset {
 
 fn default_pen_type() -> String {
     "fountain".into()
+}
+
+fn default_taper_length_widths() -> f64 {
+    3.0
 }
 
 fn default_pen_pattern() -> String {
@@ -164,6 +175,7 @@ impl Default for AppSettings {
         Self {
             pen_presets: vec![
                 PenPreset {
+                    taper_length_widths: default_taper_length_widths(),
                     width_pt: 1.6,
                     color: "#1e232b".into(),
                     r#type: "fountain".into(),
@@ -171,6 +183,7 @@ impl Default for AppSettings {
                     pattern: default_pen_pattern(),
                 },
                 PenPreset {
+                    taper_length_widths: default_taper_length_widths(),
                     width_pt: 2.8,
                     color: "#2f6fdb".into(),
                     r#type: "ballpoint".into(),
@@ -179,6 +192,7 @@ impl Default for AppSettings {
                 },
             ],
             highlighter: PenPreset {
+                taper_length_widths: default_taper_length_widths(),
                 width_pt: 3.78,
                 color: "#e0912b".into(),
                 r#type: "marker".into(),
@@ -206,6 +220,7 @@ impl Default for AppSettings {
             shape_pattern_spacing: 1.0,
             shape_constrain: false,
             draw_and_hold_shapes: true,
+            held_line_minimum_pt: 6.0,
             history_corner: "auto".into(),
             eraser_size: "medium".into(),
             calibration: PressureCalibration {
@@ -223,7 +238,9 @@ impl Default for AppSettings {
             page_text_baseline_grid: true,
             page_text_line_wrap: true,
             remote_packages: true,
+            pull_to_add_page: true,
             draw_with_finger: false,
+            touch_history: true,
             pen_side_button: "eraser".into(),
             eraser_returns: true,
             eraser_reach: "everything".into(),
@@ -303,6 +320,7 @@ fn sanitize(mut settings: AppSettings) -> AppSettings {
         settings.pen_presets = defaults.pen_presets.clone();
     }
     for (index, preset) in settings.pen_presets.iter_mut().enumerate() {
+        preset.taper_length_widths = clamp(preset.taper_length_widths, 0.0, 6.0, 3.0);
         preset.width_pt = clamp(preset.width_pt, 0.2, 12.0, 1.6);
         if !PEN_TYPES.contains(&preset.r#type.as_str()) {
             preset.r#type = default_pen_type();
@@ -319,6 +337,9 @@ fn sanitize(mut settings: AppSettings) -> AppSettings {
         }
     }
     settings.highlighter.width_pt = clamp(settings.highlighter.width_pt, 1.0, 20.0, 3.78);
+    settings.highlighter.taper_length_widths =
+        clamp(settings.highlighter.taper_length_widths, 0.0, 6.0, 3.0);
+    settings.held_line_minimum_pt = clamp(settings.held_line_minimum_pt, 4.0, 96.0, 6.0);
     if !PEN_TYPES.contains(&settings.highlighter.r#type.as_str()) {
         settings.highlighter.r#type = "marker".into();
     }
@@ -814,6 +835,36 @@ mod tests {
             serde_json::from_str("{}").expect("legacy settings should load");
         assert!(settings.page_text_baseline_grid);
         assert!(settings.page_text_line_wrap);
+        assert!(settings.touch_history);
+        let disabled: AppSettings = serde_json::from_str(r#"{"touchHistory":false}"#).unwrap();
+        assert!(!disabled.touch_history);
+        let saved = serde_json::to_string(&disabled).unwrap();
+        assert!(
+            !serde_json::from_str::<AppSettings>(&saved)
+                .unwrap()
+                .touch_history
+        );
+    }
+
+    #[test]
+    fn drawing_length_settings_default_clamp_and_round_trip() {
+        let old: AppSettings =
+            serde_json::from_str(r##"{"penPresets":[{"widthPt":1.6,"color":"#1e232b"}]}"##)
+                .unwrap();
+        assert_eq!(old.pen_presets[0].taper_length_widths, 3.0);
+        assert_eq!(old.held_line_minimum_pt, 6.0);
+        let mut custom = old;
+        custom.pen_presets[0].taper_length_widths = 1.75;
+        custom.held_line_minimum_pt = 12.0;
+        let reloaded: AppSettings =
+            serde_json::from_str(&serde_json::to_string(&custom).unwrap()).unwrap();
+        assert_eq!(reloaded.pen_presets[0].taper_length_widths, 1.75);
+        assert_eq!(reloaded.held_line_minimum_pt, 12.0);
+        custom.pen_presets[0].taper_length_widths = 99.0;
+        custom.held_line_minimum_pt = -1.0;
+        let bounded = sanitize(custom);
+        assert_eq!(bounded.pen_presets[0].taper_length_widths, 6.0);
+        assert_eq!(bounded.held_line_minimum_pt, 4.0);
     }
 
     #[test]

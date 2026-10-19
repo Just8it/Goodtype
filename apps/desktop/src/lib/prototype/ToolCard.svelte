@@ -177,7 +177,7 @@
       {#if tool === "pen"}
         <section>
           {@render sectionLabel("Nib")}
-          <div class="nibs">
+          <div class="nibs" role="group" aria-label="Pen nib">
             {#each PEN_TYPES as type (type.id)}
               <button
                 type="button"
@@ -189,6 +189,7 @@
                 onclick={() => chooseNib(type.id)}
               >
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d={NIB_PATHS[type.id]} transform="rotate(45 12 12)" /></svg>
+                <span>{type.label}</span>
               </button>
             {/each}
           </div>
@@ -198,9 +199,17 @@
       <div class="divider"></div>
 
       <!-- One line per setting. New switches land here; see AGENT_DOC §3.9. -->
-      <section class="rows">
+      <section class="rows" class:pen-settings={tool === "pen"}>
         {#if tool === "pen"}
           {@render toggleRow("Pressure", preset.pressure, () => onChange({ ...preset, pressure: !preset.pressure }), "Stylus force varies the width")}
+          {#if penType(preset.type).taper > 0}
+            <div class="slider taper-setting">
+              {@render sectionLabel("Maximum taper", `${preset.taperLengthWidths ?? 3} × line width`)}
+              <input type="range" min="0" max="6" step="0.25" value={preset.taperLengthWidths ?? 3}
+                aria-label="Maximum taper length" aria-valuetext={`${preset.taperLengthWidths ?? 3} times line width`}
+                oninput={(event) => onChange({ ...preset, taperLengthWidths: Number(event.currentTarget.value) })} />
+            </div>
+          {/if}
         {:else}
           {@render sliderRow("Opacity", opacity, 0.1, 1, 0.05, (next) => onOpacityChange?.(next))}
           {@render toggleRow("Straighten to lines", straighten, () => onStraightenChange?.(!straighten))}
@@ -373,15 +382,22 @@
 
   .preview svg { width: 100%; height: 42px; }
 
-  .nibs { display: grid; grid-template-columns: repeat(5, 1fr); gap: 5px; }
+  .nibs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
 
   .nib {
-    display: grid;
-    height: 40px;
+    display: flex;
+    min-height: 64px;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 8px 4px;
+    gap: 4px;
     border: 1px solid var(--edge);
     border-radius: var(--radius);
     background: transparent;
     color: var(--muted);
+    font: inherit;
+    font-size: var(--text-sm);
     cursor: pointer;
     place-items: center;
   }
@@ -401,6 +417,16 @@
   .divider { height: 1px; flex: none; background: var(--edge-soft); }
 
   .rows { gap: 2px; }
+
+  .pen-settings { gap: 12px; }
+  .pen-settings > :not(:first-child) { padding-top: 12px; border-top: 1px solid var(--edge-soft); }
+  .taper-setting .eyebrow {
+    color: var(--text);
+    font-size: var(--text-md);
+    font-weight: 600;
+    letter-spacing: normal;
+    text-transform: none;
+  }
 
   .row {
     display: flex;

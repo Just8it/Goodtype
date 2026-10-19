@@ -7,6 +7,8 @@
 import type { StrokePattern } from "../model";
 import {
   outlinePoints,
+  outlineDot,
+  roundedOutlinePoints,
   outlineWidthAt,
   type OutlineOptions,
   type OutlinePoint,
@@ -14,8 +16,6 @@ import {
 
 type MeasuredPoint = { point: OutlinePoint; distance: number };
 export type InkPolygon = { x: number; y: number }[];
-
-const DOT_VERTICES = 12;
 
 function measured(points: OutlinePoint[]): MeasuredPoint[] {
   if (points.length === 0) return [];
@@ -116,35 +116,21 @@ export function patternRuns(
     : dottedRuns(path, widthPt, spacing);
 }
 
-function quantize(value: number): number {
-  return Math.round(value * 1000) / 1000;
-}
-
-function circle(center: OutlinePoint, radius: number): InkPolygon {
-  return Array.from({ length: DOT_VERTICES }, (_, index) => {
-    // Match the winding of `outlinePoints`. Opposite-wound overlapping subpaths
-    // cancel under SVG's nonzero fill rule and cut holes through round dash caps.
-    const angle = (-Math.PI * 2 * index) / DOT_VERTICES;
-    return {
-      x: quantize(center.x + radius * Math.cos(angle)),
-      y: quantize(center.y + radius * Math.sin(angle)),
-    };
-  });
-}
-
 /** Fillable polygons for the complete patterned stroke. */
 export function patternedOutlinePoints(
   points: OutlinePoint[],
   options: OutlineOptions,
   pattern: StrokePattern,
   spacing = 1,
+  round = false,
 ): InkPolygon[] {
   const runs = patternRuns(points, options.widthPt, pattern, spacing);
   if (pattern === "solid") {
-    return runs.map((run) => outlinePoints(run, options)).filter((polygon) => polygon.length > 0);
+    return runs.flatMap((run) => round ? roundedOutlinePoints(run, options) : [outlinePoints(run, options)])
+      .filter((polygon) => polygon.length > 0);
   }
   if (pattern === "dotted") {
-    return runs.map(([point]) => circle(point, outlineWidthAt(point, options) / 2));
+    return runs.map(([point]) => outlineDot(point, outlineWidthAt(point, options) / 2));
   }
 
   const segmentOptions = { ...options, taper: 0 };
@@ -152,12 +138,12 @@ export function patternedOutlinePoints(
     const first = run[0];
     const last = run[run.length - 1];
     if (run.length === 1) {
-      return [circle(first, outlineWidthAt(first, options) / 2)];
+      return [outlineDot(first, outlineWidthAt(first, options) / 2)];
     }
     return [
-      outlinePoints(run, segmentOptions),
-      circle(first, outlineWidthAt(first, options) / 2),
-      circle(last, outlineWidthAt(last, options) / 2),
+      ...(round ? roundedOutlinePoints(run, segmentOptions) : [outlinePoints(run, segmentOptions)]),
+      outlineDot(first, outlineWidthAt(first, options) / 2),
+      outlineDot(last, outlineWidthAt(last, options) / 2),
     ];
   });
 }

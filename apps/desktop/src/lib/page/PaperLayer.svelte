@@ -55,7 +55,7 @@
 <style>
   .paper-layer {
     position: absolute;
-    z-index: 0;
+    z-index: -2147483648;
     inset: 0;
     pointer-events: none;
   }

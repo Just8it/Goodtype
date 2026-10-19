@@ -97,10 +97,10 @@
   const pinned = $derived([...currentSources, ...importSources]);
   const everySource = $derived([...pinned, ...paperGroups.flatMap((group) => group.sources)]);
 
-  /// Opens on the paper this page is already made of, which is the likeliest thing to want next.
+  /// Opens on the notebook's paper: the one it was created with, then whatever was added last.
   const selected = $derived<AddPageSource | undefined>(
     everySource.find((source) => source.id === selectedId) ??
-      everySource.find((source) => source.id === "same") ??
+      everySource.find((source) => source.id === "next") ??
       everySource[0],
   );
   const importing = $derived(Boolean(selected && importSources.some((source) => source.id === selected.id)));
@@ -711,12 +711,14 @@
 
   .tally { color: var(--quiet); font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
 
-  .pins { display: flex; flex-direction: column; gap: 6px; }
+  /* Side by side, not stacked: two short tiles leave the paper library a row higher. */
+  .pins { display: grid; grid-template-columns: repeat(auto-fit, minmax(0, 1fr)); gap: 8px; }
 
   .import {
     display: flex;
+    min-width: 0;
     align-items: center;
-    padding: 10px 12px;
+    padding: 7px 10px;
     border: 1px dashed rgb(255 255 255 / 18%);
     border-radius: var(--radius);
     background: rgb(255 255 255 / 2%);
@@ -724,7 +726,7 @@
     font: inherit;
     text-align: left;
     cursor: pointer;
-    gap: 12px;
+    gap: 10px;
     transition: background 120ms ease, border-color 120ms ease;
   }
 
@@ -740,12 +742,12 @@
   .sheet {
     position: relative;
     display: flex;
-    width: 34px;
-    height: 42px;
+    width: 26px;
+    height: 33px;
     flex: none;
     align-items: flex-end;
     justify-content: center;
-    padding-bottom: 6px;
+    padding-bottom: 4px;
     border-radius: 3px;
     background: var(--paper);
     box-shadow: 0 1px 3px rgb(0 0 0 / 40%);
@@ -754,7 +756,7 @@
   .sheet :global(svg) { display: block; width: 100%; height: 100%; }
 
   .badge {
-    padding: 2px 4px;
+    padding: 1px 3px;
     border-radius: 2px;
     background: var(--oxide);
     color: #fff;
@@ -767,6 +769,8 @@
 
   .words { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
   .words .title { font-size: var(--text-md); font-weight: 600; }
+  .words .title,
+  .words .sub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .words .sub { color: var(--muted); font-size: var(--text-sm); }
 
   .papers {

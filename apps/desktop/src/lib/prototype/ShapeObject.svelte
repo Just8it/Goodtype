@@ -263,7 +263,20 @@
       onkeydown={objectKeydown}
     ></path>
 
-    {#if selected}
+  </g>
+</svg>
+{#if selected}
+<svg
+  class="shape-object shape-controls"
+  class:grabbable
+  class:editing
+  viewBox={`0 0 ${pageWidthPt} ${pageHeightPt}`}
+  width={pageWidthPt}
+  height={pageHeightPt}
+  aria-label={`${label} controls`}
+>
+  <g data-object-id={preview.id}
+    transform={`translate(${preview.x} ${preview.y}) rotate(${preview.rotation}) scale(${preview.scale})`}>
       {#if !endsOnly}
       <rect
         class="selection-box"
@@ -355,13 +368,14 @@
           ></circle>
         {/each}
       {/if}
-    {/if}
   </g>
 </svg>
+{/if}
 
 <style>
   .shape-object { position: absolute; inset: 0; display: block; overflow: visible; pointer-events: none; touch-action: none; user-select: none; }
   .shape-mark { pointer-events: none; }
+  .shape-controls { z-index: 2147483647; }
   .shape-hit { pointer-events: none; cursor: move; outline: none; }
   .grabbable .shape-hit { pointer-events: stroke; }
   .grabbable .shape-hit.closed { pointer-events: all; }

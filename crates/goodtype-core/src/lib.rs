@@ -210,7 +210,7 @@ pub struct Stroke {
     pub transform: Transform,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum StrokeTool {
     Pen,

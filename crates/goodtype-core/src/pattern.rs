@@ -4,14 +4,13 @@
 //! filled silhouette. This keeps pressure-sensitive ink and PDF export on the same geometry.
 //! The frontend mirror lives in `apps/desktop/src/lib/ink/pattern.ts`.
 
-use std::f64::consts::TAU;
-
 use crate::{
     StrokePattern,
-    outline::{OutlineOptions, OutlinePoint, Vertex, outline_points, quantize, width_at},
+    outline::{
+        OutlineOptions, OutlinePoint, Vertex, outline_dot, outline_points, rounded_outline_points,
+        width_at,
+    },
 };
-
-const DOT_VERTICES: usize = 12;
 
 #[derive(Clone, Copy)]
 struct MeasuredPoint {
@@ -133,39 +132,32 @@ pub fn pattern_runs(
     }
 }
 
-fn circle(center: OutlinePoint, radius: f64) -> Vec<Vertex> {
-    (0..DOT_VERTICES)
-        .map(|index| {
-            // Match `outline_points` winding. Opposite-wound overlapping subpaths
-            // cancel under SVG's nonzero fill rule and cut holes through dash caps.
-            let angle = -TAU * index as f64 / DOT_VERTICES as f64;
-            Vertex {
-                x: quantize(center.x + radius * angle.cos()),
-                y: quantize(center.y + radius * angle.sin()),
-            }
-        })
-        .collect()
-}
-
 /// Fillable polygons for the complete patterned stroke.
 pub fn patterned_outline_points(
     points: &[OutlinePoint],
     options: &OutlineOptions,
     pattern: StrokePattern,
     spacing: f64,
+    round: bool,
 ) -> Vec<Vec<Vertex>> {
     let runs = pattern_runs(points, options.width_pt, pattern, spacing);
     if pattern == StrokePattern::Solid {
         return runs
             .iter()
-            .map(|run| outline_points(run, options))
+            .flat_map(|run| {
+                if round {
+                    rounded_outline_points(run, options)
+                } else {
+                    vec![outline_points(run, options)]
+                }
+            })
             .filter(|polygon| !polygon.is_empty())
             .collect();
     }
     if pattern == StrokePattern::Dotted {
         return runs
             .iter()
-            .map(|run| circle(run[0], width_at(&run[0], options) / 2.0))
+            .map(|run| outline_dot(run[0], width_at(&run[0], options) / 2.0))
             .collect();
     }
 
@@ -178,11 +170,15 @@ pub fn patterned_outline_points(
             let first = run[0];
             let last = run[run.len() - 1];
             if run.len() == 1 {
-                return vec![circle(first, width_at(&first, options) / 2.0)];
+                return vec![outline_dot(first, width_at(&first, options) / 2.0)];
             }
-            let mut polygons = vec![outline_points(run, &segment_options)];
-            polygons.push(circle(first, width_at(&first, options) / 2.0));
-            polygons.push(circle(last, width_at(&last, options) / 2.0));
+            let mut polygons = if round {
+                rounded_outline_points(run, &segment_options)
+            } else {
+                vec![outline_points(run, &segment_options)]
+            };
+            polygons.push(outline_dot(first, width_at(&first, options) / 2.0));
+            polygons.push(outline_dot(last, width_at(&last, options) / 2.0));
             polygons
         })
         .filter(|polygon| !polygon.is_empty())
@@ -299,6 +295,7 @@ mod tests {
             },
             StrokePattern::Dashed,
             1.0,
+            false,
         );
         assert_eq!(polygons.len(), 6);
         assert!(polygons.iter().all(|polygon| {
@@ -326,6 +323,7 @@ mod tests {
             },
             StrokePattern::Dashed,
             1.0,
+            false,
         );
         assert_eq!(tap.len(), 1);
     }
