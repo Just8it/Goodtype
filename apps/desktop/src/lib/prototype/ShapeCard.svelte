@@ -6,6 +6,7 @@
   import { patternDashArray } from "../shape/geometry";
   import type { ShapeKind } from "../shape/geometry";
   import type { PaletteDock } from "./palette";
+  import StepSlider from "./StepSlider.svelte";
 
   let {
     dock,
@@ -58,7 +59,7 @@
   const SHAPES: { kind: ShapeKind; label: string; hint: string }[] = [
     { kind: "line", label: "Line", hint: "Drag from start to end" },
     { kind: "rectangle", label: "Rectangle", hint: "Drag opposite corners" },
-    { kind: "ellipse", label: "Circle · ellipse", hint: "Lock proportions for a circle" },
+    { kind: "ellipse", label: "Ellipse", hint: "Lock proportions for a circle" },
     { kind: "spline", label: "Spline", hint: "Draw a smooth editable curve" },
   ];
 
@@ -157,7 +158,7 @@
     </section>
 
     <section>
-      <span class="section-label">Line</span>
+      <span class="section-label">Pattern</span>
       <div class="pattern-grid" role="radiogroup" aria-label="Line pattern">
         {#each PATTERNS as choice (choice.id)}
           <button
@@ -173,13 +174,10 @@
         {/each}
       </div>
       {#if pattern !== "solid"}
-        <label class="spacing">
-          <span>Spacing</span>
-          <input type="range" min={MIN_PATTERN_SPACING} max={MAX_PATTERN_SPACING} step="0.05"
-            value={spacing} aria-label="Pattern spacing"
-            oninput={(event) => onSpacingChange(Number(event.currentTarget.value))} />
-          <output>{Math.round(spacing * 100)}%</output>
-        </label>
+        <div class="spacing">
+          <StepSlider name="Spacing" label="Pattern spacing" value={spacing} min={MIN_PATTERN_SPACING} max={MAX_PATTERN_SPACING} step={0.05}
+            valueText={`${Math.round(spacing * 100)}%`} onInput={onSpacingChange} />
+        </div>
       {/if}
     </section>
 
@@ -207,22 +205,16 @@
         () => onDrawAndHoldChange(!drawAndHold),
       )}
       {#if drawAndHold}
-        <label class="slider">
-          <span>Held line minimum <span>{(minimumLineLengthPt * MM_PER_PT).toFixed(1)} mm</span></span>
-          <input type="range" min="4" max="96" step="1" value={minimumLineLengthPt}
-            aria-label="Minimum held line length" aria-valuetext={`${(minimumLineLengthPt * MM_PER_PT).toFixed(1)} millimetres`}
-            oninput={(event) => onMinimumLineLengthChange?.(Number(event.currentTarget.value))} />
-        </label>
+        <StepSlider name="Held line minimum" value={minimumLineLengthPt} min={4} max={96} step={1} log
+          valueText={`${(minimumLineLengthPt * MM_PER_PT).toFixed(1)} mm`} label="Minimum held line length"
+          spokenValue={`${(minimumLineLengthPt * MM_PER_PT).toFixed(1)} millimetres`}
+          onInput={(next) => onMinimumLineLengthChange?.(next)} />
       {/if}
     </section>
   </div>
 </div>
 
 <style>
-  .slider { display: flex; flex-direction: column; gap: 6px; font-size: var(--text-md); }
-  .slider > span { display: flex; justify-content: space-between; gap: 8px; }
-  .slider > span > span { color: var(--muted); font-variant-numeric: tabular-nums; }
-  .slider input { width: 100%; accent-color: var(--blueprint); }
   .shape-card {
     position: relative;
     display: flex;
@@ -243,7 +235,7 @@
   .point-right .arrow { top: clamp(12px, calc(var(--arrow, 150px) - 5px), calc(100% - 22px)); right: -6px; border-top: 1px solid var(--edge); border-right: 1px solid var(--edge); }
 
   header { display: flex; height: var(--control); flex: none; align-items: center; padding: 0 6px 0 12px; border-bottom: 1px solid var(--edge-soft); gap: 8px; }
-  .name { flex: 1; font-size: var(--text-sm); letter-spacing: 0.09em; text-transform: uppercase; }
+  .name { flex: 1; font-size: var(--text-md); font-weight: 600; }
   .meta { color: var(--quiet); font-size: var(--text-sm); font-variant-numeric: tabular-nums; }
   .chrome { display: grid; width: var(--control-dense); height: var(--control-dense); padding: 0; border: 0; border-radius: var(--radius); background: transparent; color: var(--muted); cursor: pointer; place-items: center; }
   .chrome:hover { background: var(--wash); color: var(--text); }
@@ -251,7 +243,7 @@
 
   .body { display: flex; min-height: 0; flex-direction: column; padding: 12px; gap: 13px; overflow-y: auto; }
   section { display: flex; flex-direction: column; gap: 7px; }
-  .section-label { color: var(--quiet); font-size: var(--text-xs); letter-spacing: 0.1em; text-transform: uppercase; }
+  .section-label { color: var(--muted); font-size: var(--text-sm); }
   .preview { position: relative; display: grid; height: 64px; border-radius: var(--radius); background: var(--paper); color: #59616b; place-items: center; overflow: hidden; }
   .preview svg { position: absolute; inset: 0; width: 100%; height: 54px; }
   .preview path { stroke-linecap: round; }
@@ -269,9 +261,7 @@
   .pattern-grid button:hover { background: var(--wash); color: var(--text); }
   .pattern-grid button.current { border-color: var(--blueprint); background: rgb(76 141 240 / 14%); color: var(--text); }
   .pattern-grid button:focus-visible { outline: 2px solid var(--blueprint-light); outline-offset: 1px; }
-  .spacing { display: grid; grid-template-columns: auto 1fr 3.2em; align-items: center; gap: 10px; margin-top: 8px; font-size: var(--text-sm); color: var(--muted); }
-  .spacing input { width: 100%; accent-color: var(--blueprint); }
-  .spacing output { text-align: right; color: var(--text); font-variant-numeric: tabular-nums; }
+  .spacing { margin-top: 8px; }
   .pattern-grid svg { width: 100%; height: 12px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
 
   .divider { height: 1px; background: var(--edge-soft); }

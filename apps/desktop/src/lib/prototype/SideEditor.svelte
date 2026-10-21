@@ -23,6 +23,7 @@
     diagnostics = [],
     pageText = false,
     pageTextLineWrap = true,
+    styleTitle = "Notebook style",
     presets = [],
     presetBusy = false,
     onChange,
@@ -48,6 +49,8 @@
     diagnostics?: { severity: string; message: string }[];
     pageText?: boolean;
     pageTextLineWrap?: boolean;
+    /** What style mode is editing: the shared notebook style, or a named page template. */
+    styleTitle?: string;
     presets?: PresetSummary[];
     presetBusy?: boolean;
     onChange: (value: string) => void;
@@ -126,7 +129,7 @@
        *to* the text lives in the writing bar below, so this row never grows tool buttons. -->
   <header>
     <span class="identity">
-      <span class="title">{mode === "style" ? "Notebook style" : pageText ? "Page text" : mode === "edit" || mode === "away" ? blockLabel : "Typst source"}</span>
+      <span class="title">{mode === "style" ? styleTitle : pageText ? "Page text" : mode === "edit" || mode === "away" ? blockLabel : "Typst source"}</span>
       <!-- Only when the target is somewhere you cannot see. While you are editing the page in
            view, the status strip already answers "which page", and printing it twice made
            neither one look like the answer. -->
@@ -203,7 +206,7 @@
         {root}
         maxLines={null}
         lineWrap={pageText && pageTextLineWrap}
-        ariaLabel={mode === "style" ? "Shared notebook Typst style" : `Source for ${blockLabel}`}
+        ariaLabel={mode === "style" ? styleTitle : `Source for ${blockLabel}`}
         onChange={(next) => onChange(next)}
         onExit={onClose}
         onLineWrapToggle={pageText && onPageTextLineWrapChange

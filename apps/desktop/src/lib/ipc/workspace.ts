@@ -66,6 +66,11 @@ export function writeNotebookCover(root: string, png: Uint8Array): Promise<void>
   return invoke("write_notebook_cover", { root, png: Array.from(png) });
 }
 
+/** Rust renders the canonical first page in memory, without creating a user export. */
+export function renderNotebookCover(root: string, pageTextBaselineGrid: boolean): Promise<ArrayBuffer> {
+  return invoke<ArrayBuffer>("render_notebook_cover", { root, pageTextBaselineGrid });
+}
+
 export function writeMetrics(root: string, metrics: unknown): Promise<void> {
   return invoke("write_phase0_metrics", { root, metrics });
 }

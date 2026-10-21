@@ -1,4 +1,5 @@
 import type { StrokePattern } from "../model";
+import { MM_PER_PT } from "../settings";
 
 /**
  * The stroke-width row on the palette.
@@ -45,6 +46,18 @@ export function editWidth(
     widths.map((existing, position) => (position === index ? widthPt : existing)),
     maximum,
   );
+}
+
+/**
+ * Whether another chip already draws this width, as the chips show it (hundredths of a mm).
+ *
+ * The row de-duplicates, so adding or editing to a width already on it would silently merge two
+ * chips and one would vanish. The editor asks first and refuses instead. `except` is the chip
+ * being edited, which may of course keep its own width.
+ */
+export function widthTaken(widths: number[], widthPt: number, except = -1): boolean {
+  const shown = (pt: number) => Math.round(pt * MM_PER_PT * 100);
+  return widths.some((existing, index) => index !== except && shown(existing) === shown(widthPt));
 }
 
 /**

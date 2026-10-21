@@ -37,6 +37,9 @@
     onPickEraserSize,
     canAddColor = true,
     onAddColor,
+    canAddWidth = false,
+    addingWidth = false,
+    onAddWidth,
     tag,
     matchPattern = false,
   }: {
@@ -64,6 +67,11 @@
     canAddColor?: boolean;
     /** Opens a colour picker attached to the add button. */
     onAddColor?: (tile: HTMLElement) => void;
+    /** False at the width ceiling; like the colour `+`, the tile then simply is not there. */
+    canAddWidth?: boolean;
+    addingWidth?: boolean;
+    /** Opens the stroke editor, attached to the add tile, for a new chip. */
+    onAddWidth?: (tile: HTMLElement) => void;
     /** A short word naming what the pocket edits when it is not the held tool, e.g. "Selection". */
     tag?: string;
     /**
@@ -75,10 +83,12 @@
 
   const mm = (pt: number) => `${(pt * MM_PER_PT).toFixed(2)} mm`;
 
-  // Custom nib widths get their own live control rather than falsely selecting a nearby preset.
+  // A selection drawn at a width off the row shows that width as an extra chip, so its own width
+  // is visible and editable. The pen never does: an extra chip for it looked exactly like a saved
+  // one that was not there, and adding a width is what the `+` tile is for.
   const activeWidthIndex = $derived(paletteWidthIndex(widths, activeWidth));
   const visibleWidths = $derived(
-    activeWidthIndex < 0 && Number.isFinite(activeWidth) && activeWidth > 0
+    matchPattern && activeWidthIndex < 0 && Number.isFinite(activeWidth) && activeWidth > 0
       ? [...widths, activeWidth]
       : widths,
   );
@@ -129,6 +139,12 @@
           </svg>
         </button>
       {/each}
+      {#if canAddWidth && onAddWidth && !matchPattern}
+        <button type="button" class="add" aria-label="Add a stroke" title="Add a stroke" aria-expanded={addingWidth}
+          onclick={(event) => onAddWidth?.(event.currentTarget)}>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 6v12M6 12h12" /></svg>
+        </button>
+      {/if}
     </div>
 
     <div class="grid colors" role="group" aria-label="Ink colour">
@@ -272,13 +288,14 @@
   .dot.current { outline: 1.5px solid var(--blueprint); outline-offset: 2px; }
 
   /* Dashed, like every other control in this app that opens an editor rather than setting a
-     value. It vanishes at the ceiling, where the sixth colour stands in its cell. */
-  .dot.add {
+     value. It vanishes at the ceiling, where the last colour or width stands in its cell. The
+     width tile keeps the chips' rounded square; the colour one is round like the swatches. */
+  .add {
     border: 1px dashed rgb(255 255 255 / 30%);
     background: transparent;
   }
 
-  .dot.add svg {
+  .add svg {
     width: 10px;
     height: 10px;
     fill: none;

@@ -6,6 +6,7 @@
   import type { StrokePattern } from "../model";
   import { MAX_PATTERN_SPACING, MIN_PATTERN_SPACING } from "../ink/pattern";
   import { patternDashArray } from "../shape/geometry";
+  import StepSlider from "./StepSlider.svelte";
 
   /**
    * Set a stroke width by hand, in millimetres.
@@ -30,6 +31,8 @@
     onPatternChange,
     spacing = 1,
     onSpacingChange,
+    adding = false,
+    taken = () => false,
     onAdd,
     onCommit,
     onRemove,
@@ -47,7 +50,16 @@
     /** Gap factor between dashes or dots, 0.5–3. */
     spacing?: number;
     onSpacingChange?: (spacing: number) => void;
-    onAdd?: (widthPt: number) => void;
+    /**
+     * A new chip rather than an existing one. Nothing reaches the row or the pen until Add is
+     * pressed — pattern and spacing are held here as a draft — so closing the panel leaves no
+     * trace, and there is no half-made chip to clean up.
+     */
+    adding?: boolean;
+    /** Whether another chip already draws this width; the row would merge the two. */
+    taken?: (widthPt: number) => boolean;
+    /** Takes the new chip's width in points with its pattern and spacing. */
+    onAdd?: (widthPt: number, pattern: StrokePattern, spacing: number) => void;
     /** Takes a width in points, the unit everything downstream is in. */
     onCommit: (widthPt: number) => void;
     onRemove?: () => void;
@@ -57,7 +69,19 @@
   // Seeded once and then owned by the field. A fresh panel is a fresh component — the caller
   // mounts it behind `{#if}` — so following `widthPt` afterwards would fight the hand on the
   // slider with the value the slider is in the middle of changing.
-  let mm = $state(untrack(() => round(widthPt * MM_PER_PT)));
+  // A new chip starts at the nearest width not already on the row — one step thicker, else
+  // thinner — so Add is ready at once instead of opening on a refusal.
+  let mm = $state(untrack(() => (adding ? freeWidth(round(widthPt * MM_PER_PT)) : round(widthPt * MM_PER_PT))));
+
+  function freeWidth(start: number): number {
+    for (let steps = 1; steps <= 400; steps += 1) {
+      for (const candidate of [start + steps * 0.05, start - steps * 0.05]) {
+        const value = round(candidate);
+        if (value >= minimumMm && value <= maximumMm && !taken(value / MM_PER_PT)) return value;
+      }
+    }
+    return start;
+  }
 
   function round(value: number): number {
     return Math.round(value * 100) / 100;
@@ -73,7 +97,14 @@
     { id: "dotted", label: "Dotted", dasharray: [0.01, 5] },
   ];
 
+  // The draft a new chip is built in; an existing chip edits the real pattern live instead.
+  let draftPattern = $state(untrack(() => pattern));
+  let draftSpacing = $state(untrack(() => spacing));
+  const shownPattern = $derived(adding ? draftPattern : pattern);
+  const shownSpacing = $derived(adding ? draftSpacing : spacing);
+
   const preview = $derived(clamp(mm) / MM_PER_PT);
+  const duplicate = $derived(taken(round(clamp(mm)) / MM_PER_PT));
   /** The sample is magnified to be readable; its pattern is spaced for that drawn width. */
   const sampleWidth = $derived(
     Math.max(1, Math.min(preview * (kind === "highlighter" ? 2.2 : 1.4), 26)),
@@ -85,7 +116,9 @@
       return;
     }
     mm = round(clamp(mm));
-    onCommit(mm / MM_PER_PT);
+    if (duplicate) return;
+    if (adding) onAdd?.(mm / MM_PER_PT, draftPattern, draftSpacing);
+    else onCommit(mm / MM_PER_PT);
   }
 </script>
 
@@ -96,15 +129,15 @@
   <div class="sample">
     <svg viewBox="0 0 220 42" aria-hidden="true"><path d="M20 28C48 3 66 4 91 24S133 39 153 20S181 5 200 17" fill="none" stroke="currentColor" stroke-linecap="round"
       stroke-width={sampleWidth}
-      use:centredDash={patternDashArray(pattern, sampleWidth, spacing)} /></svg>
+      use:centredDash={patternDashArray(shownPattern, sampleWidth, shownSpacing)} /></svg>
   </div>
 
   {#if onPatternChange}
     <div class="segments" role="group" aria-label="Line pattern">
       {#each PATTERNS as choice (choice.id)}
-        <button type="button" class:current={pattern === choice.id} aria-pressed={pattern === choice.id}
+        <button type="button" class:current={shownPattern === choice.id} aria-pressed={shownPattern === choice.id}
           aria-label={choice.label} title={choice.label}
-          onclick={() => onPatternChange?.(choice.id)}>
+          onclick={() => adding ? (draftPattern = choice.id) : onPatternChange?.(choice.id)}>
           <svg viewBox="0 0 40 12" aria-hidden="true"><path d="M5 6H35" use:centredDash={choice.dasharray} /></svg>
         </button>
       {/each}
@@ -112,50 +145,26 @@
   {/if}
 
   <div class="settings">
-    <label class="setting">
-      <span class="name">Width</span>
-      <input bind:value={mm} type="range" min={minimumMm} max={maximumMm} step="0.05" aria-label="Stroke width" />
-      <span class="value">
-        <input
-          bind:value={mm}
-          type="number"
-          inputmode="decimal"
-          step="0.05"
-          min={minimumMm}
-          max={maximumMm}
-          aria-label="Stroke width in millimetres"
-          onkeydown={(event) => {
-            if (event.key === "Enter") {
-              event.preventDefault();
-              commit();
-            }
-          }}
-        />
-        <span class="unit">mm</span>
-      </span>
-    </label>
-    {#if onSpacingChange && pattern !== "solid"}
-      <label class="setting">
-        <span class="name">Spacing</span>
-        <input type="range" min={MIN_PATTERN_SPACING} max={MAX_PATTERN_SPACING} step="0.05"
-          value={spacing} aria-label="Pattern spacing"
-          oninput={(event) => onSpacingChange?.(Number(event.currentTarget.value))} />
-        <output class="value">{Math.round(spacing * 100)}%</output>
-      </label>
+    <!-- Logarithmic: everyday nibs (0.1–1 mm) get half the track instead of a few pixels. -->
+    <StepSlider name="Width" value={mm} min={minimumMm} max={maximumMm} step={0.05} log
+      valueText={`${mm.toFixed(2)} mm`} label="Stroke width" spokenValue={`${mm.toFixed(2)} millimetres`} onInput={(next) => (mm = next)} />
+    {#if onSpacingChange && shownPattern !== "solid"}
+      <StepSlider name="Spacing" label="Pattern spacing" value={shownSpacing} min={MIN_PATTERN_SPACING} max={MAX_PATTERN_SPACING} step={0.05}
+        valueText={`${Math.round(shownSpacing * 100)}%`}
+        onInput={(next) => adding ? (draftSpacing = next) : onSpacingChange?.(next)} />
     {/if}
   </div>
+
+  {#if duplicate}
+    <p class="note" role="status">{mm.toFixed(2)} mm is already on the row. Pick another width.</p>
+  {/if}
 
   <div class="actions">
     {#if canRemove}
       <button type="button" class="remove" onclick={() => onRemove?.()}>Remove</button>
     {/if}
     <span class="grow"></span>
-    {#if onAdd}
-      <button type="button" class="secondary" title="Keep this width and add the new one to the row" onclick={() => {
-        if (Number.isFinite(mm)) onAdd?.(round(clamp(mm)) / MM_PER_PT);
-      }}>Add as new</button>
-    {/if}
-    <button type="button" class="primary" onclick={commit}>Apply</button>
+    <button type="button" class="primary" disabled={duplicate} onclick={commit}>{adding ? "Add" : "Apply"}</button>
   </div>
 </aside>
 
@@ -200,18 +209,7 @@
   .segments button:focus-visible { outline: 2px solid var(--blueprint); outline-offset: 1px; }
   .segments svg { width: 34px; height: 12px; fill: none; stroke: currentColor; stroke-width: 2.4; stroke-linecap: round; }
 
-  .settings { display: grid; gap: 8px; }
-  .setting { display: grid; grid-template-columns: 4.6em 1fr 6.2em; align-items: center; gap: 8px; }
-  .setting .name { color: var(--muted); font-size: var(--text-sm); }
-  .setting input[type="range"] { width: 100%; margin: 0; accent-color: var(--blueprint); }
-  .setting .value { display: flex; align-items: center; justify-content: flex-end; gap: 4px; color: var(--text); font-size: var(--text-sm); font-variant-numeric: tabular-nums; }
-  /* No spinner: its arrows covered the digits, and the slider and arrow keys already step it. */
-  input[type="number"] { appearance: textfield; -moz-appearance: textfield; }
-  input[type="number"]::-webkit-inner-spin-button,
-  input[type="number"]::-webkit-outer-spin-button { margin: 0; -webkit-appearance: none; }
-  input[type="number"] { box-sizing: border-box; width: 4.2em; padding: 4px 6px; border: 1px solid rgb(255 255 255 / 16%); border-radius: var(--radius); background: rgb(0 0 0 / 25%); color: var(--text); font: inherit; font-size: var(--text-sm); text-align: right; font-variant-numeric: tabular-nums; }
-  input[type="number"]:focus-visible { outline: 2px solid var(--blueprint); outline-offset: 1px; }
-  .unit { color: var(--quiet); }
+  .settings { display: grid; gap: 12px; }
 
   .actions {
     display: flex;
@@ -224,7 +222,6 @@
   }
 
   .primary,
-  .secondary,
   .remove {
     height: 30px;
     padding: 0 11px;
@@ -242,12 +239,9 @@
     font-weight: 600;
   }
 
-  .secondary {
-    border: 1px solid var(--edge);
-    background: transparent;
-    color: var(--text);
-  }
-  .secondary:hover { background: var(--wash); }
+  .primary:disabled { opacity: 0.45; cursor: default; }
+
+  .note { margin: 0; color: var(--muted); font-size: var(--text-sm); }
 
   /* Destructive, so it reads as a quiet word rather than a button competing with Apply. */
   .remove {
@@ -257,8 +251,7 @@
   }
   .remove:hover { background: var(--wash); }
 
-  button:focus-visible,
-  input:focus-visible {
+  button:focus-visible {
     outline: 2px solid var(--blueprint);
     outline-offset: 2px;
   }

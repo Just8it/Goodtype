@@ -4,6 +4,7 @@
   import type { StrokePattern } from "../model";
   import { patternDashArray } from "../shape/geometry";
   import { NIB_PATHS } from "./instruments";
+  import StepSlider from "./StepSlider.svelte";
   import {
     MM_PER_PT,
     PEN_TYPES,
@@ -121,21 +122,6 @@
   </div>
 {/snippet}
 
-{#snippet sliderRow(name: string, value: number, min: number, max: number, step: number, onInput: (value: number) => void)}
-  <div class="slider">
-    {@render sectionLabel(name, `${Math.round(value * 100)}%`)}
-    <input
-      type="range"
-      {min}
-      {max}
-      {step}
-      {value}
-      aria-label={name}
-      oninput={(event) => onInput(Number(event.currentTarget.value))}
-    />
-  </div>
-{/snippet}
-
 <div
   class="tool-card"
   class:point-down={dock === "bottom"}
@@ -199,19 +185,18 @@
       <div class="divider"></div>
 
       <!-- One line per setting. New switches land here; see AGENT_DOC §3.9. -->
-      <section class="rows" class:pen-settings={tool === "pen"}>
+      <section class="rows">
         {#if tool === "pen"}
           {@render toggleRow("Pressure", preset.pressure, () => onChange({ ...preset, pressure: !preset.pressure }), "Stylus force varies the width")}
           {#if penType(preset.type).taper > 0}
-            <div class="slider taper-setting">
-              {@render sectionLabel("Maximum taper", `${preset.taperLengthWidths ?? 3} × line width`)}
-              <input type="range" min="0" max="6" step="0.25" value={preset.taperLengthWidths ?? 3}
-                aria-label="Maximum taper length" aria-valuetext={`${preset.taperLengthWidths ?? 3} times line width`}
-                oninput={(event) => onChange({ ...preset, taperLengthWidths: Number(event.currentTarget.value) })} />
-            </div>
+            <StepSlider name="Maximum taper" value={preset.taperLengthWidths ?? 3} min={0} max={6} step={0.25}
+              valueText={`${preset.taperLengthWidths ?? 3} × line width`} label="Maximum taper length"
+              spokenValue={`${preset.taperLengthWidths ?? 3} times line width`}
+              onInput={(taperLengthWidths) => onChange({ ...preset, taperLengthWidths })} />
           {/if}
         {:else}
-          {@render sliderRow("Opacity", opacity, 0.1, 1, 0.05, (next) => onOpacityChange?.(next))}
+          <StepSlider name="Opacity" value={opacity} min={0.1} max={1} step={0.05}
+            valueText={`${Math.round(opacity * 100)}%`} onInput={(next) => onOpacityChange?.(next)} />
           {@render toggleRow("Straighten to lines", straighten, () => onStraightenChange?.(!straighten))}
           {@render toggleRow("Draw behind ink", behindInk, () => onBehindInkChange?.(!behindInk))}
           {@render toggleRow("Tapered ends", taperEnds, () => onTaperEndsChange?.(!taperEnds), "Off keeps the full width to both ends")}
@@ -291,10 +276,9 @@
   .name {
     overflow: hidden;
     flex: 1;
-    font-size: var(--text-sm);
-    letter-spacing: 0.09em;
+    font-size: var(--text-md);
+    font-weight: 600;
     text-overflow: ellipsis;
-    text-transform: uppercase;
     white-space: nowrap;
   }
 
@@ -351,18 +335,13 @@
     gap: 8px;
   }
 
+  /* Sentence case, like every other label in the palette menus. */
   .eyebrow {
-    color: var(--quiet);
-    font-size: var(--text-xs);
-    letter-spacing: 0.1em;
-    text-transform: uppercase;
+    color: var(--muted);
+    font-size: var(--text-sm);
   }
 
-  .eyebrow .hint {
-    color: var(--quiet);
-    text-transform: none;
-    letter-spacing: 0;
-  }
+  .eyebrow .hint { color: var(--quiet); }
 
   .section-label .value {
     color: var(--muted);
@@ -416,17 +395,10 @@
 
   .divider { height: 1px; flex: none; background: var(--edge-soft); }
 
-  .rows { gap: 2px; }
-
-  .pen-settings { gap: 12px; }
-  .pen-settings > :not(:first-child) { padding-top: 12px; border-top: 1px solid var(--edge-soft); }
-  .taper-setting .eyebrow {
-    color: var(--text);
-    font-size: var(--text-md);
-    font-weight: 600;
-    letter-spacing: normal;
-    text-transform: none;
-  }
+  /* One setting per band, divided the same way in the pen and highlighter cards. */
+  .rows { gap: 10px; }
+  /* Global so a StepSlider, whose root is styled in its own component, is divided too. */
+  .rows > :global(:not(:first-child)) { padding-top: 10px; border-top: 1px solid var(--edge-soft); }
 
   .row {
     display: flex;
@@ -493,8 +465,6 @@
 
   .segmented button.current { background: var(--blueprint); color: #10141a; font-weight: 600; }
 
-  .slider { display: flex; flex-direction: column; gap: 6px; }
-  .slider input { width: 100%; accent-color: var(--blueprint); }
 
   .nib:focus-visible,
   .toggle:focus-visible,

@@ -18,3 +18,17 @@ sha2 = "0.10"
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 tempfile.workspace = true
+# Optional Goodnotes importer (ADR 0029): the pinned-release download (ureq/native-tls are
+# already built for Typst packages), reading its ZIP, and Job Objects for the converter process.
+native-tls = "0.2"
+ureq = { version = "2", default-features = false, features = ["native-tls"] }
+zip = { version = "2.4", default-features = false, features = ["deflate"] }
+# Explicit importer update checks authenticate release metadata with an app-pinned key (ADR 0031).
+ed25519-dalek = { version = "2.2", default-features = false, features = ["std"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_System_JobObjects",
+] }

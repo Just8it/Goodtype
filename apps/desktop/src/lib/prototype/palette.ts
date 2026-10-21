@@ -21,7 +21,7 @@ export type PaletteTool = {
   label: string;
   title: string;
   group: PaletteGroup;
-  context?: "ink" | "shape" | "eraser";
+  context?: "ink" | "shape" | "eraser" | "lasso";
   action?: boolean;
 };
 
@@ -45,7 +45,7 @@ export const PALETTE_TOOLS: readonly PaletteTool[] = [
   // Freehand marking above, deliberate construction below: the lasso and the shape tool both act
   // on the page rather than laying ink down on it. This also puts the tiles in the order their
   // number keys are in.
-  { id: "lasso", label: "Lasso select", title: "Select ink with lasso (5)", group: "page" },
+  { id: "lasso", label: "Lasso select", title: "Lasso select (5) — press again for settings", group: "page", context: "lasso" },
   { id: "shape", label: "Shapes", title: "Shapes (6) — press again to choose a shape", group: "page", context: "shape" },
   { id: "page-text", label: "Page text", title: "Page text", group: "content" },
   { id: "typst-block", label: "New Typst block", title: "New Typst block (T)", group: "content", action: true },

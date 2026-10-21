@@ -206,11 +206,12 @@ pub async fn list_typst_presets(
             id: file.path.clone(),
             name: matched
                 .map(|preset| preset.name.to_owned())
+                .or_else(|| template_name(&text))
                 .unwrap_or_else(|| {
                     if filename == "default.typ" {
                         "Custom preset".into()
                     } else {
-                        filename.trim_end_matches(".typ").replace('-', " ")
+                        name_from_filename(filename)
                     }
                 }),
             description: if filename == "default.typ" {
@@ -311,6 +312,143 @@ pub async fn install_page_typst_preset(
     Ok(summary)
 }
 
+/// What a new template starts as. Written like the top of an ordinary Typst document, with no
+/// enclosing `{ }`: pasting a header into the middle of a `preset` function's body put every
+/// `#import` and `#let` into code mode, where `#` is an error. Anything pasted or typed anywhere
+/// in this starter stays valid. Templates defining `preset` are still accepted.
+const STARTER: &str = r##"// Page template, written like the top of a Typst document: #import packages,
+// #let your own commands, and #set / #show rules. It applies to every page using it.
+// Any installed font works, e.g. #set text(font: "Arial").
+
+#set text(font: "New Computer Modern")
+#set par(justify: false)
+#show heading.where(level: 1): set text(weight: "bold")
+"##;
+
+/// The longest name a template's `// Name:` line may give it.
+const MAX_TEMPLATE_NAME_CHARS: usize = 60;
+
+/// A template names itself with a `// Name: …` comment among its first lines. The name lives in
+/// the file rather than in its filename, so renaming never touches the pages importing it, and
+/// the name travels with the file when it is copied to another notebook.
+fn template_name(source: &str) -> Option<String> {
+    source.lines().take(5).find_map(|line| {
+        let comment = line.trim().strip_prefix("//")?.trim();
+        let (label, rest) = comment.split_once(':')?;
+        if !label.trim().eq_ignore_ascii_case("name") {
+            return None;
+        }
+        let name = rest.trim();
+        (!name.is_empty()).then(|| name.chars().take(MAX_TEMPLATE_NAME_CHARS).collect())
+    })
+}
+
+/// `template-2.typ` reads as "Template 2" where a file carries no `// Name:` line.
+fn name_from_filename(filename: &str) -> String {
+    let words = filename.trim_end_matches(".typ").replace('-', " ");
+    let mut characters = words.chars();
+    characters
+        .next()
+        .map(|first| first.to_uppercase().chain(characters).collect())
+        .unwrap_or_default()
+}
+
+/// `/styles/name.typ` (the import path pages use) to the bare filename storage accepts.
+fn style_filename(path: &str) -> Result<String, String> {
+    path.trim_start_matches('/')
+        .strip_prefix("styles/")
+        .filter(|name| !name.contains('/') && !name.contains('\\'))
+        .map(str::to_owned)
+        .ok_or_else(|| format!("Not a notebook template: {path}"))
+}
+
+/// The first `template-N.typ` not already in the notebook.
+fn next_template_filename(existing: &[String]) -> String {
+    (1..)
+        .map(|number| format!("template-{number}.typ"))
+        .find(|name| {
+            !existing
+                .iter()
+                .any(|path| path.ends_with(&format!("styles/{name}")))
+        })
+        .expect("an unused template number exists")
+}
+
+/// A new, editable template in the notebook's `styles/` folder.
+#[tauri::command]
+pub async fn create_typst_preset(
+    roots: tauri::State<'_, AllowedRoots>,
+    tinymist: tauri::State<'_, Tinymist>,
+    root: String,
+) -> Result<PresetSummary, String> {
+    let root = ensure_allowed(&roots, &root)?;
+    let summary = tauri::async_runtime::spawn_blocking(move || {
+        let existing = storage::list_typst_styles(&root)
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .map(|file| file.path.replace('\\', "/"))
+            .collect::<Vec<_>>();
+        let filename = next_template_filename(&existing);
+        let name = name_from_filename(&filename);
+        let source = format!("// Name: {name}\n{STARTER}");
+        let path = storage::write_typst_style(&root, &filename, &source)
+            .map_err(|error| error.to_string())?;
+        Ok::<_, String>(PresetSummary {
+            id: path.clone(),
+            name,
+            description: "Notebook preset".into(),
+            import_path: Some(format!("/{path}")),
+            kind: "custom",
+        })
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+    tinymist.reset();
+    Ok(summary)
+}
+
+/// The text of a template, for the editor.
+#[tauri::command]
+pub async fn read_typst_preset(
+    roots: tauri::State<'_, AllowedRoots>,
+    root: String,
+    path: String,
+) -> Result<String, String> {
+    let root = ensure_allowed(&roots, &root)?;
+    let filename = style_filename(&path)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let file = storage::list_typst_styles(&root)
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .find(|file| file.path.replace('\\', "/") == format!("styles/{filename}"))
+            .ok_or_else(|| format!("Template {filename} is not in this notebook"))?;
+        String::from_utf8(file.bytes).map_err(|_| format!("{filename} is not UTF-8"))
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// Saves an edited template. Not validated as a complete preset: it is saved while being typed,
+/// and a half-written template must not be refused and lost. Pages keep their last good render
+/// until it compiles again.
+#[tauri::command]
+pub async fn save_typst_preset(
+    roots: tauri::State<'_, AllowedRoots>,
+    root: String,
+    path: String,
+    source: String,
+) -> Result<(), String> {
+    let root = ensure_allowed(&roots, &root)?;
+    let filename = style_filename(&path)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        storage::write_typst_style(&root, &filename, &source)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -366,5 +504,57 @@ mod tests {
         )
         .unwrap();
         assert!(result.svg.is_some(), "{:?}", result.diagnostics);
+    }
+
+    #[test]
+    fn templates_get_the_next_free_number_and_a_valid_starter() {
+        let notebook = tempfile::tempdir().unwrap();
+        let compiled = goodtype_typst::compile_block(
+            notebook.path(),
+            &goodtype_typst::CompileRequest {
+                source: format!("{STARTER}\n= Heading\nText"),
+                width_pt: 300.0,
+                generation: 1,
+                allow_remote_packages: false,
+            },
+        )
+        .unwrap();
+        assert!(compiled.svg.is_some(), "{:?}", compiled.diagnostics);
+        assert!(
+            !STARTER.contains("{"),
+            "the starter must have no block to paste into"
+        );
+        assert_eq!(next_template_filename(&[]), "template-1.typ");
+        let existing = [
+            "styles/template-1.typ".to_owned(),
+            "styles/default.typ".to_owned(),
+        ];
+        assert_eq!(next_template_filename(&existing), "template-2.typ");
+    }
+
+    #[test]
+    fn templates_are_named_by_their_name_line_or_their_file() {
+        assert_eq!(
+            template_name("// Name: Messtechnik\n#set text(font: \"Arial\")").as_deref(),
+            Some("Messtechnik")
+        );
+        assert_eq!(
+            template_name("  //name:  Lab notes  ").as_deref(),
+            Some("Lab notes")
+        );
+        assert_eq!(template_name("// Name:\n#set par(justify: true)"), None);
+        assert_eq!(template_name("#let name = 1\n// renamed: x"), None);
+        assert_eq!(name_from_filename("template-2.typ"), "Template 2");
+    }
+
+    #[test]
+    fn only_paths_inside_styles_are_templates() {
+        assert_eq!(
+            style_filename("/styles/template-1.typ").unwrap(),
+            "template-1.typ"
+        );
+        assert!(style_filename("/blocks/page.typ").is_err());
+        assert!(style_filename("/styles/../goodtype.json").is_err());
+        assert!(style_filename("/styles/sub/x.typ").is_err());
     }
 }

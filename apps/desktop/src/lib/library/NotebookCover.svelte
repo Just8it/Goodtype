@@ -7,6 +7,7 @@
     paper = null,
     path = null,
     widthPx,
+    revision = 0,
   }: {
     /** The notebook's own paper. Null when its manifest could not be read. */
     paper?: PageDefaults | null;
@@ -16,16 +17,19 @@
      */
     path?: string | null;
     widthPx: number;
+    revision?: number;
   } = $props();
 
   let cover = $state<string | null>(null);
+  let coverAspect = $state<number | null>(null);
 
   /**
    * Fetched per tile rather than as part of the listing, so a folder of a hundred notebooks does
    * not put a hundred rasters into one reply for the sake of the dozen on screen. A notebook that
-   * has never been saved since covers existed simply has none, and the paper below shows through.
+   * has never been opened since covers existed simply has none, and the paper below shows through.
    */
   $effect(() => {
+    void revision;
     const wanted = path;
     if (!wanted) return;
     let current = true;
@@ -45,7 +49,7 @@
   const FALLBACK = { widthPt: 595.2756, heightPt: 841.8898 };
 
   const geometry = $derived(paper?.geometry ?? FALLBACK);
-  const heightPx = $derived((widthPx * geometry.heightPt) / geometry.widthPt);
+  const heightPx = $derived(coverAspect ? widthPx / coverAspect : (widthPx * geometry.heightPt) / geometry.widthPt);
 
   // The paper's own colour, not a fixed white: a cream or black page should read as one on the
   // shelf exactly as it does on the desk.
@@ -82,10 +86,14 @@
     <div class="ruling">{@html ruling}</div>
   {/if}
   {#if cover}
-    <!-- The cover already contains its own paper and ruling, drawn at save time from the same
+    <!-- The cover already contains its own paper and ruling, drawn on entry or close from the same
          geometry, so it covers rather than sits beside what is underneath. The ruling above is
          what a notebook saved before it had a cover falls back to. -->
-    <img src={cover} alt="" draggable="false" />
+    <img src={cover} alt="" draggable="false"
+      onload={(event) => {
+        const image = event.currentTarget as HTMLImageElement;
+        coverAspect = image.naturalWidth / image.naturalHeight;
+      }} />
   {/if}
 </div>
 
@@ -116,6 +124,7 @@
     width: 100%;
     height: 100%;
     inset: 0;
+    object-fit: contain;
     pointer-events: none;
   }
 </style>

@@ -297,7 +297,7 @@ fn free_child(root: &Path, parent: &str, name: &str) -> Result<PathBuf, String> 
 }
 
 /// Library commands may move a notebook as one shelf entry, but never mutate its internals.
-fn reject_notebook_internals(root: &Path, path: &Path) -> Result<(), String> {
+pub(crate) fn reject_notebook_internals(root: &Path, path: &Path) -> Result<(), String> {
     let root = paths::canonical_root(root).map_err(|error| error.to_string())?;
     if path.starts_with(root.join(INTERNAL_DIR)) {
         return Err("library metadata cannot be changed from the shelf".to_owned());
@@ -902,7 +902,10 @@ pub fn open_library_notebook(
 
 /// The chosen library, verified against the allowlist so a stale settings file cannot widen what
 /// this process will touch.
-fn current_root(app: &tauri::AppHandle, roots: &AllowedRoots) -> Result<PathBuf, String> {
+pub(crate) fn current_root(
+    app: &tauri::AppHandle,
+    roots: &AllowedRoots,
+) -> Result<PathBuf, String> {
     let root = read_library(app)?
         .root
         .ok_or("no library has been chosen yet")?;

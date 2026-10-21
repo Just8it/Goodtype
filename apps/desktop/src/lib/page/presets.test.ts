@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { pagePresetOptions, pagePresetPath, pagePresetState, presetHeader, withPagePreset } from "./presets";
+import { isPresetTemplate, pagePresetOptions, pagePresetPath, pagePresetState, presetHeader, templateName, templatePreamble, withPagePreset } from "./presets";
 
 describe("Page text preset imports", () => {
   it("adds, changes, and removes the managed header", () => {
@@ -48,5 +48,25 @@ Hello`;
       { id: "styles/mine.typ", name: "Mine", description: "Custom", importPath: "/styles/mine.typ", kind: "custom" as const },
     ];
     expect(pagePresetOptions(presets).map((preset) => preset.name)).toEqual(["Clean Notes", "Mine"]);
+  });
+});
+
+describe("Page templates", () => {
+  it("tells a preset template from an ordinary Typst header", () => {
+    expect(isPresetTemplate("#let preset(body, rhythm: 16pt) = { body }")).toBe(true);
+    expect(isPresetTemplate("// header\n  #let preset (body) = body")).toBe(true);
+    expect(isPresetTemplate('#import "@preview/physica:0.9.3": *\n#let rot(c) = text(fill: red, c)')).toBe(false);
+    expect(isPresetTemplate("#let presets = (1, 2)")).toBe(false);
+  });
+
+  it("hands the page back to Goodtype after a preamble", () => {
+    expect(templatePreamble('#set page(paper: "a4")')).toBe('#set page(paper: "a4")\n#set page(..goodtype_page)');
+  });
+
+  it("names a template by its Name line, like the Rust side", () => {
+    expect(templateName("// Name: Messtechnik\n#set par(justify: true)")).toBe("Messtechnik");
+    expect(templateName("  //name:  Lab notes  ")).toBe("Lab notes");
+    expect(templateName("// Name:\n#set par(justify: true)")).toBeNull();
+    expect(templateName("#let name = 1")).toBeNull();
   });
 });

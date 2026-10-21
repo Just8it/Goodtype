@@ -15,3 +15,14 @@ export const setDefaultTypstPreset = (root: string, choice: PresetChoice) =>
 
 export const installPageTypstPreset = (root: string, choice: PresetChoice) =>
   invoke<PresetSummary | null>("install_page_typst_preset", { root, choice });
+
+/** A new `template-N.typ` with a starter, ready to edit. */
+export const createTypstPreset = (root: string) =>
+  invoke<PresetSummary>("create_typst_preset", { root });
+
+/** `path` is the import path pages use, e.g. `/styles/template-1.typ`. */
+export const readTypstPreset = (root: string, path: string) =>
+  invoke<string>("read_typst_preset", { root, path });
+
+export const saveTypstPreset = (root: string, path: string, source: string) =>
+  invoke<void>("save_typst_preset", { root, path, source });
