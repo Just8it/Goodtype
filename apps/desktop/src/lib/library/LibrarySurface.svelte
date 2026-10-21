@@ -5,6 +5,8 @@
   import NotebookSetup from "./NotebookSetup.svelte";
   import type { NotebookSetup as NotebookSetupValue } from "../page/presets";
   import NotebookCover from "./NotebookCover.svelte";
+  import GoodnotesImport from "./GoodnotesImport.svelte";
+  import { importerBusy, importerStatus } from "../ipc/importer";
   import ShelfMenu, { type ShelfMenuItem } from "./ShelfMenu.svelte";
   import type { ShelfLocation, ShelfView } from "./location";
   import {
@@ -33,6 +35,7 @@
 
   let {
     tauriAvailable,
+    coverRevision = 0,
     location = { view: "library", path: "" },
     onOpen,
     onCreate,
@@ -44,6 +47,7 @@
     showNotebookSetup = false,
   }: {
     tauriAvailable: boolean;
+    coverRevision?: number;
     /**
      * Where the shelf was left.
      *
@@ -109,6 +113,55 @@
   let menu = $state<"new" | "sort" | null>(null);
   let entryMenu = $state<string | null>(null);
   let prompt = $state<Prompt | null>(null);
+  /// The Goodnotes import panel. Its job runs in Rust, so it reopens on its own when the Library
+  /// comes back while an import is running or has a result waiting.
+  let importing = $state(false);
+  /// While the panel is closed: a job still running, or a finished one with a result to read.
+  let importJob = $state<"running" | "done" | null>(null);
+  let importPoll: ReturnType<typeof setInterval> | undefined;
+
+  function closeImport() {
+    importing = false;
+    void followImport();
+  }
+
+  function openImport() {
+    stopImportPoll();
+    importJob = null;
+    importing = true;
+  }
+
+  function stopImportPoll() {
+    if (importPoll) clearInterval(importPoll);
+    importPoll = undefined;
+  }
+
+  /// Keeps the toolbar button honest while the panel is closed, and refreshes the shelf the moment
+  /// new notebooks have arrived.
+  async function followImport() {
+    stopImportPoll();
+    const check = async () => {
+      try {
+        const { activity } = await importerStatus();
+        if (importerBusy(activity)) {
+          importJob = "running";
+          return;
+        }
+        stopImportPoll();
+        if (activity.kind === "finished" || activity.kind === "importFailed") {
+          if (importJob === "running") void reload();
+          importJob = "done";
+        } else {
+          importJob = null;
+        }
+      } catch {
+        stopImportPoll();
+        importJob = null;
+      }
+    };
+    await check();
+    if (importJob === "running") importPoll = setInterval(() => void check(), 1500);
+  }
   /** Null means plain browsing; a set — even an empty one — means select mode is on. */
   let picked = $state.raw<string[] | null>(null);
   let moving = $state.raw<MoveIntent | null>(null);
@@ -129,7 +182,10 @@
     void start();
   });
 
-  onDestroy(() => clearDrag());
+  onDestroy(() => {
+    clearDrag();
+    stopImportPoll();
+  });
 
   async function start() {
     if (!tauriAvailable) return;
@@ -137,6 +193,9 @@
       libraryRoot = await readLibraryRoot();
       if (libraryRoot) {
         await reload();
+        void importerStatus()
+          .then((status) => { if (status.activity.kind !== "idle") importing = true; })
+          .catch(() => {});
         if (showNotebookSetup && !setupShown) {
           setupShown = true;
           prompt = { kind: "notebook" };
@@ -542,11 +601,12 @@
   ]);
 
   const newItems: ShelfMenuItem[] = $derived([
-    { id: "notebook", label: "Neues Notizbuch", onSelect: () => (prompt = { kind: "notebook" }) },
-    { id: "folder", label: "Neuer Ordner", onSelect: () => (prompt = { kind: "folder" }) },
+    { id: "notebook", label: "New notebook", onSelect: () => (prompt = { kind: "notebook" }) },
+    { id: "folder", label: "New folder", onSelect: () => (prompt = { kind: "folder" }) },
+    { id: "goodnotes", label: "Import from Goodnotes…", onSelect: openImport },
     // The way out of the library, kept because a notebook someone sends you lands in Downloads
     // and has to be openable without being filed first.
-    { id: "elsewhere", label: "Notizbuch von außerhalb…", onSelect: () => void openElsewhere() },
+    { id: "elsewhere", label: "Open another notebook…", onSelect: () => void openElsewhere() },
   ]);
 
   async function openElsewhere() {
@@ -677,6 +737,17 @@
       <div class="spacer"></div>
 
       {#if libraryRoot}
+        {#if importJob && !importing}
+          <button type="button" class="control import-job" class:done={importJob === "done"} onclick={openImport}>
+            {#if importJob === "running"}
+              <span class="import-pulse" aria-hidden="true"></span>
+              <span>Import running…</span>
+            {:else}
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7.5" /></svg>
+              <span>Import finished</span>
+            {/if}
+          </button>
+        {/if}
         <div class="anchor">
           <button
             type="button"
@@ -717,13 +788,13 @@
               onclick={() => (menu = menu === "new" ? null : "new")}
             >
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
-              <span>Neu</span>
+              <span>New</span>
               <svg class="menu-caret" class:open={menu === "new"} viewBox="0 0 24 24" aria-hidden="true">
                 <path d="m7 9.5 5 5 5-5" />
               </svg>
             </button>
             {#if menu === "new"}
-              <ShelfMenu label="Neu" items={newItems} onClose={() => (menu = null)} />
+              <ShelfMenu label="New" items={newItems} onClose={() => (menu = null)} />
             {/if}
           </div>
         {/if}
@@ -885,6 +956,7 @@
                   onclick={() => activate(notebook)}
                 >
                   <NotebookCover
+                    revision={coverRevision}
                     paper={notebook.paper}
                     path={notebook.path}
                     widthPx={COVER_WIDTH_PX}
@@ -965,6 +1037,16 @@
     </div>
   {/if}
 {/snippet}
+
+{#if importing && libraryRoot}
+  <GoodnotesImport
+    folder={path}
+    folderName={crumbs.at(-1)?.name ?? "Library"}
+    onClose={closeImport}
+    onShowFolder={(batch) => void show(batch)}
+    onImported={() => void reload()}
+  />
+{/if}
 
 {#if prompt?.kind === "notebook"}
   <NotebookSetup
@@ -1241,6 +1323,42 @@
 
   .control.destructive {
     color: var(--oxide, #e5645e);
+  }
+
+  /* A running or finished Goodnotes import, while its panel is closed. */
+  .import-job {
+    color: var(--text, #e9ebee);
+  }
+
+  .import-job svg {
+    width: 16px;
+    height: 16px;
+    fill: none;
+    stroke: #7fd1a3;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    stroke-width: 2.2;
+  }
+
+  .import-pulse {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--blueprint, #4c8df0);
+    animation: import-pulse 1.2s ease-in-out infinite;
+  }
+
+  @keyframes import-pulse {
+    50% {
+      opacity: 0.35;
+      transform: scale(0.8);
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .import-pulse {
+      animation: none;
+    }
   }
 
   .control.destructive:hover:not(:disabled) {

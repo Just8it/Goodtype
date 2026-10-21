@@ -526,7 +526,8 @@ fn settings(root: &Path) -> Value {
         "rootPath": root,
         "projectResolution": "singleFile",
         "exportPdf": "never",
-        "systemFonts": false,
+        // Same fonts as the compiler (ADR 0030), or the editor flags installed fonts that render.
+        "systemFonts": true,
         "semanticTokens": "enable",
         "lint": { "enabled": false },
     })

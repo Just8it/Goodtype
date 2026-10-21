@@ -3,14 +3,24 @@ import { render } from "svelte/server";
 import PalettePocket from "./PalettePocket.svelte";
 
 describe("palette state visibility", () => {
-  it("shows a custom live width without falsely selecting the nearest saved width", () => {
-    const { body } = render(PalettePocket, { props: {
-      kind: "ink", widths: [1.6, 2.8], activeWidth: 2,
-      onEditWidth: () => {}, expandedEditor: "width",
-    } });
-    expect(body).toContain('aria-label="0.71 mm, solid — edit stroke"');
-    expect(body.match(/aria-pressed="true"/g)).toHaveLength(1);
-    expect(body).toContain('aria-expanded="true"');
+  it("shows a selection's off-row width as its own chip, but never a ghost chip for the pen", () => {
+    const props = { kind: "ink" as const, widths: [1.6, 2.8], activeWidth: 2,
+      onEditWidth: () => {}, expandedEditor: "width" as const };
+    const selection = render(PalettePocket, { props: { ...props, matchPattern: true } }).body;
+    expect(selection).toContain('aria-label="0.71 mm, solid — edit stroke"');
+    expect(selection.match(/aria-pressed="true"/g)).toHaveLength(1);
+    expect(selection).toContain('aria-expanded="true"');
+    const pen = render(PalettePocket, { props }).body;
+    expect(pen).not.toContain("0.71 mm");
+    expect(pen).not.toContain('aria-pressed="true"');
+  });
+
+  it("offers a width + tile only below the ceiling and never while restyling a selection", () => {
+    const props = { kind: "ink" as const, widths: [1.6], activeWidth: 1.6, onAddWidth: () => {} };
+    expect(render(PalettePocket, { props: { ...props, canAddWidth: true } }).body).toContain('aria-label="Add a stroke"');
+    expect(render(PalettePocket, { props: { ...props, canAddWidth: false } }).body).not.toContain("Add a stroke");
+    expect(render(PalettePocket, { props: { ...props, canAddWidth: true, matchPattern: true } }).body)
+      .not.toContain("Add a stroke");
   });
 
   it("keeps a custom live colour reachable without duplicating a case-insensitive match", () => {

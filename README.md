@@ -18,8 +18,7 @@ Write with a pen, drop in a Typst block for the equation you do not want to draw
 place images or PDF material alongside both, on fixed pages that export as one PDF, with the ink
 still vector and the text still selectable.
 
-Goodtype keeps your notebooks as plain files on your own disk. No account, no sync, no updater,
-no telemetry.
+Goodtype keeps your notebooks as plain files on your own disk. No account, no sync, no telemetry.
 
 ## ⚠️ Alpha
 
@@ -39,6 +38,7 @@ no telemetry.
   Pens and shapes support solid, dashed, and dotted marks with adjustable spacing.
 - **Typst blocks** compiled in-process, without a system Typst installation. Editor intelligence
   uses the bundled Tinymist helper with an embedded completion/hover/formatting fallback.
+  Bundled fonts and fonts installed on your computer are available to both preview and export.
 - **Page text**, a Typst writing surface that belongs to the page rather than floating on it, with
   headings and display equations sitting on the paper's own ruling.
   The sidebar colour picker inserts ordinary Typst source for text, math, and colour values.
@@ -47,6 +47,13 @@ no telemetry.
   sizes from A6 to Tabloid in either orientation, previewed before the page exists.
 - **Images and PDF material** placed and scaled on the page, or a PDF brought in a page at a time
   as pages of its own.
+- **Goodnotes import** from `.goodnotes` files or backup ZIPs into a folder of ordinary notebooks.
+  Open **New → Import from Goodnotes…** in the Library to download the optional
+  [importer](https://github.com/Just8it/Goodtype-Goodnodes-importer). Conversion runs locally,
+  preserves the originals, and brings across editable handwriting and supported shapes, with
+  cropped vector artwork for other supported content. Some Goodnotes features are not supported.
+- **Mixed selection** with lasso filters for handwriting, highlighting, shapes, images and Typst
+  blocks, so you can move, resize, duplicate or delete them together.
 - **Multi-page notebooks** that scroll continuously, with pages you can reorder, duplicate, clear
   or delete, and undo scoped either to the page in view or to the whole notebook.
 - **Several notebooks open at once** in tabs, with search across a notebook's typed content.
@@ -62,8 +69,11 @@ A notebook is a directory of ordinary files, a JSON manifest, one file per page,
 readable. The supplied ink decoder prints binary layers as JSON; see the
 [wire format](./formats/ink-v1.md). Nothing about the format requires Goodtype to be running.
 
-The one outbound network path in the whole application is the Typst package downloader, it only
-fires on a cache miss, and it can be switched off.
+Typst packages download only on a cache miss, and package downloads can be switched off. The
+optional Goodnotes importer downloads from GitHub when you request it; update checks and
+downloads are explicit, with signed release metadata verified before an update is installed.
+Your notebooks stay on your device. Once installed, the importer works offline, and Goodtype's
+core workflows work without it.
 
 ## Build
 
@@ -97,8 +107,16 @@ Build the release executable with its embedded Typst compiler and bundled editor
 pnpm tauri build      # -> target\release\goodtype-desktop.exe
 ```
 
-To hand a build to someone else, `scripts\build-windows-demo.ps1` produces
-`target\Goodtype-Windows-<date>-<time>.zip` with a launcher script, Tinymist, and the ink decoder.
+To produce the portable Windows folder and ZIP, run from the repository root:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-windows-demo.ps1
+```
+
+The script installs locked frontend dependencies, builds the release app and ink decoder, then
+creates `target\Goodtype-Windows-<date>-<time>\` and the matching `.zip`. Both contain
+`Goodtype.exe`, `tinymist.exe`, `goodtype-ink.exe`, `ink-v1.md`, and `README.txt`.
+Open `Goodtype.exe` directly; keep the entire folder together. No launcher script is needed.
 The build is not code-signed, so SmartScreen
 will warn about an unrecognised app.
 

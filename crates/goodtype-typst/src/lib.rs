@@ -207,9 +207,14 @@ pub fn compile_block(
     }
 
     // `fill: none` rather than the default white: the padding is meant to be see-through, or
-    // every block would wear a 16pt white halo over whatever it sits on.
+    // every block would wear a 16pt white halo over whatever it sits on. The settings are named
+    // so a preamble placed before the content (a page template written as an ordinary Typst
+    // header, which may well `#set page(paper: "a4", header: ...)`) can be followed by
+    // `#set page(..goodtype_page)`, giving the page back to Goodtype without repeating numbers.
     let wrapper = format!(
-        "#set page(width: {}pt, height: auto, margin: {PREVIEW_PAD_PT}pt, fill: none)\n{}",
+        "#let goodtype_page = (width: {}pt, height: auto, margin: {PREVIEW_PAD_PT}pt, fill: none, \
+         header: none, footer: none, numbering: none, background: none, foreground: none)\n\
+         #set page(..goodtype_page)\n{}",
         request.width_pt + 2.0 * PREVIEW_PAD_PT,
         request.source
     );
@@ -256,6 +261,105 @@ pub fn validate_preset_source(source: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A template written as an ordinary Typst header may reshape the page; the reset that
+    /// follows it gives the page back, so page text is not laid out as an A4 sheet with a header.
+    #[test]
+    fn a_preamble_cannot_take_over_the_page() {
+        let root = tempfile::tempdir().unwrap();
+        let result = compile_block(
+            root.path(),
+            &CompileRequest {
+                source: "#set page(paper: \"a4\", margin: 2.5cm, header: [Running head], numbering: \"1\")\n\
+                         #set page(..goodtype_page)\nHello"
+                    .into(),
+                width_pt: 200.0,
+                generation: 1,
+                allow_remote_packages: false,
+            },
+        )
+        .unwrap();
+        assert!(result.svg.is_some(), "{:?}", result.diagnostics);
+        assert!(result.width_pt.unwrap() <= 200.0, "{:?}", result.width_pt);
+        assert!(result.height_pt.unwrap() < 60.0, "{:?}", result.height_pt);
+    }
+
+    /// A template's installed font reaches page text through the preamble, the page reset and
+    /// Goodtype's own text settings, which set the size but leave the family alone.
+    #[test]
+    fn a_preamble_font_reaches_page_text() {
+        if !Path::new(r"C:\Windows\Fonts\arial.ttf").exists() {
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let result = compile_block(
+            root.path(),
+            &CompileRequest {
+                source: "#set text(lang: \"de\", font: \"Arial\")\n#set par(justify: true)\n\
+                         #set page(..goodtype_page)\n\
+                         #set text(size: 11pt, top-edge: 1em, bottom-edge: 0em)\n= Kapitel\nHallo"
+                    .into(),
+                width_pt: 300.0,
+                generation: 1,
+                allow_remote_packages: false,
+            },
+        )
+        .unwrap();
+        assert!(result.svg.is_some(), "{:?}", result.diagnostics);
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+    }
+
+    /// The font-name tips offer installed fonts too, since they read the same font book.
+    #[test]
+    fn suggests_installed_fonts_by_name() {
+        if !Path::new(r"C:\Windows\Fonts\arial.ttf").exists() {
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let source = String::from("#set text(font: \"");
+        let cursor = source.len();
+        let completions = complete(root.path(), source, cursor, true, false).unwrap();
+        assert!(
+            completions
+                .iter()
+                .any(|completion| completion.label.contains("Arial")),
+            "{:?}",
+            completions
+                .iter()
+                .map(|completion| &completion.label)
+                .take(20)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// Installed fonts are reachable by name (ADR 0030). Only meaningful where Arial is
+    /// installed, so elsewhere the test has nothing to check.
+    #[test]
+    fn resolves_an_installed_font_by_name() {
+        if !Path::new(r"C:\Windows\Fonts\arial.ttf").exists() {
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let result = compile_block(
+            root.path(),
+            &CompileRequest {
+                source: "#set text(font: \"Arial\")\nHello".into(),
+                width_pt: 200.0,
+                generation: 1,
+                allow_remote_packages: false,
+            },
+        )
+        .unwrap();
+        assert!(result.svg.is_some());
+        assert!(
+            !result
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("unknown font")),
+            "{:?}",
+            result.diagnostics
+        );
+    }
 
     #[test]
     fn compiles_valid_source_and_reports_invalid_source() {

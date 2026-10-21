@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod export;
+mod importer;
 mod library;
 mod notebook;
 mod preset;
@@ -19,6 +20,7 @@ fn main() {
         .manage(workspace::AllowedRoots::default())
         .manage(settings::RemotePackages::default())
         .manage(tinymist::Tinymist::default())
+        .manage(importer::Importer::default())
         .setup(|app| {
             let handle = app.handle().clone();
             let policy = app.state::<settings::RemotePackages>();
@@ -40,6 +42,14 @@ fn main() {
             library::library_favourites,
             library::set_library_favourite,
             library::list_library_favourites,
+            importer::goodnotes_importer_status,
+            importer::goodnotes_importer_install,
+            importer::goodnotes_importer_check_update,
+            importer::goodnotes_importer_update,
+            importer::goodnotes_importer_cancel,
+            importer::goodnotes_importer_dismiss,
+            importer::goodnotes_import_pick_source,
+            importer::goodnotes_import_start,
             workspace::phase0_notebook_root,
             workspace::pick_notebook_root,
             workspace::open_recent_root,
@@ -81,12 +91,16 @@ fn main() {
             preset::validate_typst_preset,
             preset::set_default_typst_preset,
             preset::install_page_typst_preset,
+            preset::create_typst_preset,
+            preset::read_typst_preset,
+            preset::save_typst_preset,
             typst::compile_typst,
             typst::complete_typst,
             typst::hover_typst,
             typst::format_typst,
             typst::analyze_typst,
             export::export_notebook_pdf,
+            export::render_notebook_cover,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Goodtype");

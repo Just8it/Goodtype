@@ -81,3 +81,48 @@ describe("shape line patterns", () => {
     expect(shapeDashArray({ ...style, pattern: "dotted", patternSpacing: 2 })).toEqual([0.01, 11]);
   });
 });
+
+describe("spline roundness", () => {
+  // Curvature along the fitted curve, as a multiple of the true circle's 1/r.
+  function roundness(points: { x: number; y: number }[], radius: number): { min: number; max: number } {
+    const draft = splineFromPoints(points, style, 1.5)!;
+    const nodes = draft.geometry.kind === "spline" ? draft.geometry.nodes : [];
+    const dense: { x: number; y: number }[] = [];
+    for (let index = 1; index < nodes.length; index += 1) {
+      const a = nodes[index - 1];
+      const b = nodes[index];
+      const p1 = { x: a.point.x + (a.handleOut?.x ?? 0), y: a.point.y + (a.handleOut?.y ?? 0) };
+      const p2 = { x: b.point.x + (b.handleIn?.x ?? 0), y: b.point.y + (b.handleIn?.y ?? 0) };
+      for (let t = 0; t < 1; t += 0.02) {
+        const u = 1 - t;
+        dense.push({
+          x: u * u * u * a.point.x + 3 * u * u * t * p1.x + 3 * u * t * t * p2.x + t * t * t * b.point.x,
+          y: u * u * u * a.point.y + 3 * u * u * t * p1.y + 3 * u * t * t * p2.y + t * t * t * b.point.y,
+        });
+      }
+    }
+    const bends: number[] = [];
+    for (let index = 1; index < dense.length - 1; index += 1) {
+      const [p, q, r] = [dense[index - 1], dense[index], dense[index + 1]];
+      const pq = Math.hypot(q.x - p.x, q.y - p.y);
+      const qr = Math.hypot(r.x - q.x, r.y - q.y);
+      const rp = Math.hypot(p.x - r.x, p.y - r.y);
+      const cross = Math.abs((q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x));
+      if (pq > 0.05 && qr > 0.05) bends.push(((2 * cross) / (pq * qr * rp)) * radius);
+    }
+    return { min: Math.min(...bends), max: Math.max(...bends) };
+  }
+
+  it("keeps a drawn half circle evenly round, ends included", () => {
+    for (const radius of [30, 100, 250]) {
+      const arc = [];
+      for (let angle = 0; angle <= Math.PI; angle += 0.6 / radius) {
+        arc.push({ x: radius * Math.cos(angle), y: -radius * Math.sin(angle) });
+      }
+      // The uniform handle rule this replaced swung between 0.03 and 3.2 times the true bend.
+      const { min, max } = roundness(arc, radius);
+      expect(min).toBeGreaterThan(0.8);
+      expect(max).toBeLessThan(1.2);
+    }
+  });
+});

@@ -61,14 +61,18 @@
   } from "../editor/typst";
   import { clearTypstCache, getCachedTypst, setCachedTypst } from "../editor/typstCache";
   import {
+    createTypstPreset,
     installPageTypstPreset,
     listTypstPresets,
+    readTypstPreset,
+    saveTypstPreset,
     pickTypstPreset,
     setDefaultTypstPreset,
   } from "../ipc/presets";
   import {
     presetHeader,
     DEFAULT_PRESET_PATH,
+    templateName,
     withPagePreset,
     type NotebookSetup,
     type PresetChoice,
@@ -141,6 +145,11 @@
   import { recognizeHeldShape } from "../shape/recognize";
   import { createCommitTimer } from "./commitTimer";
   import { createTouchTaps, type TouchHistoryAction } from "./touchTaps";
+  import LassoPanel from "./LassoPanel.svelte";
+  import MixedSelection from "./MixedSelection.svelte";
+  import { DEFAULT_LASSO_TARGETS, boxOutline, shapeLassoItem, selectLassoObjects, combinedBounds,
+    transformSelectionPoint, type LassoItem } from "./lasso";
+  import { nativeContextMenuAllowed } from "./contextMenu";
   import { blankNotebookSnapshot } from "./newNotebook";
   import { createInkCommitter, type InkCommitter } from "./inkCommitter";
   import {
@@ -190,6 +199,7 @@
     spacingForWidth,
     withWidthPattern,
     withWidthSpacing,
+    widthTaken,
     WIDTH_BOUNDS_MM,
   } from "./widths";
   import ConfirmDialog from "../workspace/ConfirmDialog.svelte";
@@ -199,7 +209,7 @@
   import SettingsPanel from "../workspace/SettingsPanel.svelte";
   import LibrarySurface from "../library/LibrarySurface.svelte";
   import { SHELF_ROOT, type ShelfLocation } from "../library/location";
-  import { coverSvg, rasteriseCover } from "../library/cover";
+  import { notebookCover } from "../library/cover";
   import {
     DEFAULT_SETTINGS,
     loadSettings,
@@ -238,7 +248,7 @@
     pointerId: number;
     size: number;
   };
-  type PinchStart = { distance: number; zoom: number; center: Point; pagePoint: Point };
+  type PinchStart = { distance: number; zoom: number; pagePoint: Point };
   type TouchPanStart = {
     pointerId: number;
     pointer: Point;
@@ -280,6 +290,9 @@
   let presets = $state<PresetSummary[]>([]);
   let presetBusy = $state(false);
   let presetRevision = $state(0);
+  /// Each notebook template's text by import path. Pages need it to tell a `preset` template,
+  /// imported as before, from one written as an ordinary Typst header, placed before the page.
+  let templateSources = $state<Record<string, string>>({});
   let activeSnapshot = $state<NotebookSnapshot | null>(null);
   let activePageId = $state("page-001");
   let activeInkLayerId = $state(INK_LAYER_ID);
@@ -318,6 +331,56 @@
   let editingShapeId = $state<string | null>(null);
   let mixedGroup = $state<ManagedMixedGroup | null>(null);
   let selectedTypstId = $state<string | null>(null);
+  let lassoObjectIds = $state<string[]>([]);
+
+  function lassoItems(): LassoItem[] {
+    return [
+      ...shapes.map(shapeLassoItem),
+      ...images.map(image => ({ id: image.id, kind: "images" as const, closed: true,
+        outline: boxOutline(image.x, image.y, image.widthPt * image.scale, image.heightPt * image.scale) })),
+      ...typstBlocks.map(block => ({ id: block.id, kind: "text" as const, closed: true,
+        outline: boxOutline(block.transform.x, block.transform.y,
+          (block.result?.widthPt ?? block.transform.layoutWidthPt) * block.transform.scale,
+          (block.result?.heightPt ?? 64) * block.transform.scale) })),
+    ];
+  }
+  const mixedSelectionBounds = $derived(lassoObjectIds.length ? combinedBounds(
+    lassoItems().filter(item => lassoObjectIds.includes(item.id)), selectionBounds(strokes, selectedStrokeIds)) : null);
+
+  function lassoSelection(polygon: Point[], inkIds: string[]) {
+    selectedTypstId = null; selectedImageId = null; selectedShapeId = null; editingShapeId = null;
+    lassoObjectIds = selectLassoObjects(lassoItems(), polygon, settings.lassoTargets ?? DEFAULT_LASSO_TARGETS);
+    updateInkSelection(inkIds);
+    status = `Selected ${inkIds.length + lassoObjectIds.length} items`;
+  }
+
+  let mixedTransformBase: { blocks: typeof typstBlocks; images: typeof images; shapes: typeof shapes; strokes: Stroke[] } | null = null;
+  let mixedTransformChanged = false;
+  function beginMixedTransform() {
+    mixedTransformBase = { blocks: typstBlocks, images, shapes, strokes };
+    mixedTransformChanged = false;
+  }
+  function previewMixedTransform(delta: Point, scale: number, anchor: Point) {
+    if (!mixedTransformBase) return;
+    const base = mixedTransformBase;
+    const selected = new Set(lassoObjectIds);
+    typstBlocks = base.blocks.map(block => selected.has(block.id) ? { ...block, transform: {
+      ...block.transform, ...transformSelectionPoint(block.transform, delta, scale, anchor), scale: block.transform.scale * scale,
+    } } : block);
+    images = base.images.map(image => selected.has(image.id) ? { ...image,
+      ...transformSelectionPoint(image, delta, scale, anchor), scale: image.scale * scale } : image);
+    shapes = base.shapes.map(shape => selected.has(shape.id) ? { ...shape,
+      ...transformSelectionPoint(shape, delta, scale, anchor), scale: shape.scale * scale } : shape);
+    strokes = moveSelected(scaleSelected(base.strokes, selectedStrokeIds, anchor, scale), selectedStrokeIds, delta);
+    mixedTransformChanged = delta.x !== 0 || delta.y !== 0 || scale !== 1;
+  }
+  function endMixedTransform(cancelled: boolean) {
+    const base = mixedTransformBase;
+    mixedTransformBase = null;
+    if (!base) return;
+    if (cancelled) { typstBlocks = base.blocks; images = base.images; shapes = base.shapes; strokes = base.strokes; }
+    else if (mixedTransformChanged) queueCommit("Transformed selection");
+  }
   let directObjectInput = $state(false);
   /** True while the selection tool is only active because the lasso handed over to it. */
   /** The tool a selection hand-over gives back once the selection empties. */
@@ -408,6 +471,10 @@
   // that region, follows the paper instead of colliding with the panel.
   let sideEditorOpen = $state(false);
   let sideEditorStyle = $state(false);
+  /// A page template open in the side editor (style mode), instead of the shared notebook style.
+  let editingTemplate = $state<{ path: string; name: string; source: string } | null>(null);
+  let templateSaveTimer: ReturnType<typeof setTimeout> | undefined;
+  const TEMPLATE_SAVE_DEBOUNCE_MS = 500;
   let sideEditorBlockId = $state<string | null>(null);
   let sideEditorPageText = $state(false);
   /// The page a pinned movable block belongs to. Page text instead follows the active page.
@@ -433,6 +500,7 @@
   );
 
   function openSideEditor(blockId?: string) {
+    void closeTemplate();
     sideEditorStyle = false;
     // An explicit canvas edit still wins. The generic button/shortcut starts with the sustained
     // Page text surface, then falls back to the same movable-block choices as before.
@@ -489,6 +557,19 @@
       if (action === "none" || action.startsWith("path:")) {
         const path = action === "none" ? null : action.slice(5);
         updateTypstSource(pageTypst.id, withPagePreset(pageTypst.source, path));
+      } else if (action === "page:new") {
+        const created = await createTypstPreset(root);
+        if (created.importPath) {
+          updateTypstSource(pageTypst.id, withPagePreset(pageTypst.source, created.importPath));
+          await refreshPresets();
+          await openTemplate(created.importPath, created.name);
+          status = `Created ${created.name}; edit it in the side panel`;
+        }
+        return;
+      } else if (action.startsWith("edit:")) {
+        const path = action.slice(5);
+        await openTemplate(path, presets.find((preset) => preset.importPath === path)?.name ?? "Template");
+        return;
       } else if (action === "page:import" || action.startsWith("page:")) {
         const choice = action === "page:import"
           ? await pickTypstPreset()
@@ -521,7 +602,62 @@
   }
 
   function closeSideEditor() {
+    void closeTemplate();
     sideEditorOpen = false;
+  }
+
+  /**
+   * Page templates are edited in the side panel's style mode. A template is a notebook file of
+   * its own (`styles/…`), shared by every page that imports it, so it is saved straight to that
+   * file — debounced while typing — and every page using it re-renders. A half-written template
+   * is saved too; pages keep their last good render until it compiles again.
+   */
+  async function openTemplate(path: string, name: string) {
+    if (!root) return;
+    await closeTemplate();
+    try {
+      const source = await readTypstPreset(root, path);
+      editingTemplate = { path, name, source };
+      sideEditorStyle = true;
+      sideEditorOpen = true;
+      void tick().then(() => sideEditor?.focus());
+    } catch (error) {
+      status = `Could not open the template: ${message(error)}`;
+    }
+  }
+
+  function updateTemplate(source: string) {
+    if (!editingTemplate) return;
+    // The `// Name:` line is the template's name; the panel title follows it as it is typed.
+    editingTemplate = { ...editingTemplate, source, name: templateName(source) ?? editingTemplate.name };
+    if (templateSaveTimer) clearTimeout(templateSaveTimer);
+    templateSaveTimer = setTimeout(() => void saveTemplate(), TEMPLATE_SAVE_DEBOUNCE_MS);
+  }
+
+  async function saveTemplate() {
+    if (templateSaveTimer) clearTimeout(templateSaveTimer);
+    templateSaveTimer = undefined;
+    const template = editingTemplate;
+    // An emptied file is not a template; the last saved one stays until something is typed.
+    if (!template || !root || !template.source.trim()) return;
+    try {
+      await saveTypstPreset(root, template.path, template.source);
+      templateSources = { ...templateSources, [template.path]: template.source };
+      presets = presets.map((preset) =>
+        preset.importPath === template.path ? { ...preset, name: template.name } : preset,
+      );
+      clearTypstCache(template.path);
+      presetRevision += 1;
+    } catch (error) {
+      status = `The template was not saved: ${message(error)}`;
+    }
+  }
+
+  async function closeTemplate() {
+    if (!editingTemplate) return;
+    if (templateSaveTimer) await saveTemplate();
+    editingTemplate = null;
+    sideEditorStyle = false;
   }
 
   function toggleSideEditor() {
@@ -531,6 +667,7 @@
 
   function openSharedStyle() {
     if (!notebookManifest) return;
+    void closeTemplate();
     if (!notebookManifest.sharedStylePath) {
       notebookManifest = { ...notebookManifest, sharedStylePath: "style.typ" };
       queueCommit("Created shared Typst style");
@@ -578,6 +715,7 @@
   } | null>(null);
   let shapeCard = $state<{ anchor: number } | null>(null);
   let eraserEditor = $state<HTMLElement | null>(null);
+  let lassoEditor = $state<HTMLElement | null>(null);
   let paletteEditor = $state<{ kind: "width" | "color"; index: number; anchor: HTMLElement; adding?: boolean } | null>(null);
 
   function closePaletteEditor() {
@@ -601,6 +739,7 @@
     shapeCard = null;
     paletteEditor = null;
     eraserEditor = null;
+    lassoEditor = null;
   }
 
   function closeEraserEditor() {
@@ -635,6 +774,19 @@
     if (!alreadyOpen) eraserEditor = tile;
   }
 
+  function selectLasso(tile: HTMLElement) {
+    if (!keepsSelection(tool)) { closeToolCard(); activateTool("lasso"); return; }
+    const alreadyOpen = lassoEditor === tile;
+    closeToolCard();
+    if (!alreadyOpen) lassoEditor = tile;
+  }
+
+  function closeLassoEditor() {
+    const anchor = lassoEditor;
+    closeToolCard();
+    void tick().then(() => anchor?.isConnected && anchor.focus());
+  }
+
   function selectOrOpenShape(tile: HTMLElement) {
     paletteEditor = null;
     if (tool !== "shape") {
@@ -657,7 +809,7 @@
     highlighter: (tile) => selectOrOpenTool("highlighter", 1, tile),
     shape: selectOrOpenShape,
     eraser: selectEraser,
-    lasso: () => selectPlainTool(() => activateTool("lasso")),
+    lasso: selectLasso,
     "page-text": () => selectPlainTool(() => editingPageText ? closeSideEditor() : openPageText()),
     "typst-block": () => selectPlainTool(addTypstBlock),
   };
@@ -673,7 +825,7 @@
     ...(editingPageText ? (["page-text"] as const) : []),
   ]);
   const expandedPaletteCommand = $derived<PaletteCommand | null>(
-    toolCard || shapeCard || eraserEditor ? activePaletteCommand() : null,
+    toolCard || shapeCard || eraserEditor || lassoEditor ? activePaletteCommand() : null,
   );
 
   /// Which quick controls the pocket carries for the tool in hand. Absent for tools that have
@@ -681,7 +833,8 @@
   /// Whether the pocket edits a selection rather than the pen (specs/qol-wave.md section 2).
   const selectedInk = $derived(strokes.filter((stroke) => selectedStrokeIds.includes(stroke.id)));
   const selectedShape = $derived(shapes.find((shape) => shape.id === selectedShapeId) ?? null);
-  const restyling = $derived(selectedInk.length > 0 || selectedShape !== null);
+  const selectedShapes = $derived(shapes.filter(shape => shape.id === selectedShapeId || lassoObjectIds.includes(shape.id)));
+  const restyling = $derived(selectedInk.length > 0 || selectedShapes.length > 0);
   const paletteContext = $derived<"ink" | "eraser" | null>(
     restyling || tool === "pen" || tool === "highlighter" || tool === "shape"
       ? "ink"
@@ -749,6 +902,11 @@
   const neighborCommitters = new Map<string, InkCommitter>();
   let activating = false;
   let focusTimer: ReturnType<typeof setTimeout> | undefined;
+  /// When the page stack last moved. Making a page active loads and re-renders it, which stalls
+  /// the main thread that finger scrolling and the glide run on; doing that mid-scroll was felt
+  /// as a hitch at every page boundary. So edit focus waits until the view has settled.
+  let lastScrollAt = 0;
+  const FOCUS_SETTLE_MS = 300;
 
   let settings = $state<AppSettings>(structuredClone(DEFAULT_SETTINGS));
 
@@ -790,6 +948,7 @@
    * up — the notebook you just closed is the thing you are most likely to want next to.
    */
   let shelfLocation = $state<ShelfLocation>(SHELF_ROOT);
+  let coverRevision = $state(0);
   // Session-local order of committed changes across pages, so notebook-scoped undo can route
   // Ctrl+Z to the page that changed most recently.
   let notebookUndoOrder: NotebookAction[] = [];
@@ -861,7 +1020,7 @@
   });
 
   $effect(() => {
-    const selected = selectedObjectId() || selectedStrokeIds.length > 0 || groupedStrokeIds.length > 0;
+    const selected = selectedObjectId() || lassoObjectIds.length > 0 || selectedStrokeIds.length > 0 || groupedStrokeIds.length > 0;
     void images;
     void shapes;
     void strokes;
@@ -964,6 +1123,7 @@
     if (nextRoot === root && activeSnapshot) {
       notebookChosen = !options.stayInLibrary;
       pageOpen = true;
+      void writeCover();
       if (!options.stayInLibrary) {
         await tick();
         scrollToPage(activePageId, "auto");
@@ -1039,6 +1199,7 @@
         ? "Notebook ready"
         : "Notebook ready, but its reopening position could not be remembered";
       await refreshRecoveryCandidates();
+      void writeCover();
       return true;
     } catch (error) {
       status = `Could not open the notebook: ${message(error)}`;
@@ -1060,6 +1221,13 @@
       // An externally damaged optional style must not prevent the canonical notebook opening.
       presets = [];
     }
+    const requestRoot = root;
+    const paths = presets.flatMap((preset) => (preset.importPath ? [preset.importPath] : []));
+    const loaded = await Promise.all(
+      paths.map(async (path) => [path, await readTypstPreset(requestRoot, path).catch(() => null)] as const),
+    );
+    if (root !== requestRoot) return;
+    templateSources = Object.fromEntries(loaded.filter((entry): entry is readonly [string, string] => entry[1] !== null));
   }
 
   async function refreshRecoveryCandidates() {
@@ -1132,6 +1300,7 @@
   }
 
   function applySnapshot(snapshot: NotebookSnapshot) {
+    lassoObjectIds = [];
     // Whatever was scheduled describes the page being replaced, so it must not fire against the
     // one arriving.
     inkCommitTimer.cancel();
@@ -1171,6 +1340,7 @@
     revision = snapshot.page.revision;
     createdAt = snapshot.manifest.createdAt;
     strokes = snapshot.inkLayers[0]?.strokes ?? [];
+    lassoObjectIds = [];
     selectedStrokeIds = [];
     shapes = shapeViewsFromSnapshot(snapshot);
     selectedShapeId = null;
@@ -1341,10 +1511,15 @@
     };
   }
 
-  function scheduleFocus() {
+  function scheduleFocus(delay = 150) {
     if (focusTimer) clearTimeout(focusTimer);
     focusTimer = setTimeout(() => {
       if (automaticPageFocusLocked || pinchStart) return;
+      const still = performance.now() - lastScrollAt;
+      if (touchPanStart || touchInertiaFrame || still < FOCUS_SETTLE_MS) {
+        scheduleFocus(Math.max(FOCUS_SETTLE_MS - still, 50));
+        return;
+      }
       let bestId = activePageId;
       let bestRatio = 0;
       for (const [id, ratio] of visibleRatios) {
@@ -1473,42 +1648,17 @@
     return committer;
   }
 
-  /**
-   * Draw this notebook's shelf cover, once, on the way out.
-   *
-   * Closing is the right moment for three reasons. It happens once a session rather than once per
-   * idle pause, so rasterising costs nothing anyone waits for. The work is already saved and in
-   * memory. And it is immediately before the shelf is looked at, so the cover a writer sees is
-   * the state they just left.
-   *
-   * Rendering covers when a *folder* opens instead would mean reading and rasterising a page for
-   * every notebook in it — cheaper than it sounds, since only the first page is needed rather
-   * than the whole notebook, but still forty SVG decodes between the click and the grid. Drawing
-   * on the way out spreads that cost to one notebook at a time, at a moment with nothing to
-   * block. A notebook never opened since covers existed simply shows its paper until it is.
-   *
-   * The cover is the first page. That is the page a notebook is recognised by — except when it
-   * is not: a run of problem sheets that all open with the same letterhead is exactly the case
-   * where the first page distinguishes nothing, which is why this reads the manifest's order
-   * rather than assuming, and why a chosen cover page belongs here next.
-   */
+  /** Refresh the first-page shelf cover on entry and close, without blocking notebook entry. */
   async function writeCover() {
     if (!tauriAvailable || !root) return;
-    const coverPageId = notebookManifest?.pages[0]?.id;
-    if (!coverPageId) return;
-    // Loaded on demand: the cover page is often not the one that was being worked on, and one
-    // page read on close is cheaper than keeping the first page resident all session.
-    const snapshot = await ensurePageLoaded(coverPageId);
-    if (!snapshot) return;
-
-    const { background, geometry } = snapshot.page;
-    const png = await rasteriseCover(
-      coverSvg(background, geometry, strokesFromSnapshot(snapshot)),
-      geometry,
-    );
-    if (!png) return;
+    const coverRoot = root;
+    const generation = notebookGeneration;
+    if (!notebookManifest?.pages[0]) return;
     try {
-      await writeNotebookCover(root, png);
+      const png = await notebookCover(coverRoot, settings.pageTextBaselineGrid);
+      if (!png || coverRoot !== root || generation !== notebookGeneration) return;
+      await writeNotebookCover(coverRoot, png);
+      coverRevision += 1;
     } catch {
       // A cover is a nicety. A notebook that saved correctly must never report a failure
       // because its thumbnail could not be drawn.
@@ -1676,6 +1826,7 @@
     pageTypst = null;
     strokes = [];
     shapes = [];
+    lassoObjectIds = [];
     selectedStrokeIds = [];
     groupedStrokeIds = [];
     revokeImageUrl();
@@ -2277,7 +2428,7 @@
    */
   function updateInkSelection(ids: string[]) {
     selectedStrokeIds = ids;
-    const next = toolAfterSelection(tool, ids.length, selectionReturnTo);
+    const next = toolAfterSelection(tool, ids.length + lassoObjectIds.length, selectionReturnTo);
     tool = next.tool;
     selectionReturnTo = next.returnTo;
   }
@@ -2320,6 +2471,7 @@
     // refusing to move. Dropping it is the honest half of that: the selection is gone because
     // the tool that acted on it is.
     if (!keepsSelection(next)) {
+      lassoObjectIds = [];
       updateInkSelection([]);
       selectedTypstId = null;
       selectedImageId = null;
@@ -2341,12 +2493,12 @@
    */
   const selectionStyle = $derived.by(() => {
     const ink = selectedInk;
-    const shape = selectedShape;
-    const widths = [...ink.map((stroke) => stroke.widthPt), ...(shape ? [shape.style.strokeWidthPt] : [])];
-    const colors = [...ink.map((stroke) => stroke.color.toLowerCase()), ...(shape ? [shape.style.strokeColor.toLowerCase()] : [])];
+    const shape = selectedShapes;
+    const widths = [...ink.map((stroke) => stroke.widthPt), ...shape.map(shape => shape.style.strokeWidthPt)];
+    const colors = [...ink.map((stroke) => stroke.color.toLowerCase()), ...shape.map(shape => shape.style.strokeColor.toLowerCase())];
     const pens = ink.filter((stroke) => stroke.tool === "pen");
-    const patterns = [...pens.map((stroke) => stroke.pattern ?? "solid"), ...(shape ? [shape.style.pattern ?? "solid"] : [])];
-    const spacings = [...pens.map((stroke) => stroke.patternSpacing ?? 1), ...(shape ? [shape.style.patternSpacing ?? 1] : [])];
+    const patterns = [...pens.map((stroke) => stroke.pattern ?? "solid"), ...shape.map(shape => shape.style.pattern ?? "solid")];
+    const spacings = [...pens.map((stroke) => stroke.patternSpacing ?? 1), ...shape.map(shape => shape.style.patternSpacing ?? 1)];
     return {
       widthPt: shared(widths),
       color: shared(colors),
@@ -2356,11 +2508,11 @@
   });
 
   function restyleSelection(patch: StylePatch) {
-    if (selectedInk.length > 0) {
-      changeStrokes(restyleStrokes(strokes, selectedStrokeIds, patch), "Restyled selection");
-    }
-    const shape = selectedShape;
-    if (shape) {
+    const count = selectedInk.length + selectedShapes.length;
+    strokes = restyleStrokes(strokes, selectedStrokeIds, patch);
+    const ids = new Set(selectedShapes.map(shape => shape.id));
+    shapes = shapes.map(shape => {
+      if (!ids.has(shape.id)) return shape;
       const style = { ...shape.style };
       if (patch.color !== undefined) {
         style.strokeColor = patch.color;
@@ -2369,9 +2521,9 @@
       if (patch.widthPt !== undefined) style.strokeWidthPt = patch.widthPt;
       if (patch.pattern !== undefined) style.pattern = patch.pattern;
       if (patch.patternSpacing !== undefined) style.patternSpacing = patch.patternSpacing;
-      changeShape({ ...shape, style });
-    }
-    const count = selectedInk.length + (shape ? 1 : 0);
+      return { ...shape, style };
+    });
+    queueCommit("Restyled selection");
     status = `Restyled ${count} selected item${count === 1 ? "" : "s"}`;
   }
 
@@ -2556,11 +2708,17 @@
    * full, so a refusal here is only reachable from a settings file already carrying the maximum.
    * The width is still taken for the current stroke — a full row is no reason to refuse a nib.
    */
-  function addWidth(widthPt: number) {
+  /// A new chip arrives whole: its width, and for a pen its pattern and spacing, in one write.
+  function addWidth(widthPt: number, pattern: StrokePattern = "solid", spacing = 1) {
     const widths = settings[widthKey()];
     const next = addRowWidth(widths, widthPt, MAX_WIDTHS);
     if (next === widths) status = `The palette holds at most ${MAX_WIDTHS} widths`;
-    putWidths(next, widthPt);
+    putWidths(
+      next,
+      widthPt,
+      withWidthPattern(settings.penWidthPatterns, widthPt, pattern),
+      withWidthSpacing(settings.penWidthSpacings, widthPt, spacing),
+    );
   }
 
   function editWidth(index: number, widthPt: number) {
@@ -2608,7 +2766,7 @@
 
   function routeObjectPointer(event: PointerEvent) {
     // Explicit handles own contact, even with a brush or the Shape tool in hand.
-    if (event.target instanceof Element && event.target.closest(".shape-controls .control-hit")) {
+    if (event.target instanceof Element && event.target.closest(".shape-controls .control-hit, .mixed-selection")) {
       directObjectInput = true;
       const role = pointerRole(event, tool, pointerMapping);
       if (event.type === "pointerdown" && (role === "erase" || role === "lasso" || role === "ignore" && event.pointerType === "pen")) {
@@ -2637,7 +2795,7 @@
     }
     // The shape tool builds on the ink surface, and the eraser has to reach it to rub anything
     // out, so neither hands the pointer to an object under the cursor.
-    if (tool === "shape" || tool === "eraser") {
+    if (tool === "shape" || tool === "eraser" || tool === "lasso" || pointerRole(event, tool, pointerMapping) === "lasso") {
       directObjectInput = false;
       return;
     }
@@ -2651,6 +2809,7 @@
       .find((element) => element && workspace?.contains(element));
     directObjectInput = Boolean(object);
     if (event.type !== "pointerdown") return;
+    lassoObjectIds = [];
     const objectId =
       object?.dataset.objectId ??
       object?.querySelector<HTMLElement>("[data-object-id]")?.dataset.objectId ??
@@ -2688,11 +2847,12 @@
       ((event.pointerType === "pen" || fingerDraws(event)) && !keepsSelection(tool)) ||
       (event.target instanceof Element &&
         event.target.closest(
-          ".typst-block, .image-object, .shape-object, .typst-size-control, .selection-actions, .overflow-menu, .instrument-palette, .palette-editor, [data-preserve-selection]",
+          ".mixed-selection, .typst-block, .image-object, .shape-object, .typst-size-control, .selection-actions, .overflow-menu, .instrument-palette, .palette-editor, [data-preserve-selection]",
         ))
     ) {
       return;
     }
+    if (lassoObjectIds.length) { lassoObjectIds = []; updateInkSelection([]); }
     selectedTypstId = null;
     selectedImageId = null;
     selectedShapeId = null;
@@ -2821,7 +2981,7 @@
     // A still finger held on the page opens the context menu. Not while a finger draws: there a
     // held finger is a dot being written.
     cancelLongPress();
-    if (touchPoints.size === 1 && !fingerDraws(event)) {
+    if (touchPoints.size === 1 && !fingerDraws(event) && !directObjectInput) {
       const { pointerId, clientX, clientY } = event;
       longPress = {
         pointerId,
@@ -2883,7 +3043,6 @@
     pinchStart = {
       distance: distance(points[0], points[1]),
       zoom,
-      center,
       pagePoint: {
         x: (center.x - frame.left) / zoom,
         y: (center.y - frame.top) / zoom,
@@ -2947,10 +3106,13 @@
     if (!pinchStart) return;
     const points = [...touchPoints.values()];
     if (points.length !== 2) return;
+    // The page point first pinched stays under the fingers' *current* midpoint, so moving both
+    // fingers pans while spreading them zooms — one gesture, as on paper apps. Anchoring to where
+    // the pinch began made the fingers' travel do nothing.
     zoomAt(
       clampZoom(pinchStart.zoom * (distance(points[0], points[1]) / pinchStart.distance)),
-      pinchStart.center.x,
-      pinchStart.center.y,
+      (points[0].x + points[1].x) / 2,
+      (points[0].y + points[1].y) / 2,
       pinchStart.pagePoint,
     );
     event.preventDefault();
@@ -3023,13 +3185,17 @@
     let previous = performance.now();
     const glide = (now: number) => {
       if (!pageViewport) return;
-      const elapsed = Math.min(now - previous, 32);
+      // Real time, so a busy frame (a page loading nearby) keeps the glide's distance instead of
+      // quietly stealing it; capped only so a frame after a long stall cannot leap a whole page.
+      const elapsed = Math.min(now - previous, 100);
       previous = now;
-      const before = { x: pageViewport.scrollLeft, y: pageViewport.scrollTop };
       pageViewport.scrollLeft += velocity.x * elapsed;
       pageViewport.scrollTop += velocity.y * elapsed;
-      if (pageViewport.scrollLeft === before.x) velocity.x = 0;
-      if (pageViewport.scrollTop === before.y) velocity.y = 0;
+      // Stop at an edge, not whenever one frame happened not to move.
+      const maxLeft = pageViewport.scrollWidth - pageViewport.clientWidth;
+      const maxTop = pageViewport.scrollHeight - pageViewport.clientHeight;
+      if ((velocity.x < 0 && pageViewport.scrollLeft <= 0) || (velocity.x > 0 && pageViewport.scrollLeft >= maxLeft - 1)) velocity.x = 0;
+      if ((velocity.y < 0 && pageViewport.scrollTop <= 0) || (velocity.y > 0 && pageViewport.scrollTop >= maxTop - 1)) velocity.y = 0;
       velocity = dampedVelocity(velocity, elapsed, TOUCH_INERTIA_RETENTION);
       if (Math.hypot(velocity.x, velocity.y) < 0.025) {
         touchInertiaFrame = undefined;
@@ -3251,6 +3417,30 @@
   /// Delete the selected object or ink as one undoable committed action. Original asset
   /// files are never removed; deleting an image only drops the page's reference.
   function deleteSelection(): boolean {
+    if (lassoObjectIds.length > 0) {
+      const ids = new Set(lassoObjectIds);
+      const inkIds = new Set(selectedStrokeIds);
+      if (activeSnapshot?.page.objects.some(object => ids.has(object.id) && object.groupId && object.groupId !== mixedGroup?.groupId) ||
+        strokes.some(stroke => inkIds.has(stroke.id) && stroke.groupId && stroke.groupId !== mixedGroup?.inkGroupId)) {
+        status = "Ungroup this selection before deleting it";
+        return false;
+      }
+      if (mixedGroup?.active && ids.has(mixedGroup.typstId)) {
+        mixedGroup = { ...mixedGroup, active: false };
+        strokes = strokes.map(stroke => groupedStrokeIds.includes(stroke.id) ? { ...stroke, groupId: null } : stroke);
+        groupedStrokeIds = [];
+      }
+      typstBlocks = typstBlocks.filter(block => !ids.has(block.id));
+      for (const image of images) if (ids.has(image.id) && image.url.startsWith("blob:")) URL.revokeObjectURL(image.url);
+      images = images.filter(image => !ids.has(image.id));
+      shapes = shapes.filter(shape => !ids.has(shape.id));
+      strokes = strokes.filter(stroke => !inkIds.has(stroke.id));
+      lassoObjectIds = [];
+      updateInkSelection([]);
+      queueCommit("Deleted selection");
+      status = "Deleted selected items; original files are kept";
+      return true;
+    }
     if (selectedTypstId) {
       const id = selectedTypstId;
       const object = activeSnapshot?.page.objects.find((candidate) => candidate.id === id);
@@ -3304,6 +3494,12 @@
   /// Arrow-key movement for the current selection; batched through the ink debounce so
   /// holding a key produces one committed action.
   function nudgeSelection(dx: number, dy: number): boolean {
+    if (lassoObjectIds.length) {
+      beginMixedTransform(); previewMixedTransform({ x: dx, y: dy }, 1, { x: 0, y: 0 });
+      mixedTransformBase = null;
+      scheduleInkCommit("Moved selection");
+      return true;
+    }
     if (selectedTypstId) {
       typstBlocks = typstBlocks.map((block) =>
         block.id === selectedTypstId
@@ -3370,6 +3566,7 @@
 
   function hasCopyableSelection(): boolean {
     return (
+      lassoObjectIds.length > 0 ||
       selectedStrokeIds.length > 0 ||
       selectedShapeId !== null ||
       selectedTypstId !== null ||
@@ -3389,17 +3586,16 @@
 
   async function bundleSelection(): Promise<ClipboardBundle | null> {
     const ids = new Set(selectedStrokeIds);
-    const block = selectedTypstId ? typstBlocks.find((entry) => entry.id === selectedTypstId) : undefined;
-    const shape = selectedShapeId ? shapes.find((entry) => entry.id === selectedShapeId) : undefined;
-    const image = selectedImageId ? images.find((entry) => entry.id === selectedImageId) : undefined;
-    const imageData = image ? await imageBytes(image.url) : null;
+    const objectIds = new Set([...lassoObjectIds, selectedTypstId, selectedImageId, selectedShapeId]);
+    const selectedImages = images.filter(image => objectIds.has(image.id));
+    const imageData = await Promise.all(selectedImages.map(image => imageBytes(image.url)));
+    if (imageData.some(data => !data)) { status = "An image could not be copied; the selection is unchanged"; return null; }
     const bundle: ClipboardBundle = {
       token: crypto.randomUUID(),
       pageId: activePageId,
       strokes: strokes.filter((stroke) => ids.has(stroke.id)),
-      shapes: shape ? [shape] : [],
-      blocks: block
-        ? [{
+      shapes: shapes.filter(shape => objectIds.has(shape.id)),
+      blocks: typstBlocks.filter(block => objectIds.has(block.id)).map(block => ({
             source: block.source,
             x: block.transform.x,
             y: block.transform.y,
@@ -3408,20 +3604,16 @@
               workspace?.querySelector<HTMLElement>(`.active-page [data-object-id="${CSS.escape(block.id)}"]`)
                 ?.offsetHeight ?? 0,
             scale: block.transform.scale,
-          }]
-        : [],
-      images:
-        image && imageData
-          ? [{
-              ...imageData,
+          })),
+      images: selectedImages.map((image, index) => ({
+              ...imageData[index]!,
               alt: image.alt,
               x: image.x,
               y: image.y,
               widthPt: image.widthPt,
               heightPt: image.heightPt,
               scale: image.scale,
-            }]
-          : [],
+            })),
     };
     return isEmptyBundle(bundle) ? null : bundle;
   }
@@ -3469,6 +3661,7 @@
   /// `at` is a page point to centre the paste on (from the context menu); without it a paste
   /// steps away from its original on the same page and keeps its place on any other.
   async function pasteBundle(bundle: ClipboardBundle, at: Point | null = null) {
+    const oldObjects = new Set([...typstBlocks, ...images, ...shapes].map(object => object.id));
     pasteCount += 1;
     const shift = at ? shiftTo(bundle, at) : pasteOffset(bundle, activePageId, pasteCount);
     let zIndex = nextVisualZIndex();
@@ -3541,11 +3734,12 @@
     if (lastObject) queueCommit("Pasted");
 
     // The paste stays selected, ready to be dragged into place.
-    selectedTypstId = lastObject?.kind === "typst" ? lastObject.id : null;
-    selectedImageId = lastObject?.kind === "image" ? lastObject.id : null;
-    selectedShapeId = lastObject?.kind === "shape" ? lastObject.id : null;
+    lassoObjectIds = [...typstBlocks, ...images, ...shapes].filter(object => !oldObjects.has(object.id)).map(object => object.id);
+    selectedTypstId = null;
+    selectedImageId = null;
+    selectedShapeId = null;
     editingShapeId = null;
-    updateInkSelection(lastObject ? [] : newStrokes.map((stroke) => stroke.id));
+    updateInkSelection(newStrokes.map((stroke) => stroke.id));
     const count =
       newStrokes.length + newShapes.length + bundle.blocks.length + bundle.images.length;
     status = `Pasted ${count} item${count === 1 ? "" : "s"}`;
@@ -3585,6 +3779,8 @@
     if (!target?.closest(".page-scroll-content")) return;
     if (target.closest(".cm-editor, input, textarea, [contenteditable=true]")) return;
     event.preventDefault();
+    // Windows/browser touch right-taps can arrive even after the long-press timer was cancelled.
+    if (!nativeContextMenuAllowed(event)) return;
     openContextMenu(event.clientX, event.clientY);
   }
 
@@ -3964,7 +4160,7 @@
         moveVisualItems(
           activeSnapshot.page,
           strokes,
-          [],
+          lassoObjectIds,
           inkActionIds(),
           direction < 0 ? "backward" : "forward",
         ),
@@ -3976,7 +4172,7 @@
     const next = moveVisualItems(
       activeSnapshot.page,
       strokes,
-      [],
+      lassoObjectIds,
       inkActionIds(),
       direction < 0 ? "backward" : "forward",
     );
@@ -4008,7 +4204,7 @@
         .querySelector<HTMLElement>(`.active-page [data-object-id="${CSS.escape(objectId)}"]`)
         ?.getBoundingClientRect() ?? null;
     } else {
-      const bounds = selectionBounds(strokes, inkActionIds());
+      const bounds = mixedSelectionBounds ?? selectionBounds(strokes, inkActionIds());
       const frame = pageFrame?.getBoundingClientRect();
       if (bounds && frame) {
         anchor = {
@@ -4263,7 +4459,7 @@
       toggleSideEditor();
       return;
     }
-    if (event.key === "Escape" && (toolCard || shapeCard)) {
+    if (event.key === "Escape" && (toolCard || shapeCard || lassoEditor)) {
       event.preventDefault();
       closeToolCard();
       return;
@@ -4273,6 +4469,8 @@
       event.target.closest(".cm-editor, input, textarea, [contenteditable=true]");
     if (editingText) return;
     if (event.key === "Escape") {
+      lassoObjectIds = [];
+      updateInkSelection([]);
       searchOpen = false;
       settingsOpen = false;
       moreOpen = false;
@@ -4462,10 +4660,7 @@
 
   function returnToNotebook() {
     if (!activeSnapshot || !root) return;
-    notebookChosen = true;
-    pageOpen = true;
-    status = "Notebook ready";
-    void tick().then(() => scrollToPage(activePageId, "auto"));
+    void openNotebookAt(root);
   }
 
   async function closeNotebookTab(tabRoot: string) {
@@ -4535,6 +4730,7 @@
       if (collectMetrics) reopenMs = performance.now() - startedAt;
       pageOpen = true;
       status = `Reopened saved revision ${revision}`;
+      void writeCover();
     } catch (error) {
       status = `Reopen failed: ${message(error)}`;
     } finally {
@@ -4706,7 +4902,7 @@
     if (tool === "highlighter") return nibDetail(settings.highlighter);
     if (tool === "eraser") return "whole strokes";
     if (tool === "shape") return settings.shapeKind.replace("ellipse", "circle · ellipse");
-    if (tool === "lasso" || tool === "select") return `${selectedStrokeIds.length} selected`;
+    if (tool === "lasso" || tool === "select") return `${selectedStrokeIds.length + lassoObjectIds.length} selected`;
     return "";
   }
 
@@ -4832,6 +5028,7 @@
     <div class="start-slot">
       <LibrarySurface
         {tauriAvailable}
+        {coverRevision}
         showNotebookSetup={showInitialSetup}
         location={shelfLocation}
         onOpen={(nextRoot) => void openNotebookAt(nextRoot)}
@@ -4949,7 +5146,8 @@
       <SideEditor
         bind:this={sideEditor}
         mode={sideEditorMode}
-        source={sideEditorStyle ? sharedStyleSource : (sideEditorBlock?.source ?? "")}
+        source={editingTemplate ? editingTemplate.source : sideEditorStyle ? sharedStyleSource : (sideEditorBlock?.source ?? "")}
+        styleTitle={editingTemplate ? `Template · ${editingTemplate.name}` : "Notebook style"}
         blockLabel={sideEditorPageText
           ? "Page text"
           : sideEditorBlockId
@@ -4966,7 +5164,9 @@
         {presets}
         {presetBusy}
         onChange={(next) =>
-          sideEditorStyle
+          editingTemplate
+            ? updateTemplate(next)
+            : sideEditorStyle
             ? updateSharedStyle(next)
             : sideEditorBlock && updateTypstSource(sideEditorBlock.id, next)}
         onClose={closeSideEditor}
@@ -4999,7 +5199,7 @@
       onpointerupcapture={workspacePointerEnd}
       onpointercancelcapture={workspacePointerEnd}
     >
-      <div class="page-scroll-content" bind:this={pageViewport} onscroll={() => scheduleSelectionToolbar()}>
+      <div class="page-scroll-content" bind:this={pageViewport} onscroll={() => { lastScrollAt = performance.now(); scheduleSelectionToolbar(); }}>
         <div
           class="page-pan-field"
           class:pulling={pull !== null}
@@ -5062,6 +5262,9 @@
                       tool === "highlighter" && settings.highlighterBehindInk,
                     )}
                     selectedStrokeIds={active ? selectedStrokeIds : []}
+                    lassoTargets={settings.lassoTargets ?? DEFAULT_LASSO_TARGETS}
+                    onLassoSelect={active ? lassoSelection : undefined}
+                    showSelectionBounds={!active || lassoObjectIds.length === 0}
                     background={active ? activeBackground : (entry.snapshot?.page.background ?? { kind: "plain", color: "#ffffff" })}
                     pageWidthPt={box.widthPt}
                     pageHeightPt={box.heightPt}
@@ -5071,6 +5274,7 @@
                     sharedStyle={sharedStyleSource}
                     pageTextBaselineGrid={settings.pageTextBaselineGrid}
                     {presetRevision}
+                    {templateSources}
                     inlineEditing={!sideEditorOpen}
                     onRequestEdit={(id) => openSideEditor(id)}
                     {tool}
@@ -5153,6 +5357,10 @@
                         }
                       : undefined}
                   />
+                  {#if active && mixedSelectionBounds}
+                    <MixedSelection bounds={mixedSelectionBounds} {zoom}
+                      onStart={beginMixedTransform} onPreview={previewMixedTransform} onEnd={endMixedTransform} />
+                  {/if}
                 {:else}
                   <span class="page-loading">Loading page…</span>
                 {/if}
@@ -5270,9 +5478,15 @@
               onReturnsChange={(eraserReturns) => changeSettings({ ...settings, eraserReturns })} />
           </PaletteEditor>
         {/if}
+        {#if lassoEditor}
+          <PaletteEditor title="Lasso" anchor={lassoEditor} dock={paletteDock} onClose={closeLassoEditor} onDismiss={closeToolCard}>
+            <LassoPanel targets={settings.lassoTargets ?? DEFAULT_LASSO_TARGETS}
+              onChange={lassoTargets => changeSettings({ ...settings, lassoTargets })} />
+          </PaletteEditor>
+        {/if}
         {#if paletteEditor}
           {#key paletteEditor.anchor}
-            <PaletteEditor title={paletteEditor.kind === "width" ? "Stroke" : paletteEditor.adding ? "Add colour" : "Colour"}
+            <PaletteEditor title={paletteEditor.kind === "width" ? (paletteEditor.adding ? "Add stroke" : "Stroke") : paletteEditor.adding ? "Add colour" : "Colour"}
               anchor={paletteEditor.anchor} dock={paletteDock} onClose={closePaletteEditor} onDismiss={closeToolCard}>
               {#if paletteEditor.kind === "width"}
                 {@const penLike = tool === "pen" || restyling}
@@ -5284,8 +5498,10 @@
                   spacing={restyling ? selectionStyle.spacing : inkPatternSpacing()}
                   onSpacingChange={penLike ? setActiveSpacing : undefined}
                   canRemove={!restyling && paletteEditor.index >= 0 && canRemoveWidth(activeWidthChips)}
+                  adding={paletteEditor.adding}
+                  taken={(width) => !restyling && widthTaken(activeWidthChips, width, paletteEditor?.index ?? -1)}
                   onCommit={(width) => { if (!paletteEditor) return; if (restyling) setActiveWidth(width); else if (paletteEditor.index < 0) addWidth(width); else editWidth(paletteEditor.index, width); closePaletteEditor(); }}
-                  onAdd={!restyling && activeWidthChips.length < MAX_WIDTHS ? (width) => { addWidth(width); closePaletteEditor(); } : undefined}
+                  onAdd={(width, pattern, spacing) => { addWidth(width, pattern, spacing); closePaletteEditor(); }}
                   onRemove={() => { if (paletteEditor) removeWidth(paletteEditor.index); closePaletteEditor(); }}
                   onClose={closePaletteEditor} />
               {:else}
@@ -5401,7 +5617,8 @@
               tag={restyling ? "Selection" : undefined}
               matchPattern={restyling}
               expandedEditor={paletteEditor?.adding ? null : paletteEditor?.kind ?? null}
-              addingColor={paletteEditor?.adding ?? false}
+              addingColor={paletteEditor?.kind === "color" && paletteEditor.adding}
+              addingWidth={paletteEditor?.kind === "width" && paletteEditor.adding}
               onPickWidth={(width) => { closeToolCard(); setActiveWidth(width); }}
               onPickColor={(color) => { closeToolCard(); setActiveColor(color); }}
               onEditWidth={(index, tile) => openPaletteEditor("width", index, tile)}
@@ -5409,6 +5626,8 @@
               onPickEraserSize={setEraserSize}
               canAddColor={activeColorChips.length < MAX_SWATCHES}
               onAddColor={(tile) => openPaletteEditor("color", -1, tile, true)}
+              canAddWidth={activeWidthChips.length < MAX_WIDTHS}
+              onAddWidth={(tile) => openPaletteEditor("width", -1, tile, true)}
             />
           {/if}
         </div>
@@ -5417,10 +5636,10 @@
 
       {#if contextMenu}
         <div class="context-actions" use:dismissable={{ onClose: () => (contextMenu = null), swallow: true }}>
-          {#if selectedStrokeIds.length > 0 || groupedStrokeIds.length > 0}
+          {#if selectedStrokeIds.length > 0 || groupedStrokeIds.length > 0 || lassoObjectIds.length > 0}
             <SelectionActions
               bind:element={contextBarElement}
-              subject="ink"
+              subject={lassoObjectIds.length ? "items" : "ink"}
               left={contextBarPosition.left}
               top={contextBarPosition.top}
               ready={contextBarPosition.ready}
@@ -5463,10 +5682,10 @@
             />
           {/if}
         </div>
-      {:else if selectedStrokeIds.length > 0 || groupedStrokeIds.length > 0}
+      {:else if selectedStrokeIds.length > 0 || groupedStrokeIds.length > 0 || lassoObjectIds.length > 0}
         <SelectionActions
           bind:element={selectionToolbarElement}
-          subject="ink"
+          subject={lassoObjectIds.length ? "items" : "ink"}
           left={selectionToolbarPosition.left}
           top={selectionToolbarPosition.top}
           ready={selectionToolbarPosition.ready}
@@ -5474,15 +5693,15 @@
           canMoveForward={canMoveInkVisual(1)}
           onMove={changeInkVisualOrder}
           grouped={groupedStrokeIds.length > 0}
-          onGroup={groupedStrokeIds.length > 0
+          onGroup={lassoObjectIds.length ? undefined : groupedStrokeIds.length > 0
             ? ungroupInk
             : selectedTypstId
               ? groupSelectedInk
               : undefined}
-          onConvert={selectedStrokeIds.length === 1 ? convertSelectedInkToShape : undefined}
+          onConvert={!lassoObjectIds.length && selectedStrokeIds.length === 1 ? convertSelectedInkToShape : undefined}
           onCopy={() => void copySelection()}
           onDuplicate={() => void duplicateSelection()}
-          onDelete={selectedStrokeIds.length > 0 ? () => void deleteSelection() : undefined}
+          onDelete={hasCopyableSelection() ? () => void deleteSelection() : undefined}
         />
       {:else if selectedImageId || selectedTypstId || selectedShapeId}
         <SelectionActions

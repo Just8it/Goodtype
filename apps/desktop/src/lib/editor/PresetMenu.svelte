@@ -72,6 +72,10 @@
             name: preset.name,
             hint: preset.description,
           })),
+          ...(active.kind === "managed" && active.path
+            ? [{ action: `edit:${active.path}`, name: "Edit this template", hint: "Change it; every page using it follows" }]
+            : []),
+          { action: "page:new", name: "+ New template", hint: "Start one and write it in the editor" },
           { action: "none", name: "No preset", hint: "Plain Typst, no page template" },
           { action: "page:import", name: "Import .typ…", hint: "Use a file of your own" },
         ],

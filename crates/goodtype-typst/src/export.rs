@@ -191,6 +191,19 @@ pub fn export_pages(
     })
 }
 
+/// Render one derived page without creating an export file or changing notebook content.
+pub fn render_page_pdf(notebook_root: &Path, page: &ExportPage) -> Result<Vec<u8>, ExportError> {
+    let root = notebook_root
+        .canonicalize()
+        .map_err(|_| ExportError::InvalidRoot(notebook_root.to_path_buf()))?;
+    if !root.is_dir() {
+        return Err(ExportError::InvalidRoot(root));
+    }
+    validate_page(&root, page)?;
+    // Optional library previews never trigger background package downloads.
+    compile_pdf(&root, std::slice::from_ref(page), false)
+}
+
 /// Compile the ordered pages into PDF bytes in-process. Generated helper files
 /// (blocks, ink SVGs) live only in memory — nothing is written inside the notebook tree.
 fn compile_pdf(
@@ -1132,6 +1145,72 @@ mod tests {
             shapes: vec![],
             images: vec![],
         }
+    }
+
+    #[test]
+    fn cover_renders_mixed_content_without_writing_an_export() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("assets")).unwrap();
+        fs::create_dir(root.path().join("references")).unwrap();
+        fs::write(root.path().join("assets/diagram.svg"),
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="80" height="80"><rect width="80" height="80" fill="#e5645e"/></svg>"##).unwrap();
+        let mut background = page();
+        background.blocks[0].source = "= PDF background".to_owned();
+        background.blocks[0].y = 500.0;
+        background.strokes.clear();
+        background.background = PageBackground::Plain {
+            color: "#fff9ef".to_owned(),
+        };
+        let source = render_page_pdf(root.path(), &background).unwrap();
+        fs::write(root.path().join("references/background.pdf"), source).unwrap();
+        let mut mixed = page();
+        mixed.background = PageBackground::Pdf {
+            source_path: "references/background.pdf".to_owned(),
+            page: 1,
+        };
+        mixed.page_typst = Some("= Page text\n\nFirst-page preview".to_owned());
+        mixed.blocks[0].source = "= Movable Typst\n\n$ F = m a $".to_owned();
+        mixed.blocks[0].y = 160.0;
+        mixed.images.push(ExportImage {
+            relative_path: "assets/diagram.svg".to_owned(),
+            x: 350.0,
+            y: 200.0,
+            width_pt: 80.0,
+            height_pt: 80.0,
+            scale: 1.0,
+            rotation_degrees: 0.0,
+            z_index: 4,
+            order: 1,
+        });
+        mixed.shapes.push(ExportShape {
+            x: 360.0,
+            y: 310.0,
+            scale: 1.0,
+            rotation_degrees: 0.0,
+            z_index: 5,
+            order: 2,
+            geometry: ShapeGeometry::Rectangle {
+                width_pt: 60.0,
+                height_pt: 40.0,
+                corner_radius_pt: 4.0,
+            },
+            style: ShapeStyle {
+                stroke_color: "#16212b".to_owned(),
+                stroke_width_pt: 2.0,
+                fill_color: Some("#4c8df0".to_owned()),
+                opacity: 1.0,
+                pattern: StrokePattern::Solid,
+                pattern_spacing: 1.0,
+            },
+        });
+        let bytes = render_page_pdf(root.path(), &mixed).unwrap();
+        assert!(bytes.starts_with(b"%PDF-"));
+        assert!(!root.path().join("exports").exists());
+        if let Some(path) = std::env::var_os("GOODTYPE_COVER_EVIDENCE") {
+            fs::write(path, &bytes).unwrap();
+        }
+        mixed.images[0].relative_path = "../outside.svg".to_owned();
+        assert!(render_page_pdf(root.path(), &mixed).is_err());
     }
 
     #[test]

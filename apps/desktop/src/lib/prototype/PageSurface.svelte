@@ -4,7 +4,7 @@
   import type { StrokePerformance } from "../ink/metrics";
   import type { TypstCompileResult } from "../editor/typst";
   import { getCachedTypst } from "../editor/typstCache";
-  import { DEFAULT_PRESET_PATH, pagePresetPath } from "../page/presets";
+  import { isPresetTemplate, pagePresetPath, templatePreamble, withPagePreset } from "../page/presets";
   import {
     DEFAULT_POINTER_MAPPING,
     DEFAULT_PRESSURE_CALIBRATION,
@@ -42,6 +42,9 @@
     strokes = [],
     newStrokeZIndex = 1_000_001,
     selectedStrokeIds = [],
+    lassoTargets,
+    onLassoSelect,
+    showSelectionBounds = true,
     background = { kind: "plain", color: "#ffffff" },
     pageWidthPt,
     pageHeightPt,
@@ -52,6 +55,7 @@
     sharedStyle = "",
     pageTextBaselineGrid = true,
     presetRevision = 0,
+    templateSources = {},
     onRequestEdit,
     tool = "select",
     color = "#16212b",
@@ -112,6 +116,9 @@
     strokes?: Stroke[];
     newStrokeZIndex?: number;
     selectedStrokeIds?: string[];
+    lassoTargets?: import("./lasso").LassoTargets;
+    onLassoSelect?: (polygon: import("../geometry/coordinates").Point[], strokeIds: string[]) => void;
+    showSelectionBounds?: boolean;
     /** The paper: a flat colour, or a template resolved against this page's geometry. */
     background?: PageBackground;
     pageWidthPt: number;
@@ -125,6 +132,8 @@
     sharedStyle?: string;
     pageTextBaselineGrid?: boolean;
     presetRevision?: number;
+    /** Each notebook template's text by import path, to tell preamble templates from presets. */
+    templateSources?: Record<string, string>;
     onRequestEdit?: (id: string) => void;
     tool?: InkTool;
     color?: string;
@@ -193,20 +202,27 @@
   let editingBlockId = $state<string | null>(null);
 </script>
 
+{#snippet pageTextFor(typst: NonNullable<typeof pageTypst>)}
+  {@const templatePath = pagePresetPath(typst.source)}
+  {@const template = templatePath ? templateSources[templatePath] : undefined}
+  {@const preamble = template !== undefined && !isPresetTemplate(template)}
+  <PageText
+    source={preamble ? withPagePreset(typst.source, null) : typst.source}
+    compileResult={results[typst.id] ?? null}
+    compileContext={preamble ? templatePreamble(template) : templatePath ? "" : sharedStyle}
+    {background}
+    geometry={{ widthPt: pageWidthPt, heightPt: pageHeightPt }}
+    snapBlocksToGrid={pageTextBaselineGrid}
+    compileDependency={templatePath ? presetRevision : 0}
+    readingOrder={typst.readingOrder}
+    onCompile={(request) => onCompile(typst.id, request)}
+  />
+{/snippet}
+
 <PaperLayer {background} widthPt={pageWidthPt} heightPt={pageHeightPt} {root} {zoom} />
 <div class="page-text-layer">
   {#if pageTypst}
-    <PageText
-      source={pageTypst.source}
-      compileResult={results[pageTypst.id] ?? null}
-      compileContext={pagePresetPath(pageTypst.source) ? "" : sharedStyle}
-      {background}
-      geometry={{ widthPt: pageWidthPt, heightPt: pageHeightPt }}
-      snapBlocksToGrid={pageTextBaselineGrid}
-      compileDependency={pagePresetPath(pageTypst.source) === DEFAULT_PRESET_PATH ? presetRevision : 0}
-      readingOrder={pageTypst.readingOrder}
-      onCompile={(request) => onCompile(pageTypst.id, request)}
-    />
+    {@render pageTextFor(pageTypst)}
   {/if}
 </div>
 <div class:interactive class:editing={editingBlockId !== null} class="objects">
@@ -287,6 +303,9 @@
       ...(pageTypst ? [0] : []),
     ]}
     {selectedStrokeIds}
+    {lassoTargets}
+    {onLassoSelect}
+    {showSelectionBounds}
     {pageWidthPt}
     {pageHeightPt}
     {zoom}

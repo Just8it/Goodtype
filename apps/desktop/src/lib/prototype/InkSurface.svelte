@@ -55,6 +55,9 @@
   } from "../ink/selection";
 
   type Props = {
+    lassoTargets?: import("./lasso").LassoTargets;
+    onLassoSelect?: (polygon: Point[], strokeIds: string[]) => void;
+    showSelectionBounds?: boolean;
     strokes?: Stroke[];
     newStrokeZIndex?: number;
     objectZIndices?: number[];
@@ -105,6 +108,9 @@
   };
 
   let {
+    lassoTargets = { handwriting: true, highlighter: true, shapes: true, images: true, text: true },
+    onLassoSelect,
+    showSelectionBounds = true,
     strokes = [],
     newStrokeZIndex = 1_000_001,
     objectZIndices = [],
@@ -525,7 +531,12 @@
         status = "Shape was too small to add";
       }
     } else if (gesture.kind === "lasso") {
-      setSelection(selectStrokesInLasso(localStrokes, gesture.points.concat(pagePoint(event))));
+      const polygon = gesture.points.concat(pagePoint(event));
+      const ids = selectStrokesInLasso(localStrokes, polygon,
+        stroke => stroke.tool === "highlighter" ? lassoTargets.highlighter : lassoTargets.handwriting);
+      localSelection = ids;
+      if (onLassoSelect) onLassoSelect(polygon, ids);
+      else setSelection(ids);
     } else if (gesture.kind === "erase") {
       if (localStrokes !== gesture.initial) {
         onStrokesChange?.(localStrokes);
@@ -912,7 +923,7 @@
   }}
   onkeydown={keyDown}
 >
-  {#if selectedBounds}
+  {#if showSelectionBounds && selectedBounds}
     <svg
       class="selection-overlay"
       viewBox={`0 0 ${pageWidthPt} ${pageHeightPt}`}

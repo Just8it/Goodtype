@@ -289,7 +289,7 @@
 
   {#if canRemove}
     <button type="button" class="remove" onclick={() => onRemove?.()}>
-      Remove this color
+      Remove colour
     </button>
   {/if}
 </div>
@@ -323,9 +323,10 @@
     touch-action: none;
   }
 
+  /* Tall enough to land a pen tip on, like the step buttons beside the sliders. */
   .hue {
     position: relative;
-    height: 12px;
+    height: 20px;
     border-radius: var(--radius);
     background: linear-gradient(
       to right,
@@ -352,16 +353,16 @@
     transform: translate(-50%, -50%);
   }
 
+  .hue .thumb { width: 18px; height: 18px; }
+
   .apply.wide {
     width: 100%;
     font-family: "Cascadia Mono", Consolas, monospace;
   }
 
   .row-label {
-    color: #6a727c;
-    font-size: var(--text-xs);
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
+    color: var(--muted);
+    font-size: var(--text-sm);
   }
 
   .grid {

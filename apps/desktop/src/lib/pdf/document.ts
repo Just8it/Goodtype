@@ -3,6 +3,7 @@ import workerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 
 import { readPdfReference } from "../ipc/notebook";
 import type { PageGeometry } from "../model";
+import { wasmUrl } from "./resources";
 
 const documents = new Map<string, Promise<PDFDocumentProxy>>();
 const library = import("pdfjs-dist").then((pdfjs) => {
@@ -16,18 +17,20 @@ export function pdfDocument(root: string, sourcePath: string): Promise<PDFDocume
   const cached = documents.get(key);
   if (cached) return cached;
 
-  const opened = Promise.all([readPdfReference(root, sourcePath), library])
-    .then(([buffer, pdfjs]) =>
-      pdfjs.getDocument({
-        data: new Uint8Array(buffer),
-      }).promise,
-    )
+  const opened = readPdfReference(root, sourcePath)
+    .then(openPdf)
     .catch((error) => {
       documents.delete(key);
       throw error;
     });
   documents.set(key, opened);
   return opened;
+}
+
+/** Shared worker/decoder configuration for originals and disposable rendered-page previews. */
+export async function openPdf(buffer: ArrayBuffer): Promise<PDFDocumentProxy> {
+  const pdfjs = await library;
+  return pdfjs.getDocument({ data: new Uint8Array(buffer), wasmUrl }).promise;
 }
 
 /** PDF points are already Goodtype's canonical points at scale 1. */

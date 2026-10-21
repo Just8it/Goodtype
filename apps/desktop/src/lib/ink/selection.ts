@@ -45,12 +45,12 @@ export function selectionBounds(strokes: Stroke[], selectedIds: string[]): Bound
   };
 }
 
-export function selectStrokesInLasso(strokes: Stroke[], polygon: Point[]): string[] {
+export function selectStrokesInLasso(strokes: Stroke[], polygon: Point[], reaches: StrokeFilter = () => true): string[] {
   if (polygon.length < 3) return [];
   return strokes
-    .filter((stroke) =>
-      stroke.points.some((point) => pointInPolygon(transformedPoint(stroke, point), polygon)),
-    )
+    .filter((stroke) => reaches(stroke) && polylineInLasso(
+      stroke.points.map((point) => transformedPoint(stroke, point)), polygon,
+    ))
     .map((stroke) => stroke.id);
 }
 
@@ -188,7 +188,7 @@ function pointsBounds(points: Point[]): Bounds {
   };
 }
 
-function pointInPolygon(point: Point, polygon: Point[]): boolean {
+export function pointInPolygon(point: Point, polygon: Point[]): boolean {
   let inside = false;
   for (let current = 0, previous = polygon.length - 1; current < polygon.length; previous = current++) {
     const a = polygon[current];
@@ -201,6 +201,28 @@ function pointInPolygon(point: Point, polygon: Point[]): boolean {
     }
   }
   return inside;
+}
+
+/** Include crossings between sparse samples, not just samples that fall inside the lasso. */
+export function polylineInLasso(points: Point[], polygon: Point[], closed = false): boolean {
+  if (polygon.length < 3 || points.length === 0) return false;
+  const aabb = (values: Point[]) => values.reduce((b, p) => ({ left: Math.min(b.left, p.x), top: Math.min(b.top, p.y),
+    right: Math.max(b.right, p.x), bottom: Math.max(b.bottom, p.y) }), { left: Infinity, top: Infinity, right: -Infinity, bottom: -Infinity });
+  const line = aabb(points), loop = aabb(polygon);
+  if (line.right < loop.left || line.left > loop.right || line.bottom < loop.top || line.top > loop.bottom) return false;
+  if (points.some((point) => pointInPolygon(point, polygon))) return true;
+  if (closed && polygon.some((point) => pointInPolygon(point, points))) return true;
+  for (let i = 1; i < points.length + (closed ? 1 : 0); i++) {
+    const a = points[i - 1], b = points[i % points.length];
+    for (let j = 0; j < polygon.length; j++) {
+      const c = polygon[j], d = polygon[(j + 1) % polygon.length];
+      const cross = (p: Point, q: Point, r: Point) => (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x);
+      if (Math.max(a.x, b.x) >= Math.min(c.x, d.x) && Math.max(c.x, d.x) >= Math.min(a.x, b.x) &&
+        Math.max(a.y, b.y) >= Math.min(c.y, d.y) && Math.max(c.y, d.y) >= Math.min(a.y, b.y) &&
+        cross(a, b, c) * cross(a, b, d) <= 0 && cross(c, d, a) * cross(c, d, b) <= 0) return true;
+    }
+  }
+  return false;
 }
 
 function distanceToSegment(point: Point, start: Point, end: Point): number {

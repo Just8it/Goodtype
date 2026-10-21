@@ -6,10 +6,10 @@ $repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 
 Push-Location $repositoryRoot
 try {
-    & pnpm install --frozen-lockfile
+    & pnpm.cmd install --frozen-lockfile
     if ($LASTEXITCODE -ne 0) { throw "pnpm install failed." }
 
-    & pnpm tauri build
+    & pnpm.cmd tauri build
     if ($LASTEXITCODE -ne 0) { throw "Goodtype release build failed." }
 
     & cargo build --release -p goodtype-core --bin goodtype-ink
@@ -43,11 +43,6 @@ Copy-Item -LiteralPath $decoder -Destination (Join-Path $demoDirectory "goodtype
 Copy-Item -LiteralPath (Join-Path $repositoryRoot "formats\ink-v1.md") -Destination $demoDirectory
 
 @'
-@echo off
-start "" "%~dp0Goodtype.exe"
-'@ | Set-Content -LiteralPath (Join-Path $demoDirectory "Start Goodtype.cmd") -Encoding Ascii
-
-@'
 Goodtype for Windows x64
 
 Extract this entire ZIP to a folder, then open Goodtype.exe.
@@ -74,4 +69,5 @@ for ($archiveAttempt = 1; $archiveAttempt -le 3; $archiveAttempt++) {
         Start-Sleep -Seconds 1
     }
 }
+Write-Host "Created $demoDirectory"
 Write-Host "Created $zipPath"

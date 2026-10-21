@@ -4,6 +4,7 @@ import type { StrokePattern } from "./model";
 import type { HistoryCorner } from "./prototype/chromeLayout";
 import type { PaletteCommand } from "./prototype/palette";
 import type { ShapeKind } from "./shape/geometry";
+import { DEFAULT_LASSO_TARGETS, type LassoTargets } from "./prototype/lasso";
 
 /**
  * A pen slot on the palette. The two tiles are assignable slots, not fixed pens: pick a type
@@ -158,6 +159,7 @@ export type AppSettings = {
   /** One finger draws with the active tool; two fingers still pan and pinch. */
   drawWithFinger: boolean;
   touchHistory: boolean;
+  lassoTargets: LassoTargets;
   penSideButton: PenSideButton;
   /** After an erase picked from the bar, go back to the tool used before it. */
   eraserReturns: boolean;
@@ -212,6 +214,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   pullToAddPage: true,
   drawWithFinger: false,
   touchHistory: true,
+  lassoTargets: { ...DEFAULT_LASSO_TARGETS },
   penSideButton: "eraser",
   eraserReturns: true,
   eraserReach: "everything",

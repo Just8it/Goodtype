@@ -1,7 +1,7 @@
 <script lang="ts">
   type Props = {
     /** "page" is the context bar over empty canvas, where only Paste applies. */
-    subject: "ink" | "image" | "shape" | "Typst block" | "page";
+    subject: "ink" | "image" | "shape" | "Typst block" | "items" | "page";
     left: number;
     top: number;
     ready: boolean;

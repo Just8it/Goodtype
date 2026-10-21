@@ -1,7 +1,7 @@
 use goodtype_core::{PageObject, storage};
 use goodtype_typst::export::{
     ExportImage, ExportPage, ExportPoint, ExportShape, ExportStroke, ExportTransform,
-    ExportTypstBlock, export_pages,
+    ExportTypstBlock, export_pages, render_page_pdf,
 };
 
 use crate::notebook::{NotebookHistories, with_notebook};
@@ -44,6 +44,31 @@ pub async fn export_notebook_pdf(
         export_pages(root.as_path(), &output_name, &pages, allow_remote_packages)
             .map_err(|error| error.to_string())
             .and_then(|result| crate::workspace::path_string(result.output_path))
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// A disposable first-page preview uses the exact same material/order as ordinary export.
+#[tauri::command]
+pub async fn render_notebook_cover(
+    roots: tauri::State<'_, AllowedRoots>,
+    histories: tauri::State<'_, NotebookHistories>,
+    root: String,
+    page_text_baseline_grid: bool,
+) -> Result<tauri::ipc::Response, String> {
+    let root = ensure_allowed(&roots, &root)?;
+    let histories = histories.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let page = with_notebook(&histories, || {
+            let bundle = storage::open_notebook(&root).map_err(|error| error.to_string())?;
+            export_page_from_bundle(&bundle, page_text_baseline_grid)
+        })?;
+        let bytes = render_page_pdf(&root, &page).map_err(|error| error.to_string())?;
+        if bytes.len() > 64 * 1024 * 1024 {
+            return Err("notebook cover exceeds the 64 MiB rendering limit".to_owned());
+        }
+        Ok(tauri::ipc::Response::new(bytes))
     })
     .await
     .map_err(|error| error.to_string())?

@@ -24,6 +24,7 @@ use typst::utils::LazyHash;
 use typst::{Library, LibraryExt, World};
 use typst_ide::{CompletionKind, IdeWorld, Tooltip};
 use typst_kit::downloader::{Downloader, SystemDownloader};
+use typst_kit::fonts::FontStore;
 use typst_kit::packages::{FsPackages, SystemPackages, UniversePackages};
 use typst_layout::PagedDocument;
 use typst_svg::SvgOptions;
@@ -244,25 +245,21 @@ fn diagnostic_from_source(diagnostic: &SourceDiagnostic) -> Diagnostic {
     }
 }
 
-/// Lazily parsed embedded font set (New Computer Modern, etc.). Shared across compiles so the
-/// fonts are only decoded once for the life of the process.
-struct EmbeddedFonts {
-    book: LazyHash<FontBook>,
-    fonts: Vec<Font>,
-}
-
-fn embedded_fonts() -> &'static EmbeddedFonts {
-    static FONTS: OnceLock<EmbeddedFonts> = OnceLock::new();
+/// The fonts every compile can use, shared for the life of the process.
+///
+/// The bundled set (New Computer Modern, Libertinus, DejaVu Sans Mono) comes first, so a document
+/// that names no font renders exactly as it always has. The fonts installed on this computer
+/// follow, so `#set text(font: "Arial")` works: they are only indexed here, read-only, and a
+/// font file is read from disk the first time a document actually uses it. Nothing about them
+/// leaves the device, and a PDF export embeds what it uses, so it looks the same everywhere.
+/// A notebook opened on a computer without that font falls back to the bundled set.
+fn fonts() -> &'static FontStore {
+    static FONTS: OnceLock<FontStore> = OnceLock::new();
     FONTS.get_or_init(|| {
-        let mut fonts = Vec::new();
-        for data in typst_assets::fonts() {
-            fonts.extend(Font::iter(Bytes::new(data)));
-        }
-        let book = FontBook::from_fonts(&fonts);
-        EmbeddedFonts {
-            book: LazyHash::new(book),
-            fonts,
-        }
+        let mut store = FontStore::new();
+        store.extend(typst_kit::fonts::embedded());
+        store.extend(typst_kit::fonts::system());
+        store
     })
 }
 
@@ -430,7 +427,7 @@ impl World for BlockWorld {
     }
 
     fn book(&self) -> &LazyHash<FontBook> {
-        &embedded_fonts().book
+        fonts().book()
     }
 
     fn main(&self) -> FileId {
@@ -464,7 +461,7 @@ impl World for BlockWorld {
     }
 
     fn font(&self, index: usize) -> Option<Font> {
-        embedded_fonts().fonts.get(index).cloned()
+        fonts().font(index)
     }
 
     fn today(&self, _offset: Option<Duration>) -> Option<Datetime> {

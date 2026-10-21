@@ -16,6 +16,28 @@ const MAX_RECENTS: usize = 30;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", default)]
+pub struct LassoTargets {
+    pub handwriting: bool,
+    pub highlighter: bool,
+    pub shapes: bool,
+    pub images: bool,
+    pub text: bool,
+}
+
+impl Default for LassoTargets {
+    fn default() -> Self {
+        Self {
+            handwriting: true,
+            highlighter: true,
+            shapes: true,
+            images: true,
+            text: true,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", default)]
 pub struct AppSettings {
     pub pen_presets: Vec<PenPreset>,
     pub highlighter: PenPreset,
@@ -79,6 +101,7 @@ pub struct AppSettings {
     pub draw_with_finger: bool,
     /// Two-finger double tap undoes; three-finger double tap redoes outside the palm window.
     pub touch_history: bool,
+    pub lasso_targets: LassoTargets,
     /// What the stylus barrel button does: "eraser", "lasso" or "none". The eraser end of the
     /// pen always erases.
     pub pen_side_button: String,
@@ -241,6 +264,7 @@ impl Default for AppSettings {
             pull_to_add_page: true,
             draw_with_finger: false,
             touch_history: true,
+            lasso_targets: LassoTargets::default(),
             pen_side_button: "eraser".into(),
             eraser_returns: true,
             eraser_reach: "everything".into(),
@@ -843,6 +867,29 @@ mod tests {
             !serde_json::from_str::<AppSettings>(&saved)
                 .unwrap()
                 .touch_history
+        );
+    }
+
+    #[test]
+    fn lasso_targets_default_on_and_preserve_disabled_categories() {
+        let old: AppSettings = serde_json::from_str("{}").unwrap();
+        assert!(
+            old.lasso_targets.handwriting
+                && old.lasso_targets.highlighter
+                && old.lasso_targets.shapes
+                && old.lasso_targets.images
+                && old.lasso_targets.text
+        );
+        let settings: AppSettings =
+            serde_json::from_str(r#"{"lassoTargets":{"images":false,"highlighter":false}}"#)
+                .unwrap();
+        let saved = serde_json::to_string(&sanitize(settings)).unwrap();
+        let loaded: AppSettings = serde_json::from_str(&saved).unwrap();
+        assert!(!loaded.lasso_targets.images && !loaded.lasso_targets.highlighter);
+        assert!(
+            loaded.lasso_targets.handwriting
+                && loaded.lasso_targets.shapes
+                && loaded.lasso_targets.text
         );
     }
 

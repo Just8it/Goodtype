@@ -310,16 +310,17 @@ export function splineFromPoints(
   // it actually has — the last one's next is the first. Leaving the end knots straight, as an
   // open curve does, would put a visible corner where the two ends meet.
   const ring = closed && local.length >= MIN_CLOSED_SPLINE_NODES;
+  const tangents = besselTangents(local, ring);
   const nodes = local.map((point, index): BezierNode => {
-    const previous = local[ring ? (index - 1 + local.length) % local.length : Math.max(index - 1, 0)];
-    const next = local[ring ? (index + 1) % local.length : Math.min(index + 1, local.length - 1)];
-    const tangent = { x: (next.x - previous.x) / 6, y: (next.y - previous.y) / 6 };
     const first = !ring && index === 0;
     const last = !ring && index === local.length - 1;
+    const back = first ? 0 : distance(local[(index - 1 + local.length) % local.length], point);
+    const ahead = last ? 0 : distance(point, local[(index + 1) % local.length]);
+    const tangent = tangents[index];
     return {
       point,
-      handleIn: first ? null : { x: -tangent.x, y: -tangent.y },
-      handleOut: last ? null : tangent,
+      handleIn: first ? null : { x: (-tangent.x * back) / 3, y: (-tangent.y * back) / 3 },
+      handleOut: last ? null : { x: (tangent.x * ahead) / 3, y: (tangent.y * ahead) / 3 },
     };
   });
   return {
@@ -329,6 +330,53 @@ export function splineFromPoints(
     geometry: { kind: "spline", nodes, closed: ring },
     style,
   };
+}
+
+/**
+ * Each knot's direction, per unit of chord length, from the parabola through it and its two
+ * neighbours (Bessel tangents); a handle is then a third of its own segment along it.
+ *
+ * Simplification leaves knots unevenly spaced. The uniform rule this replaced — a sixth of the
+ * neighbour-to-neighbour vector on both sides — sized both handles for neither segment where a
+ * short one met a long one, and pointed an open curve's ends along the chord: a hand-drawn half
+ * circle bulged, flattened and hooked at its ends, visibly changing roundness from knot to knot.
+ * An open end mirrors its neighbour's direction about the end chord, which is the same parabola's
+ * slope at the end rather than the chord's.
+ */
+function besselTangents(points: readonly Point[], ring: boolean): Point[] {
+  const count = points.length;
+  const unit = (from: Point, to: Point) => {
+    const length = distance(from, to);
+    return length === 0 ? { x: 0, y: 0 } : { x: (to.x - from.x) / length, y: (to.y - from.y) / length };
+  };
+  if (count < 2) return points.map(() => ({ x: 0, y: 0 }));
+  if (count === 2 && !ring) {
+    const along = unit(points[0], points[1]);
+    return [along, along];
+  }
+  const inner = (index: number): Point => {
+    const previous = points[(index - 1 + count) % count];
+    const point = points[index];
+    const next = points[(index + 1) % count];
+    const back = distance(previous, point);
+    const ahead = distance(point, next);
+    if (back === 0 || ahead === 0) return unit(previous, next);
+    const total = back + ahead;
+    const inward = unit(previous, point);
+    const outward = unit(point, next);
+    return {
+      x: (ahead / total) * inward.x + (back / total) * outward.x,
+      y: (ahead / total) * inward.y + (back / total) * outward.y,
+    };
+  };
+  const tangents = points.map((_, index) => (ring || (index > 0 && index < count - 1) ? inner(index) : { x: 0, y: 0 }));
+  if (!ring) {
+    const startChord = unit(points[0], points[1]);
+    const endChord = unit(points[count - 2], points[count - 1]);
+    tangents[0] = { x: 2 * startChord.x - tangents[1].x, y: 2 * startChord.y - tangents[1].y };
+    tangents[count - 1] = { x: 2 * endChord.x - tangents[count - 2].x, y: 2 * endChord.y - tangents[count - 2].y };
+  }
+  return tangents;
 }
 
 export function strokePoints(points: readonly StrokePoint[]): Point[] {

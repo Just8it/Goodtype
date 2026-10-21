@@ -13,6 +13,7 @@ import {
   prunePatterns,
   withWidthPattern,
   removeWidth,
+  widthTaken,
   WIDTH_BOUNDS_MM,
 } from "./widths";
 
@@ -71,5 +72,14 @@ describe("the stroke width row", () => {
     expect(addWidth(full, 4, MAX)).toEqual(full);
     expect(addWidth(full, 1.6, MAX)).toEqual(full);
     expect(addWidth([1.6, 2.8], 0.8, MAX)).toEqual([0.8, 1.6, 2.8]);
+  });
+
+  it("spots a width another chip already draws, ignoring the chip being edited", () => {
+    const row = [1.559, 2.977];
+    // 0.55 mm is how the 1.559 pt chip is shown, so it counts as taken.
+    expect(widthTaken(row, 0.55 * 2.835)).toBe(true);
+    expect(widthTaken(row, 0.6 * 2.835)).toBe(false);
+    expect(widthTaken(row, 1.559, 0)).toBe(false);
+    expect(widthTaken(row, 2.977, 0)).toBe(true);
   });
 });
