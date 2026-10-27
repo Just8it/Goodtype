@@ -9,25 +9,22 @@
 //!
 //! Every write here lands through a temporary file in the destination's own directory, is
 //! flushed and synced before it is renamed, and refuses a destination that has become a
-//! symbolic link.
+//! symbolic link. Every read is bounded by the same primitive the store uses, rather than by a
+//! `metadata` check followed by an unbounded `fs::read`, which each caller used to write out.
 
 use std::{fs, path::Path};
 
 use serde::Serialize;
 
-/// Refuse a destination that is a symbolic link.
-///
-/// A link is followed by the write, so a store-owned file replaced by one would put the app's
-/// own state wherever the link pointed. Checked before writing rather than after, and checked on
-/// the link itself rather than through it, which is why this is `symlink_metadata`.
+/// Refuse a path that is a symbolic link, for the app-owned files that are read as well as
+/// written. The check itself is the store's ([`goodtype_core::storage::files::reject_symlink`]).
 pub fn reject_symlink(target: &Path) -> Result<(), String> {
-    if target
-        .symlink_metadata()
-        .is_ok_and(|metadata| metadata.file_type().is_symlink())
-    {
-        return Err("that file cannot be a symbolic link".to_owned());
-    }
-    Ok(())
+    goodtype_core::storage::files::reject_symlink(target).map_err(|error| error.to_string())
+}
+
+/// Read an app-owned file whole, refusing one larger than `maximum`.
+pub fn read_bounded(path: &Path, maximum: usize) -> Result<Vec<u8>, String> {
+    goodtype_core::storage::files::read_bounded(path, maximum).map_err(|error| error.to_string())
 }
 
 /// Serialize `value` as the pretty JSON these files are stored in, with the trailing newline a
@@ -41,9 +38,8 @@ pub fn json_bytes<T: Serialize>(value: &T, maximum: usize) -> Result<Vec<u8>, St
 ///
 /// The `sync_all` is the part that is easy to leave out and hard to notice missing: without it
 /// the rename can reach the disk before the contents do, and an interrupted write leaves a file
-/// that exists, parses, and is empty.
+/// that exists, parses, and is empty. `persist_atomic` also refuses a destination that is a link.
 pub fn write_atomic(target: &Path, bytes: &[u8]) -> Result<(), String> {
-    reject_symlink(target)?;
     let parent = target.parent().ok_or("that file has no parent directory")?;
     fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     goodtype_core::storage::files::persist_atomic(target, bytes, true)
