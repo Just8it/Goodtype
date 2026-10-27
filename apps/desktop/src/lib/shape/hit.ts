@@ -1,6 +1,6 @@
 import type { Point } from "../geometry/coordinates";
 import type { ShapePoint } from "../model";
-import type { ShapeView } from "../prototype/pageView";
+import type { ShapeView } from "../notebook/pageView";
 import { containsPoint, distanceToOutline } from "./geometry";
 
 /**

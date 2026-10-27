@@ -1,13 +1,13 @@
 import { describe, expect, it } from "vitest";
 import ts from "typescript";
-import component from "./PagePrototype.svelte?raw";
+import component from "./NotebookWorkspace.svelte?raw";
 
 type Action = { kind: "structure" } | { kind: "page"; pageId: string };
 
 // Run the real handlers with controlled IPC/reopen boundaries, without mounting the canvas.
 function movedNotebook(undo: Action[], redo: Action[] = [], reopen = true) {
   const script = component.split('<script lang="ts">')[1].split("</script>")[0];
-  const ast = ts.createSourceFile("PagePrototype.ts", script, ts.ScriptTarget.Latest, true);
+  const ast = ts.createSourceFile("NotebookWorkspace.ts", script, ts.ScriptTarget.Latest, true);
   const handlers = ["moveLibrarySelection", "routeHistory"].map(name => {
     const node = ast.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === name);
     if (!node) throw new Error(`Missing handler: ${name}`);

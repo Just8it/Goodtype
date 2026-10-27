@@ -1,7 +1,7 @@
 import type { Point } from "../geometry/coordinates";
 import type { Stroke } from "../model";
 import { moveSelected, scaleSelected, selectionBounds, type Bounds } from "./selection";
-import { transformSelectionPoint } from "../prototype/lasso";
+import { transformSelectionPoint } from "../notebook/lasso";
 
 export type InkPreview = { ids: string[]; delta: Point; scale: number; anchor: Point };
 export function previewMatrix(preview: InkPreview): string {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ShapeGeometry } from "../model";
-import type { ShapeView } from "../prototype/pageView";
+import type { ShapeView } from "../notebook/pageView";
 import { shapeTouchedAt, topmostShapeAt } from "./hit";
 
 const shape = (geometry: ShapeGeometry, overrides: Partial<ShapeView> = {}): ShapeView => ({

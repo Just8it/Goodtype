@@ -36,7 +36,7 @@ export function paletteWidthIndex(widths: readonly number[], activeWidth: number
   return widths.findIndex((width) => Math.abs(width - activeWidth) < WIDTH_MATCH_EPSILON);
 }
 
-// Presentation metadata only. Input behavior stays explicit in PagePrototype because a tool must
+// Presentation metadata only. Input behavior stays explicit in NotebookWorkspace because a tool must
 // not gain pen, filesystem, or notebook authority merely by appearing in this list.
 export function paletteTools(t: Translator = translate): readonly PaletteTool[] { return [
   { id: "pen-1", label: t("workspace.pen3"), title: t("workspace.penPressAgainForSettings"), group: "marking", context: "ink" },

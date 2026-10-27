@@ -1,6 +1,6 @@
 <script lang="ts">
   import { t } from "../i18n";
-  import ColorPanel from "../prototype/ColorPanel.svelte";
+  import ColorPanel from "../notebook/ColorPanel.svelte";
   import { dismissable } from "../workspace/dismiss";
   import { withRecentColor } from "../settings";
   import type { WritingCommand } from "./writingCommands";

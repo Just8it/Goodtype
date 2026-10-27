@@ -1,8 +1,8 @@
 <script lang="ts">
-  import PagePrototype from "./lib/prototype/PagePrototype.svelte";
+  import NotebookWorkspace from "./lib/notebook/NotebookWorkspace.svelte";
 </script>
 
-<PagePrototype />
+<NotebookWorkspace />
 
 <svelte:head>
   <title>Goodtype</title>

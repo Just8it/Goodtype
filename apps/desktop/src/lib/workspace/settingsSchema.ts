@@ -1,6 +1,6 @@
 import type { AppSettings } from "../settings";
 import { LANGUAGES, translate, formatNumber, type Translator } from "../i18n";
-import { paletteTools, type PaletteCommand } from "../prototype/palette";
+import { paletteTools, type PaletteCommand } from "../notebook/palette";
 
 /**
  * What Settings holds, described as data rather than markup.

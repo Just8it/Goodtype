@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { EraserSweep } from "../ink/erase";
 import type { BezierNode, ShapeGeometry, ShapeStyle } from "../model";
-import type { ShapeView } from "../prototype/pageView";
+import type { ShapeView } from "../notebook/pageView";
 import { cutShape, eraseShapesThrough } from "./erase";
 import { splinePolyline } from "./geometry";
 

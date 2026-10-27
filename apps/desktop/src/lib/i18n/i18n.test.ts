@@ -8,7 +8,7 @@ import { positionMessage, shapeMessage } from "./labels";
 import { formatDate, formatNumber, locale, notice, renderMessage, setLanguage, t, translate } from ".";
 import { settingGroups, searchSettings } from "../workspace/settingsSchema";
 import { typstSnippets } from "../editor/snippets";
-import { paletteTools } from "../prototype/palette";
+import { paletteTools } from "../notebook/palette";
 import { DEFAULT_SETTINGS } from "../settings";
 import SettingsPanel from "../workspace/SettingsPanel.svelte";
 import ConflictDialog from "../workspace/ConflictDialog.svelte";

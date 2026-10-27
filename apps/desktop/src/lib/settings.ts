@@ -2,10 +2,10 @@ import { translate, type Translator } from "./i18n";
 import { loadAppSettings, saveAppSettings } from "./ipc/workspace";
 import type { PenSideButton, PressureCalibration } from "./ink/pipeline";
 import type { StrokePattern } from "./model";
-import type { HistoryCorner } from "./prototype/chromeLayout";
-import type { PaletteCommand } from "./prototype/palette";
+import type { HistoryCorner } from "./notebook/chromeLayout";
+import type { PaletteCommand } from "./notebook/palette";
 import type { ShapeKind } from "./shape/geometry";
-import { DEFAULT_LASSO_TARGETS, type LassoTargets } from "./prototype/lasso";
+import { DEFAULT_LASSO_TARGETS, type LassoTargets } from "./notebook/lasso";
 
 /**
  * A pen slot on the palette. The two tiles are assignable slots, not fixed pens: pick a type

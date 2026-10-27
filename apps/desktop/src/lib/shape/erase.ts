@@ -14,7 +14,7 @@ import type { Point } from "../geometry/coordinates";
 import { complement, contactIntervals, type EraserSweep } from "../ink/erase";
 import { distanceToSegment } from "../ink/selection";
 import type { BezierNode, ShapeGeometry, ShapePoint } from "../model";
-import type { ShapeView } from "../prototype/pageView";
+import type { ShapeView } from "../notebook/pageView";
 import { containsPoint } from "./geometry";
 import { toLocalPoint } from "./hit";
 
