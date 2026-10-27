@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { patternLabel } from "../i18n/labels";
+  import { t, formatNumber, displayLocale } from "../i18n";
   import { centredDashArray } from "./dash";
   import { colorName, MM_PER_PT, type EraserSize } from "../settings";
   import type { StrokePattern } from "../model";
@@ -81,7 +83,7 @@
     matchPattern?: boolean;
   } = $props();
 
-  const mm = (pt: number) => `${(pt * MM_PER_PT).toFixed(2)} mm`;
+  const mm = (pt: number) => $t("workspace.mm2", { "value1": formatNumber(pt * MM_PER_PT, { minimumFractionDigits: 2, maximumFractionDigits: 2 }, $displayLocale) });
 
   // A selection drawn at a width off the row shows that width as an extra chip, so its own width
   // is visible and editable. The pen never does: an extra chip for it looked exactly like a saved
@@ -112,11 +114,11 @@
   class:tagged={Boolean(tag)}
   class="pocket"
   role="group"
-  aria-label={tag ? `Style for the ${tag.toLowerCase()}` : undefined}
-  title={tag ? `Changes apply to the ${tag.toLowerCase()}` : undefined}
+  aria-label={tag ? $t("workspace.styleForThe", { "value1": tag.toLowerCase() }) : undefined}
+  title={tag ? $t("workspace.changesApplyToThe", { "value1": tag.toLowerCase() }) : undefined}
 >
   {#if kind === "ink"}
-    <div class="grid widths" role="group" aria-label="Stroke size">
+    <div class="grid widths" role="group" aria-label={$t("workspace.strokeSize")}>
       {#each visibleWidths as width, index (width)}
         {@const linePattern = chipPattern(width, index)}
         {@const selected = Math.abs(width - activeWidth) < 0.001 && (!matchPattern || linePattern === pattern)}
@@ -125,8 +127,8 @@
           class:current={selected}
           aria-pressed={selected}
           aria-expanded={selected && onEditWidth ? expandedEditor === "width" : undefined}
-          aria-label={`${mm(width)}, ${linePattern}${selected ? " — edit stroke" : ""}`}
-          title={`${mm(width)} · ${linePattern}${selected ? " — press again to edit stroke" : ""}`}
+          aria-label={`${mm(width)}, ${patternLabel(linePattern, $t)}${selected ? $t("workspace.editStroke") : ""}`}
+          title={`${mm(width)} · ${patternLabel(linePattern, $t)}${selected ? $t("workspace.pressAgainToEditStroke") : ""}`}
           onclick={(event) => selected && onEditWidth
             ? onEditWidth(index < widths.length ? index : -1, event.currentTarget)
             : onPickWidth?.(width, event.currentTarget)}
@@ -140,14 +142,14 @@
         </button>
       {/each}
       {#if canAddWidth && onAddWidth && !matchPattern}
-        <button type="button" class="add" aria-label="Add a stroke" title="Add a stroke" aria-expanded={addingWidth}
+        <button type="button" class="add" aria-label={$t("workspace.addAStroke")} title={$t("workspace.addAStroke")} aria-expanded={addingWidth}
           onclick={(event) => onAddWidth?.(event.currentTarget)}>
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 6v12M6 12h12" /></svg>
         </button>
       {/if}
     </div>
 
-    <div class="grid colors" role="group" aria-label="Ink colour">
+    <div class="grid colors" role="group" aria-label={$t("workspace.inkColour")}>
       {#each visibleColors as color, index}
         {@const selected = color.toLowerCase() === activeColor.toLowerCase()}
         <button
@@ -156,27 +158,27 @@
           class:current={selected}
           aria-pressed={selected}
           aria-expanded={selected && onEditColor ? expandedEditor === "color" : undefined}
-          aria-label={`${colorName(color)}${selected ? " — edit colour" : ""}`}
-          title={`${colorName(color)}${selected ? " — press again to edit colour" : ""}`}
+          aria-label={`${colorName(color, $t)}${selected ? $t("workspace.editColour") : ""}`}
+          title={`${colorName(color, $t)}${selected ? $t("workspace.pressAgainToEditColour") : ""}`}
           onclick={(event) => selected && onEditColor
             ? onEditColor(index < colors.length ? index : -1, event.currentTarget)
             : onPickColor?.(color, event.currentTarget)}
         ><span class="swatch" style:background={color} style:opacity></span></button>
       {/each}
       {#if canAddColor && onAddColor}
-        <button type="button" class="dot add" aria-label="Add a colour" title="Add a colour" aria-expanded={addingColor} onclick={(event) => onAddColor?.(event.currentTarget)}>
+        <button type="button" class="dot add" aria-label={$t("workspace.addAColour")} title={$t("workspace.addAColour")} aria-expanded={addingColor} onclick={(event) => onAddColor?.(event.currentTarget)}>
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 6v12M6 12h12" /></svg>
         </button>
       {/if}
     </div>
   {:else}
-    <div class="grid erasers" role="radiogroup" aria-label="Eraser size">
+    <div class="grid erasers" role="radiogroup" aria-label={$t("workspace.eraserSize")}>
       {#each eraserSizes as option (option.id)}
         <button
           type="button"
           role="radio"
           aria-checked={eraserSize === option.id}
-          aria-label={`${option.label} eraser`}
+          aria-label={$t("workspace.eraser2", { "label": option.label })}
           title={option.label}
           class:current={eraserSize === option.id}
           onclick={() => onPickEraserSize?.(option.id)}

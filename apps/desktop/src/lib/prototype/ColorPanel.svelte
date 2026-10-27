@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { COLOR_PRESETS, colorName, normalizeColor } from "../settings";
+  import { t } from "../i18n";
+  import { colorPresets, colorName, normalizeColor } from "../settings";
 
   // In-app colour picker: presets, recents, and exact hex. It replaces the OS-native
   // `<input type="color">`, which opened a heavyweight system modal that looked nothing like
@@ -182,7 +183,7 @@
   style:transform={embedded ? null : `translate(${shift.x}px, ${shift.y}px)`}
   role={embedded ? "group" : "dialog"}
   tabindex="-1"
-  aria-label={mode === "add" ? "Add a color" : "Edit color"}
+  aria-label={mode === "add" ? $t("workspace.addAColor") : $t("workspace.editColor")}
   onkeydown={keydown}
 >
   <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
@@ -191,7 +192,7 @@
     class="field"
     style:background={`linear-gradient(to top, #000, transparent), linear-gradient(to right, #fff, hsl(${hue} 100% 50%))`}
     role="application"
-    aria-label="Saturation and brightness"
+    aria-label={$t("workspace.saturationAndBrightness")}
     onpointerdown={(event) => {
       (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
       dragging = "field";
@@ -213,7 +214,7 @@
   <div
     class="hue"
     role="application"
-    aria-label="Hue"
+    aria-label={$t("workspace.hue")}
     onpointerdown={(event) => {
       (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
       dragging = "hue";
@@ -232,12 +233,12 @@
   </div>
 
   <button type="button" class="apply wide" onclick={() => onPick(wheelHex)}>
-    Use {wheelHex.toUpperCase()}
+    {$t("workspace.use", { "value2": wheelHex.toUpperCase() })}
   </button>
 
-  <div class="row-label">Presets</div>
+  <div class="row-label">{$t("editor.presets")}</div>
   <div class="grid">
-    {#each COLOR_PRESETS as preset (preset.hex)}
+    {#each colorPresets($t) as preset (preset.hex)}
       <button
         type="button"
         class="chip"
@@ -251,7 +252,7 @@
   </div>
 
   {#if recent.length}
-    <div class="row-label">Recent</div>
+    <div class="row-label">{$t("workspace.recent")}</div>
     <div class="grid">
       {#each recent as color (color)}
         <button
@@ -259,7 +260,7 @@
           class="chip"
           class:current={color.toLowerCase() === value.toLowerCase()}
           style:background={color}
-          aria-label={colorName(color)}
+          aria-label={colorName(color, $t)}
           title={colorName(color)}
           onclick={() => onPick(color)}
         ></button>
@@ -267,14 +268,14 @@
     </div>
   {/if}
 
-  <div class="row-label">Hex</div>
+  <div class="row-label">{$t("workspace.hex")}</div>
   <div class="hex-row">
     <span class="preview" style:background={normalizeColor(hex) ?? value}></span>
     <input
       bind:value={hex}
       spellcheck="false"
       autocomplete="off"
-      aria-label="Hex color"
+      aria-label={$t("workspace.hexColor")}
       maxlength="7"
       onchange={commitHex}
       onkeydown={(event) => {
@@ -284,12 +285,12 @@
         }
       }}
     />
-    <button type="button" class="apply" onclick={commitHex}>Apply</button>
+    <button type="button" class="apply" onclick={commitHex}>{$t("workspace.apply")}</button>
   </div>
 
   {#if canRemove}
     <button type="button" class="remove" onclick={() => onRemove?.()}>
-      Remove colour
+      {$t("workspace.removeColour")}
     </button>
   {/if}
 </div>

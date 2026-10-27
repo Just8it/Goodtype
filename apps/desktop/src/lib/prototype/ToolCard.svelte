@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { t, formatNumber, displayLocale } from "../i18n";
   import { centredDash } from "./dash";
   import type { PaletteDock } from "./palette";
   import type { StrokePattern } from "../model";
@@ -7,7 +8,7 @@
   import StepSlider from "./StepSlider.svelte";
   import {
     MM_PER_PT,
-    PEN_TYPES,
+    penTypes,
     penType,
     type PenPreset,
     type PenTypeId,
@@ -51,14 +52,14 @@
     onClose: () => void;
   } = $props();
 
-  const SMOOTHING_STEPS = [
-    { label: "None", value: 0 },
-    { label: "Low", value: 0.15 },
-    { label: "Med", value: 0.35 },
-    { label: "High", value: 0.6 },
-  ];
+  const SMOOTHING_STEPS = $derived([
+    { label: $t("library.none"), value: 0 },
+    { label: $t("workspace.low"), value: 0.15 },
+    { label: $t("workspace.med"), value: 0.35 },
+    { label: $t("workspace.high"), value: 0.6 },
+  ]);
 
-  const mm = (pt: number) => `${(pt * MM_PER_PT).toFixed(2)} mm`;
+  const mm = (pt: number) => $t("workspace.mm2", { "value1": formatNumber(pt * MM_PER_PT, { minimumFractionDigits: 2, maximumFractionDigits: 2 }, $displayLocale) });
   const nearestSmoothing = $derived(
     SMOOTHING_STEPS.reduce((best, step) =>
       Math.abs(step.value - smoothing) < Math.abs(best.value - smoothing) ? step : best,
@@ -130,14 +131,14 @@
   class:point-right={dock === "right"}
   role="dialog"
   tabindex="-1"
-  aria-label={`${label} settings`}
+  aria-label={$t("workspace.settings", { "label": label })}
   onkeydown={keydown}
 >
   <span class="arrow" aria-hidden="true"></span>
   <header>
     <span class="name">{label}</span>
     <span class="meta">{mm(preset.widthPt)}</span>
-    <button type="button" class="chrome" aria-label="Close settings" onclick={onClose}>
+    <button type="button" class="chrome" aria-label={$t("workspace.closeSettings")} onclick={onClose}>
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18" /></svg>
     </button>
   </header>
@@ -162,9 +163,9 @@
 
       {#if tool === "pen"}
         <section>
-          {@render sectionLabel("Nib")}
-          <div class="nibs" role="group" aria-label="Pen nib">
-            {#each PEN_TYPES as type (type.id)}
+          {@render sectionLabel($t("workspace.nib"))}
+          <div class="nibs" role="group" aria-label={$t("workspace.penNib")}>
+            {#each penTypes($t) as type (type.id)}
               <button
                 type="button"
                 class="nib"
@@ -187,21 +188,21 @@
       <!-- One line per setting. New switches land here; see AGENT_DOC §3.9. -->
       <section class="rows">
         {#if tool === "pen"}
-          {@render toggleRow("Pressure", preset.pressure, () => onChange({ ...preset, pressure: !preset.pressure }), "Stylus force varies the width")}
+          {@render toggleRow($t("workspace.pressure"), preset.pressure, () => onChange({ ...preset, pressure: !preset.pressure }), $t("workspace.stylusForceVariesTheWidth"))}
           {#if penType(preset.type).taper > 0}
             <StepSlider name="Maximum taper" value={preset.taperLengthWidths ?? 3} min={0} max={6} step={0.25}
-              valueText={`${preset.taperLengthWidths ?? 3} × line width`} label="Maximum taper length"
-              spokenValue={`${preset.taperLengthWidths ?? 3} times line width`}
+              valueText={$t("workspace.lineWidth", { "value1": preset.taperLengthWidths ?? 3 })} label={$t("workspace.maximumTaperLength")}
+              spokenValue={$t("workspace.timesLineWidth", { "value1": preset.taperLengthWidths ?? 3 })}
               onInput={(taperLengthWidths) => onChange({ ...preset, taperLengthWidths })} />
           {/if}
         {:else}
           <StepSlider name="Opacity" value={opacity} min={0.1} max={1} step={0.05}
             valueText={`${Math.round(opacity * 100)}%`} onInput={(next) => onOpacityChange?.(next)} />
-          {@render toggleRow("Straighten to lines", straighten, () => onStraightenChange?.(!straighten))}
-          {@render toggleRow("Draw behind ink", behindInk, () => onBehindInkChange?.(!behindInk))}
-          {@render toggleRow("Tapered ends", taperEnds, () => onTaperEndsChange?.(!taperEnds), "Off keeps the full width to both ends")}
+          {@render toggleRow($t("workspace.straightenToLines"), straighten, () => onStraightenChange?.(!straighten))}
+          {@render toggleRow($t("workspace.drawBehindInk"), behindInk, () => onBehindInkChange?.(!behindInk))}
+          {@render toggleRow($t("workspace.taperedEnds"), taperEnds, () => onTaperEndsChange?.(!taperEnds), $t("workspace.offKeepsTheFullWidthToBoth"))}
         {/if}
-        {@render choiceRow("Stabiliser", SMOOTHING_STEPS, nearestSmoothing.value, onSmoothingChange)}
+        {@render choiceRow($t("workspace.stabiliser"), SMOOTHING_STEPS, nearestSmoothing.value, onSmoothingChange)}
       </section>
     </div>
 </div>

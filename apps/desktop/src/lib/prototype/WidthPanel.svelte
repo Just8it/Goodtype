@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { t, formatNumber, displayLocale } from "../i18n";
   import { centredDash } from "./dash";
   import { untrack } from "svelte";
   import { MM_PER_PT } from "../settings";
@@ -92,9 +93,9 @@
   }
 
   const PATTERNS: { id: StrokePattern; label: string; dasharray: number[] | null }[] = [
-    { id: "solid", label: "Solid", dasharray: null },
-    { id: "dashed", label: "Dashed", dasharray: [7, 5] },
-    { id: "dotted", label: "Dotted", dasharray: [0.01, 5] },
+    { id: "solid", label: $t("workspace.solid"), dasharray: null },
+    { id: "dashed", label: $t("workspace.dashed"), dasharray: [7, 5] },
+    { id: "dotted", label: $t("workspace.dotted"), dasharray: [0.01, 5] },
   ];
 
   // The draft a new chip is built in; an existing chip edits the real pattern live instead.
@@ -124,7 +125,7 @@
 
 <!-- Embedded, the card owns dismissal: the outside-press listener would fire on the card's own
      header and close the sub-view out from under the writer. -->
-<aside use:dismissable={embedded ? () => {} : onClose} class:embedded class="width-panel" aria-label="Stroke width">
+<aside use:dismissable={embedded ? () => {} : onClose} class:embedded class="width-panel" aria-label={$t("workspace.strokeWidth")}>
   <!-- Drawn at the width it will be, so the number is checked against a mark rather than trusted. -->
   <div class="sample">
     <svg viewBox="0 0 220 42" aria-hidden="true"><path d="M20 28C48 3 66 4 91 24S133 39 153 20S181 5 200 17" fill="none" stroke="currentColor" stroke-linecap="round"
@@ -133,7 +134,7 @@
   </div>
 
   {#if onPatternChange}
-    <div class="segments" role="group" aria-label="Line pattern">
+    <div class="segments" role="group" aria-label={$t("workspace.linePattern")}>
       {#each PATTERNS as choice (choice.id)}
         <button type="button" class:current={shownPattern === choice.id} aria-pressed={shownPattern === choice.id}
           aria-label={choice.label} title={choice.label}
@@ -147,24 +148,24 @@
   <div class="settings">
     <!-- Logarithmic: everyday nibs (0.1–1 mm) get half the track instead of a few pixels. -->
     <StepSlider name="Width" value={mm} min={minimumMm} max={maximumMm} step={0.05} log
-      valueText={`${mm.toFixed(2)} mm`} label="Stroke width" spokenValue={`${mm.toFixed(2)} millimetres`} onInput={(next) => (mm = next)} />
+      valueText={$t("workspace.mm2", { "value1": formatNumber(mm, { minimumFractionDigits: 2, maximumFractionDigits: 2 }, $displayLocale) })} label={$t("workspace.strokeWidth")} spokenValue={$t("workspace.millimetres", { "value1": formatNumber(mm, { minimumFractionDigits: 2, maximumFractionDigits: 2 }, $displayLocale) })} onInput={(next) => (mm = next)} />
     {#if onSpacingChange && shownPattern !== "solid"}
-      <StepSlider name="Spacing" label="Pattern spacing" value={shownSpacing} min={MIN_PATTERN_SPACING} max={MAX_PATTERN_SPACING} step={0.05}
+      <StepSlider name="Spacing" label={$t("workspace.patternSpacing")} value={shownSpacing} min={MIN_PATTERN_SPACING} max={MAX_PATTERN_SPACING} step={0.05}
         valueText={`${Math.round(shownSpacing * 100)}%`}
         onInput={(next) => adding ? (draftSpacing = next) : onSpacingChange?.(next)} />
     {/if}
   </div>
 
   {#if duplicate}
-    <p class="note" role="status">{mm.toFixed(2)} mm is already on the row. Pick another width.</p>
+    <p class="note" role="status">{$t("workspace.mmIsAlreadyOnTheRowPick", { "value1": formatNumber(mm, { minimumFractionDigits: 2, maximumFractionDigits: 2 }, $displayLocale) })}</p>
   {/if}
 
   <div class="actions">
     {#if canRemove}
-      <button type="button" class="remove" onclick={() => onRemove?.()}>Remove</button>
+      <button type="button" class="remove" onclick={() => onRemove?.()}>{$t("workspace.remove")}</button>
     {/if}
     <span class="grow"></span>
-    <button type="button" class="primary" disabled={duplicate} onclick={commit}>{adding ? "Add" : "Apply"}</button>
+    <button type="button" class="primary" disabled={duplicate} onclick={commit}>{adding ? $t("workspace.add") : $t("workspace.apply")}</button>
   </div>
 </aside>
 

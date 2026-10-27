@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { t, formatNumber, displayLocale } from "../i18n";
   import { centredDash } from "./dash";
   import type { StrokePattern } from "../model";
   import { MAX_PATTERN_SPACING, MIN_PATTERN_SPACING } from "../ink/pattern";
@@ -48,32 +49,32 @@
     onClose: () => void;
   } = $props();
 
-  const PATTERNS: { id: StrokePattern; label: string; dasharray: number[] | null }[] = [
-    { id: "solid", label: "Solid", dasharray: null },
-    { id: "dashed", label: "Dashed", dasharray: [10, 7] },
-    { id: "dotted", label: "Dotted", dasharray: [0.01, 7] },
-  ];
+  const PATTERNS: { id: StrokePattern; label: string; dasharray: number[] | null }[] = $derived([
+    { id: "solid", label: $t("workspace.solid"), dasharray: null },
+    { id: "dashed", label: $t("workspace.dashed"), dasharray: [10, 7] },
+    { id: "dotted", label: $t("workspace.dotted"), dasharray: [0.01, 7] },
+  ]);
   const previewWidth = $derived(Math.max(1.5, strokeWidthPt * 1.6));
   const previewDasharray = $derived(patternDashArray(pattern, previewWidth, spacing));
 
-  const SHAPES: { kind: ShapeKind; label: string; hint: string }[] = [
-    { kind: "line", label: "Line", hint: "Drag from start to end" },
-    { kind: "rectangle", label: "Rectangle", hint: "Drag opposite corners" },
-    { kind: "ellipse", label: "Ellipse", hint: "Lock proportions for a circle" },
-    { kind: "spline", label: "Spline", hint: "Draw a smooth editable curve" },
-  ];
+  const SHAPES: { kind: ShapeKind; label: string; hint: string }[] = $derived([
+    { kind: "line", label: $t("workspace.line"), hint: $t("workspace.dragFromStartToEnd") },
+    { kind: "rectangle", label: $t("workspace.rectangle"), hint: $t("workspace.dragOppositeCorners") },
+    { kind: "ellipse", label: $t("workspace.ellipse"), hint: $t("workspace.lockProportionsForACircle") },
+    { kind: "spline", label: $t("workspace.spline"), hint: $t("workspace.drawASmoothEditableCurve") },
+  ]);
 
   const isClosed = $derived(kind === "rectangle" || kind === "ellipse");
   /// What the constraint does depends on what is being drawn, and it governs a promoted line
   /// whatever the tool is set to, so it is never inert.
   const constraintHint = $derived(
     kind === "line"
-      ? "Snap to 15° angles"
+      ? $t("workspace.snapToAngles")
       : kind === "spline"
-        ? "Snap a promoted line to 15° angles"
-        : "Square or circle, and 15° lines",
+        ? $t("workspace.snapAPromotedLineToAngles")
+        : $t("workspace.squareOrCircleAndLines"),
   );
-  const widthLabel = $derived(`${(strokeWidthPt * MM_PER_PT).toFixed(2)} mm`);
+  const widthLabel = $derived($t("workspace.mm2", { "value1": formatNumber(strokeWidthPt * MM_PER_PT, { minimumFractionDigits: 2, maximumFractionDigits: 2 }, $displayLocale) }));
 
   function keydown(event: KeyboardEvent) {
     if (event.key !== "Escape") return;
@@ -118,14 +119,14 @@
   class:point-right={dock === "right"}
   role="dialog"
   tabindex="-1"
-  aria-label="Shape settings"
+  aria-label={$t("workspace.shapeSettings")}
   onkeydown={keydown}
 >
   <span class="arrow" aria-hidden="true"></span>
   <header>
-    <span class="name">Shapes</span>
+    <span class="name">{$t("workspace.shapes")}</span>
     <span class="meta">{widthLabel}</span>
-    <button type="button" class="chrome" aria-label="Close shape settings" onclick={onClose}>
+    <button type="button" class="chrome" aria-label={$t("workspace.closeShapeSettings")} onclick={onClose}>
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"></path></svg>
     </button>
   </header>
@@ -135,12 +136,12 @@
       <svg viewBox="0 0 250 54" aria-hidden="true">
         <path d="M22 38C66 5 91 46 130 25S196 7 228 29" fill="none" stroke={strokeColor} stroke-width={previewWidth} stroke-linecap="round" use:centredDash={previewDasharray}></path>
       </svg>
-      <span>{colorName(strokeColor)} · current pen stroke</span>
+      <span>{$t("workspace.currentPenStroke", { "value1": colorName(strokeColor) })}</span>
     </div>
 
     <section>
-      <span class="section-label">Draw</span>
-      <div class="shape-grid" role="radiogroup" aria-label="Shape type">
+      <span class="section-label">{$t("workspace.draw")}</span>
+      <div class="shape-grid" role="radiogroup" aria-label={$t("workspace.shapeType")}>
         {#each SHAPES as shape (shape.kind)}
           <button
             type="button"
@@ -158,8 +159,8 @@
     </section>
 
     <section>
-      <span class="section-label">Pattern</span>
-      <div class="pattern-grid" role="radiogroup" aria-label="Line pattern">
+      <span class="section-label">{$t("workspace.pattern")}</span>
+      <div class="pattern-grid" role="radiogroup" aria-label={$t("workspace.linePattern")}>
         {#each PATTERNS as choice (choice.id)}
           <button
             type="button"
@@ -175,7 +176,7 @@
       </div>
       {#if pattern !== "solid"}
         <div class="spacing">
-          <StepSlider name="Spacing" label="Pattern spacing" value={spacing} min={MIN_PATTERN_SPACING} max={MAX_PATTERN_SPACING} step={0.05}
+          <StepSlider name="Spacing" label={$t("workspace.patternSpacing")} value={spacing} min={MIN_PATTERN_SPACING} max={MAX_PATTERN_SPACING} step={0.05}
             valueText={`${Math.round(spacing * 100)}%`} onInput={onSpacingChange} />
         </div>
       {/if}
@@ -184,30 +185,30 @@
     <div class="divider"></div>
     <section class="rows">
       {@render toggle(
-        "Keep proportions",
+        $t("workspace.keepProportions"),
         constraintHint,
         constrain,
         false,
         () => onConstrainChange(!constrain),
       )}
       {@render toggle(
-        "Fill closed shapes",
-        "A quiet tint using the stroke colour",
+        $t("workspace.fillClosedShapes"),
+        $t("workspace.aQuietTintUsingTheStrokeColour"),
         fill,
         !isClosed,
         () => onFillChange(!fill),
       )}
       {@render toggle(
-        "Draw and hold",
-        "Promote deliberate pen marks into shapes",
+        $t("workspace.drawAndHold"),
+        $t("workspace.promoteDeliberatePenMarksIntoShapes"),
         drawAndHold,
         false,
         () => onDrawAndHoldChange(!drawAndHold),
       )}
       {#if drawAndHold}
         <StepSlider name="Held line minimum" value={minimumLineLengthPt} min={4} max={96} step={1} log
-          valueText={`${(minimumLineLengthPt * MM_PER_PT).toFixed(1)} mm`} label="Minimum held line length"
-          spokenValue={`${(minimumLineLengthPt * MM_PER_PT).toFixed(1)} millimetres`}
+          valueText={$t("workspace.mm2", { "value1": formatNumber(minimumLineLengthPt * MM_PER_PT, { minimumFractionDigits: 1, maximumFractionDigits: 1 }, $displayLocale) })} label={$t("workspace.minimumHeldLineLength")}
+          spokenValue={$t("workspace.millimetres", { "value1": formatNumber(minimumLineLengthPt * MM_PER_PT, { minimumFractionDigits: 1, maximumFractionDigits: 1 }, $displayLocale) })}
           onInput={(next) => onMinimumLineLengthChange?.(next)} />
       {/if}
     </section>

@@ -1,13 +1,14 @@
 <script lang="ts">
-  import { LASSO_OPTIONS, type LassoTargets } from "./lasso";
+  import { t } from "../i18n";
+  import { lassoOptions, type LassoTargets } from "./lasso";
   let { targets, onChange }: { targets: LassoTargets; onChange: (next: LassoTargets) => void } = $props();
 </script>
 
 <div class="lasso-settings">
-  {#each LASSO_OPTIONS as option (option.key)}
+  {#each lassoOptions($t) as option (option.key)}
     <label class="setting">
       <span>{option.label}</span>
-      <input type="checkbox" role="switch" aria-label={`Select ${option.label.toLowerCase()}`}
+      <input type="checkbox" role="switch" aria-label={$t("workspace.select", { "value1": option.label.toLowerCase() })}
         checked={targets[option.key]} onchange={event => onChange({ ...targets, [option.key]: event.currentTarget.checked })} />
       <span class="toggle" aria-hidden="true"></span>
     </label>

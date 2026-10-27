@@ -1,7 +1,10 @@
 <script lang="ts">
-  let { highlightsOnly, returns, onHighlightsChange, onReturnsChange }: {
+  import { t } from "../i18n";
+  let { precise, highlightsOnly, returns, onPreciseChange, onHighlightsChange, onReturnsChange }: {
+    precise: boolean;
     highlightsOnly: boolean;
     returns: boolean;
+    onPreciseChange: (enabled: boolean) => void;
     onHighlightsChange: (enabled: boolean) => void;
     onReturnsChange: (enabled: boolean) => void;
   } = $props();
@@ -9,22 +12,30 @@
 </script>
 
 <div class="eraser-settings">
-  <label class="setting" title="Erase highlights while keeping handwriting and shapes. Images and text stay untouched.">
-    <span>Highlights only</span>
-    <input type="checkbox" role="switch" aria-label="Highlights only"
+  <label class="setting" title={$t("workspace.eraseOnlyTheInkUnderTheEraser")}>
+    <span>{$t("workspace.precise")}</span>
+    <input type="checkbox" role="switch" aria-label={$t("workspace.precise")}
+      aria-describedby={id + "-mode"}
+      checked={precise} onchange={(event) => onPreciseChange(event.currentTarget.checked)} />
+    <span class="toggle" aria-hidden="true"></span>
+  </label>
+  <label class="setting" title={$t("workspace.eraseHighlightsWhileKeepingHandwritingAndShapes")}>
+    <span>{$t("workspace.highlightsOnly")}</span>
+    <input type="checkbox" role="switch" aria-label={$t("workspace.highlightsOnly")}
       aria-describedby={id + "-scope"}
       checked={highlightsOnly} onchange={(event) => onHighlightsChange(event.currentTarget.checked)} />
     <span class="toggle" aria-hidden="true"></span>
   </label>
-  <label class="setting" title="After erasing, return to the tool you were using.">
-    <span>Return to previous tool</span>
-    <input type="checkbox" role="switch" aria-label="Return to previous tool"
+  <label class="setting" title={$t("workspace.afterErasingReturnToTheToolYou")}>
+    <span>{$t("workspace.returnToPreviousTool")}</span>
+    <input type="checkbox" role="switch" aria-label={$t("workspace.returnToPreviousTool")}
       aria-describedby={id + "-return"}
       checked={returns} onchange={(event) => onReturnsChange(event.currentTarget.checked)} />
     <span class="toggle" aria-hidden="true"></span>
   </label>
-  <span id={id + "-scope"} class="screen-reader-note">When off, erase ink and shapes. Images and text are always preserved.</span>
-  <span id={id + "-return"} class="screen-reader-note">After each erase gesture, return to whichever tool was active before the eraser.</span>
+  <span id={id + "-mode"} class="screen-reader-note">{$t("workspace.whenOffEachTouchedStrokeIsRemovedWhole")}</span>
+  <span id={id + "-scope"} class="screen-reader-note">{$t("workspace.whenOffEraseInkAndShapesImages")}</span>
+  <span id={id + "-return"} class="screen-reader-note">{$t("workspace.afterEachEraseGestureReturnToWhichever")}</span>
 </div>
 
 <style>

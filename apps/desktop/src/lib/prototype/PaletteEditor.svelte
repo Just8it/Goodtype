@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { t } from "../i18n";
   import { tick, type Snippet } from "svelte";
   import type { PaletteDock } from "./palette";
   import { dismissable } from "../workspace/dismiss";
@@ -42,7 +43,7 @@
 
 <div use:place class="palette-editor" role="dialog" aria-label={title} tabindex="-1"
   onkeydown={(event) => { if (event.key === "Escape") { event.stopPropagation(); onClose(); } }}>
-  <header><strong>{title}</strong><button type="button" aria-label={`Close ${title.toLowerCase()}`} onclick={onClose}>
+  <header><strong>{title}</strong><button type="button" aria-label={$t("workspace.close2", { "value1": title.toLowerCase() })} onclick={onClose}>
     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" /></svg>
   </button></header>
   {@render children()}

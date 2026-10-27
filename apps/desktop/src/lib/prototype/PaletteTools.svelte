@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { t } from "../i18n";
   import { centredDash } from "./dash";
   import type { StrokePattern } from "../model";
   import type { AppSettings, PenPreset } from "../settings";
@@ -39,7 +40,7 @@
   </svg>
 {/snippet}
 
-{#each visiblePaletteTools(settings.hiddenTools) as { tool: definition, dividerBefore } (definition.id)}
+{#each visiblePaletteTools(settings.hiddenTools, $t) as { tool: definition, dividerBefore } (definition.id)}
   {#if dividerBefore}
     <span class:horizontal class="palette-divider"></span>
   {/if}
@@ -52,7 +53,7 @@
     aria-pressed={definition.action ? undefined : active}
     aria-expanded={definition.context && active ? expandedCommand === definition.id : undefined}
     title={definition.id === "eraser" && settings.eraserReach === "highlighter"
-      ? "Erase highlights only (4) — press again for settings" : definition.title}
+      ? $t("workspace.eraseHighlightsOnlyPressAgainForSettings") : definition.title}
     onclick={(event) => onActivate(definition.id, event.currentTarget)}
   >
     {#if definition.id === "pen-1"}
@@ -69,6 +70,10 @@
       <svg viewBox="0 0 24 24" aria-hidden="true">
         <path d={ERASER_PATH} transform={INSTRUMENT_TRANSFORM} />
         <circle class="eraser-size" cx="19" cy="20" r={ERASER_RADIUS[settings.eraserSize]} />
+        {#if settings.eraserMode === "precise"}
+          <!-- The mark it leaves: a line with a clean gap, not a missing line. -->
+          <path class="eraser-cut" d="M2.5 21.5h3.5M10 21.5h3.5" />
+        {/if}
       </svg>
     {:else if definition.id === "shape"}
       {#if settings.shapeKind === "line"}
@@ -123,6 +128,7 @@
   .tool-tile svg .ink-halo { stroke: rgb(255 255 255 / 62%); }
   .tool-tile svg .band { stroke: none; }
   .tool-tile svg circle.eraser-size { fill: none; stroke: currentColor; stroke-width: 1.2; }
+  .tool-tile svg path.eraser-cut { fill: none; stroke: currentColor; stroke-width: 1.4; stroke-linecap: round; }
   .palette-divider { width: 26px; height: 1px; margin: 1px 0; background: var(--edge); }
   .palette-divider.horizontal { width: 1px; height: 26px; margin: 0 3px; }
 </style>

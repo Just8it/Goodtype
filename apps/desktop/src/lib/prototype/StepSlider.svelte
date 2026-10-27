@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { t } from "../i18n";
   import { fromPosition, nudge, toPosition, TRACK_RESOLUTION } from "./stepSlider";
 
   /**
@@ -98,7 +99,7 @@
     <output class="value">{valueText}</output>
   </div>
   <div class="track">
-    <button type="button" class="nudge" aria-label={`Decrease ${label.toLowerCase()}`} title="Hold to keep stepping"
+    <button type="button" class="nudge" aria-label={$t("workspace.decrease", { "value1": label.toLowerCase() })} title={$t("workspace.holdToKeepStepping")}
       disabled={value <= min}
       onpointerdown={(event) => press(event, -1)} onpointerup={stopRepeat} onpointercancel={stopRepeat}
       onlostpointercapture={stopRepeat} onclick={(event) => activate(event, -1)}>
@@ -108,7 +109,7 @@
       aria-label={label} aria-valuetext={spokenValue}
       oninput={(event) => onInput(fromPosition(Number(event.currentTarget.value), scale))}
       onkeydown={key} />
-    <button type="button" class="nudge" aria-label={`Increase ${label.toLowerCase()}`} title="Hold to keep stepping"
+    <button type="button" class="nudge" aria-label={$t("workspace.increase", { "value1": label.toLowerCase() })} title={$t("workspace.holdToKeepStepping")}
       disabled={value >= max}
       onpointerdown={(event) => press(event, 1)} onpointerup={stopRepeat} onpointercancel={stopRepeat}
       onlostpointercapture={stopRepeat} onclick={(event) => activate(event, 1)}>
