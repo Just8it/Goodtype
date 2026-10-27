@@ -23,11 +23,12 @@ use serde::{Deserialize, Serialize};
 use tauri_plugin_dialog::DialogExt;
 
 use crate::settings::{StoredLibrary, read_library, relocate_recent_roots, write_library};
+use crate::store::read_bounded;
 use crate::workspace::{AllowedRoots, allow_root, path_string};
 
 /// A notebook's manifest can be large; a listing only needs the page count out of it. Reading
 /// more than this means the file is not a manifest we wrote.
-const MAX_MANIFEST_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_MANIFEST_BYTES: usize = 4 * 1024 * 1024;
 
 /// One row in a folder listing. Either a folder to descend into or a notebook to open — the
 /// frontend never has to guess which from the shape of the fields.
@@ -138,18 +139,31 @@ fn peek_manifest(notebook: &Path) -> (Option<usize>, Option<PageDefaults>) {
         #[serde(default)]
         default_page: Option<PageDefaults>,
     }
-    let manifest = notebook.join(layout::MANIFEST);
-    let within_ceiling = fs::metadata(&manifest)
-        .map(|metadata| metadata.len() <= MAX_MANIFEST_BYTES)
-        .unwrap_or(false);
-    if !within_ceiling {
-        return (None, None);
-    }
-    let Ok(bytes) = fs::read(manifest) else {
+    let Ok(bytes) = read_bounded(&notebook.join(layout::MANIFEST), MAX_MANIFEST_BYTES) else {
         return (None, None);
     };
     match serde_json::from_slice::<ManifestPeek>(&bytes) {
-        Ok(peek) => (Some(peek.pages.len()), peek.default_page),
+        Ok(peek) => {
+            let paper = peek.default_page.filter(|paper| {
+                [paper.geometry.width_pt, paper.geometry.height_pt]
+                    .into_iter()
+                    .all(|size| {
+                        size.is_finite()
+                            && size > 0.0
+                            && size <= goodtype_core::MAX_PAGE_DIMENSION_PT
+                    })
+                    && match &paper.background {
+                        goodtype_core::PageBackground::Template { template } => {
+                            goodtype_core::template::validate(template).is_ok()
+                        }
+                        goodtype_core::PageBackground::Plain { color } => {
+                            goodtype_core::valid_hex_color(color)
+                        }
+                        goodtype_core::PageBackground::Pdf { .. } => true,
+                    }
+            });
+            (Some(peek.pages.len()), paper)
+        }
         Err(_) => (None, None),
     }
 }
@@ -315,6 +329,21 @@ pub(crate) fn reject_notebook_internals(root: &Path, path: &Path) -> Result<(), 
     Ok(())
 }
 
+/// Rename and delete bypass the notebook's save path and leave its tab pointing at a directory
+/// that no longer exists, so an entry that is or contains an open tab must be closed first.
+/// Moves stay allowed: the workspace saves and retargets its tabs around them.
+fn reject_open_notebooks(open_roots: &[String], source: &Path, action: &str) -> Result<(), String> {
+    if open_roots
+        .iter()
+        .any(|open| Path::new(open).starts_with(source))
+    {
+        return Err(format!(
+            "Close the open notebook before {action} it or the folder that holds it"
+        ));
+    }
+    Ok(())
+}
+
 fn relative_child(parent: &str, name: &str) -> String {
     if parent.is_empty() {
         name.to_owned()
@@ -365,6 +394,11 @@ pub fn rename_library_entry(
     let root = current_root(&app, &roots)?;
     let source = resolve(&root, &path)?;
     reject_notebook_internals(&root, &source)?;
+    reject_open_notebooks(
+        &crate::settings::recent_session(&app)?.0,
+        &source,
+        "renaming",
+    )?;
     let parent = parent_of(&path);
     let target = free_child(&root, parent, &name)?;
     fs::rename(&source, &target).map_err(|error| error.to_string())?;
@@ -509,47 +543,53 @@ pub fn move_library_entries(
     app: tauri::AppHandle,
     roots: tauri::State<'_, AllowedRoots>,
     tinymist: tauri::State<'_, crate::tinymist::Tinymist>,
+    histories: tauri::State<'_, crate::notebook::NotebookHistories>,
     paths: Vec<String>,
     destination: String,
 ) -> Result<LibraryMoveResult, String> {
     let root = current_root(&app, &roots)?;
+    crate::notebook::with_notebook_lock(&histories, |store| {
+        // Hold the allowlist while the roots it names change identity. This prevents another command
+        // from observing the short interval between the filesystem rename and the in-memory update.
+        let mut allowed = roots.0.lock().map_err(|error| error.to_string())?;
+        tinymist.reset();
+        let moved = move_entries(&root, &paths, &destination)?;
 
-    // Hold the allowlist while the roots it names change identity. This prevents another command
-    // from observing the short interval between the filesystem rename and the in-memory update.
-    let mut allowed = roots.0.lock().map_err(|error| error.to_string())?;
-    tinymist.reset();
-    let moved = move_entries(&root, &paths, &destination)?;
-
-    let allowed_moves = allowed
-        .iter()
-        .filter_map(|from| relocated_path(from, &moved.directories).map(|to| (from.clone(), to)))
-        .collect::<Vec<_>>();
-    for (from, to) in &allowed_moves {
-        allowed.remove(from);
-        allowed.insert(to.clone());
-    }
-    drop(allowed);
-
-    let root_moves = allowed_moves
-        .iter()
-        .filter_map(|(from, to)| {
-            Some(LibraryRootMove {
-                from: path_string(from.clone()).ok()?,
-                to: path_string(to.clone()).ok()?,
+        let allowed_moves = allowed
+            .iter()
+            .filter_map(|from| {
+                relocated_path(from, &moved.directories).map(|to| (from.clone(), to))
             })
-        })
-        .collect();
-    let warning = relocate_recent_roots(&app, &moved.directories)
-        .err()
-        .map(|error| {
-            format!("the notebooks moved, but their reopening history was not updated: {error}")
-        });
+            .collect::<Vec<_>>();
+        for (from, to) in &allowed_moves {
+            allowed.remove(from);
+            allowed.insert(to.clone());
+        }
+        store.relocate_roots(&moved.directories);
+        drop(allowed);
 
-    Ok(LibraryMoveResult {
-        paths: moved.paths,
-        root_moves,
-        warning,
+        let root_moves = allowed_moves
+            .iter()
+            .filter_map(|(from, to)| {
+                Some(LibraryRootMove {
+                    from: path_string(from.clone()).ok()?,
+                    to: path_string(to.clone()).ok()?,
+                })
+            })
+            .collect();
+        let warning = relocate_recent_roots(&app, &moved.directories)
+            .err()
+            .map(|error| {
+                format!("the notebooks moved, but their reopening history was not updated: {error}")
+            });
+
+        Ok(LibraryMoveResult {
+            paths: moved.paths,
+            root_moves,
+            warning,
+        })
     })
+    .map_err(|error| error.to_string())
 }
 
 /// Move an entry to the library's trash.
@@ -576,6 +616,11 @@ pub fn delete_library_entry(
     if source == root {
         return Err("the library itself cannot be deleted".to_owned());
     }
+    reject_open_notebooks(
+        &crate::settings::recent_session(&app)?.0,
+        &source,
+        "deleting",
+    )?;
     let name = source
         .file_name()
         .and_then(|name| name.to_str())
@@ -609,7 +654,7 @@ fn parent_of(path: &str) -> &str {
 const INTERNAL_DIR: &str = layout::INTERNAL_DIR;
 const TRASH_DIR: &str = "trash";
 const SHELF_FILE: &str = "shelf.json";
-const MAX_SHELF_BYTES: u64 = 1024 * 1024;
+const MAX_SHELF_BYTES: usize = 1024 * 1024;
 
 fn internal_file(root: &Path, name: &str, create: bool) -> Result<PathBuf, String> {
     let root = paths::canonical_root(root).map_err(|error| error.to_string())?;
@@ -637,14 +682,8 @@ fn read_shelf(root: &Path) -> Shelf {
     let Ok(path) = internal_file(root, SHELF_FILE, false) else {
         return Shelf::default();
     };
-    let within_ceiling = fs::metadata(&path)
-        .map(|metadata| metadata.len() <= MAX_SHELF_BYTES)
-        .unwrap_or(false);
-    if !within_ceiling {
-        return Shelf::default();
-    }
-    // A preferences file that will not parse must not stop the library opening.
-    fs::read(&path)
+    // A preferences file that is oversized or will not parse must not stop the library opening.
+    read_bounded(&path, MAX_SHELF_BYTES)
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .unwrap_or_default()
@@ -656,7 +695,7 @@ fn write_shelf(root: &Path, shelf: &Shelf) -> Result<(), String> {
     crate::store::write_json(
         &internal_file(root, SHELF_FILE, true)?,
         shelf,
-        MAX_SHELF_BYTES as usize,
+        MAX_SHELF_BYTES,
     )
 }
 
@@ -706,7 +745,7 @@ pub fn write_notebook_cover(
     }
     let notebook = crate::workspace::ensure_allowed(&roots, &root)?;
     let path = internal_file(&notebook, COVER_FILE, true)?;
-    fs::write(path, png).map_err(|error| error.to_string())
+    crate::store::write_atomic(&path, &png)
 }
 
 /// A notebook's cover as a data URL, or `None` when it has never been saved with one.
@@ -727,13 +766,7 @@ pub fn library_cover(
     let Ok(cover) = internal_file(&notebook, COVER_FILE, false) else {
         return Ok(None);
     };
-    let within_ceiling = fs::metadata(&cover)
-        .map(|metadata| metadata.len() as usize <= MAX_COVER_BYTES)
-        .unwrap_or(false);
-    if !within_ceiling {
-        return Ok(None);
-    }
-    let Ok(bytes) = fs::read(&cover) else {
+    let Ok(bytes) = read_bounded(&cover, MAX_COVER_BYTES) else {
         return Ok(None);
     };
     Ok(Some(format!("data:image/png;base64,{}", base64(&bytes))))
@@ -857,8 +890,18 @@ pub fn library_root(
 pub async fn pick_library_root(
     app: tauri::AppHandle,
     roots: tauri::State<'_, AllowedRoots>,
+    ui_language: Option<String>,
 ) -> Result<Option<String>, String> {
-    let Some(picked) = app.dialog().file().blocking_pick_folder() else {
+    let Some(picked) = app
+        .dialog()
+        .file()
+        .set_title(crate::settings::dialog_label(
+            ui_language.as_deref(),
+            "Choose library folder",
+            "Bibliotheksordner auswählen",
+        ))
+        .blocking_pick_folder()
+    else {
         return Ok(None);
     };
     let picked = picked.into_path().map_err(|error| error.to_string())?;
@@ -915,6 +958,25 @@ pub(crate) fn current_root(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn open_notebooks_and_their_folders_cannot_be_renamed_or_deleted() {
+        let open = vec![
+            Path::new("library")
+                .join("Semester")
+                .join("Notes")
+                .display()
+                .to_string(),
+        ];
+        let semester = Path::new("library").join("Semester");
+        assert!(reject_open_notebooks(&open, &semester.join("Notes"), "renaming").is_err());
+        assert!(reject_open_notebooks(&open, &semester, "deleting").is_err());
+        // A sibling whose name merely shares a prefix is not an ancestor.
+        assert!(reject_open_notebooks(&open, &semester.join("No"), "deleting").is_ok());
+        assert!(
+            reject_open_notebooks(&open, &Path::new("library").join("Other"), "renaming").is_ok()
+        );
+    }
 
     fn library() -> tempfile::TempDir {
         let root = tempfile::tempdir().unwrap();
@@ -1231,5 +1293,74 @@ mod tests {
             entry,
             LibraryEntry::Notebook { name, page_count: None, .. } if name == "Kaputt"
         )));
+    }
+
+    #[test]
+    fn shelf_paper_is_validated_without_hiding_or_modifying_the_notebook() {
+        use serde_json::json;
+        let root = library();
+        let notebook = root.path().join("Semester 3/Thermodynamik");
+        let area = json!({"topPt": 0, "rightPt": 0, "bottomPt": 0, "leftPt": 0});
+        let payload = "#ffffff\"/><style>body{opacity:0}</style>";
+        let elements = [
+            json!({"kind": "horizontal_lines", "area": area, "spacingPt": 10, "color": payload, "weightPt": 1}),
+            json!({"kind": "vertical_lines", "area": area, "spacingPt": 10, "color": payload, "weightPt": 1}),
+            json!({"kind": "dots", "area": area, "spacingPt": 10, "color": payload, "radiusPt": 1}),
+            json!({"kind": "rule", "area": area, "edge": "left", "offsetPt": 10, "color": payload, "weightPt": 1}),
+            json!({"kind": "grid", "area": area, "spacingPt": 10, "color": "#abcdef", "weightPt": 1, "major": {"every": 2, "color": payload, "weightPt": 2}}),
+        ];
+        let template = |color: &str, elements: Vec<serde_json::Value>| {
+            json!({
+                "kind": "template", "template": {"id": "custom", "name": "Custom", "backgroundColor": color, "elements": elements}
+            })
+        };
+        let mut backgrounds = vec![
+            json!({"kind": "plain", "color": payload}),
+            template(payload, vec![]),
+        ];
+        backgrounds.extend(
+            elements
+                .into_iter()
+                .map(|element| template("#ffffff", vec![element])),
+        );
+        for background in backgrounds {
+            let bytes = serde_json::to_vec(&json!({"pages": [{"id":"a"}], "defaultPage": {
+                "geometry": {"widthPt": 600, "heightPt": 800}, "background": background
+            }}))
+            .unwrap();
+            // Exercise JSON escape decoding before validation, rather than inspecting raw bytes.
+            let bytes = String::from_utf8(bytes)
+                .unwrap()
+                .replace("\\\"", "\\u0022")
+                .into_bytes();
+            fs::write(notebook.join(layout::MANIFEST), &bytes).unwrap();
+            let (count, paper) = peek_manifest(&notebook);
+            assert_eq!(count, Some(1));
+            assert!(paper.is_none());
+            let entries = read_folder(root.path(), "Semester 3").unwrap();
+            assert!(entries.iter().any(|entry| matches!(
+                entry,
+                LibraryEntry::Notebook {
+                    page_count: Some(1),
+                    paper: None,
+                    ..
+                }
+            )));
+            assert_eq!(fs::read(notebook.join(layout::MANIFEST)).unwrap(), bytes);
+        }
+        for background in [
+            template("#AbCdEf80", vec![]),
+            json!({"kind":"plain", "color":"#AbCdEf"}),
+        ] {
+            fs::write(
+                notebook.join(layout::MANIFEST),
+                serde_json::to_vec(&json!({"pages": [], "defaultPage": {
+                    "geometry": {"widthPt": 600, "heightPt": 800}, "background": background
+                }}))
+                .unwrap(),
+            )
+            .unwrap();
+            assert!(peek_manifest(&notebook).1.is_some());
+        }
     }
 }
