@@ -401,6 +401,7 @@ export const en = {
     "anImageCouldNotBeCopiedThe": "An image could not be copied; the selection is unchanged",
     "copiedCutWasCanceledBecauseTheCopied": "Copied; Cut was canceled because the copied content changed",
     "cutToTheClipboard": "Cut to the clipboard",
+    "clipboardWriteFailed": "Could not write to the clipboard. The original content is kept.",
     "copied": "Copied",
     "theSelectionCouldNotBePasted": "The selection could not be pasted: {{value1}}",
     "pastedInk": "Pasted ink",

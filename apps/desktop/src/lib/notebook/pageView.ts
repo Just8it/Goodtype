@@ -1,3 +1,4 @@
+import type { TypstCompileResult } from "../editor/typst";
 import type { InkLayer, PageObject, ShapeGeometry, ShapeStyle, Stroke } from "../model";
 
 // One view model for a page, shared by every renderer. Before this existed, the active page and
@@ -19,6 +20,12 @@ export type BlockView = {
 };
 
 export type TypstTransform = Pick<BlockView, "x" | "y" | "layoutWidthPt" | "scale" | "rotation">;
+
+/** Interactive block view; compilation output remains disposable session state. */
+export type TypstBlockState = Omit<BlockView, keyof TypstTransform> & {
+  transform: TypstTransform;
+  result: TypstCompileResult | null;
+};
 
 export type PageTypstView = {
   id: string;

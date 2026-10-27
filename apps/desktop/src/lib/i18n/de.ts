@@ -403,6 +403,7 @@ export const de = {
     "anImageCouldNotBeCopiedThe": "Ein Bild konnte nicht kopiert werden; die Auswahl bleibt unverändert",
     "copiedCutWasCanceledBecauseTheCopied": "Kopiert; Ausschneiden wurde abgebrochen, weil sich der kopierte Inhalt geändert hat",
     "cutToTheClipboard": "In die Zwischenablage ausgeschnitten",
+    "clipboardWriteFailed": "Die Zwischenablage konnte nicht beschrieben werden. Der ursprüngliche Inhalt bleibt erhalten.",
     "copied": "Kopiert",
     "theSelectionCouldNotBePasted": "Die Auswahl konnte nicht eingefügt werden: {{value1}}",
     "pastedInk": "Striche eingefügt",
