@@ -152,6 +152,56 @@ pub fn is_windows_reserved(stem: &str) -> bool {
     )
 }
 
+/// The one rule for a file name Goodtype itself creates: an asset, a reference PDF, a style, an
+/// export. ASCII letters, digits, `.`, `-` and `_`, an extension, no leading or trailing dot, at
+/// most 120 bytes, and no Windows device name as its stem. Narrow on purpose: these names are
+/// written into canonical JSON or handed to another machine, and must mean the same file there.
+pub fn validate_filename(filename: &str) -> Result<(), PathError> {
+    let safe_characters = filename
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'));
+    let stem = filename.split('.').next().unwrap_or("");
+    if filename.is_empty()
+        || filename.len() > 120
+        || filename.starts_with('.')
+        || filename.ends_with('.')
+        || !filename.contains('.')
+        || !safe_characters
+        || is_windows_reserved(stem)
+    {
+        return Err(PathError::Invalid(filename.into()));
+    }
+    Ok(())
+}
+
+/// A file stem made from an arbitrary name — a picked file, a preset title — for a file Goodtype
+/// is about to create.
+///
+/// ASCII letters, digits and `_` are kept; every run of anything else becomes one `-`; dashes are
+/// trimmed from both ends and the stem is cut to `max_chars`. An empty result becomes `fallback`,
+/// and a Windows device name is prefixed with it, so the stem plus an extension always passes
+/// [`validate_filename`] (for a `max_chars` that leaves room for the extension).
+pub fn safe_stem(name: &str, max_chars: usize, fallback: &str) -> String {
+    let mut stem = String::with_capacity(name.len());
+    for character in name.chars() {
+        if character.is_ascii_alphanumeric() || character == '_' {
+            stem.push(character);
+        } else if !stem.ends_with('-') {
+            stem.push('-');
+        }
+    }
+    // Only ASCII is left, so cutting by bytes cuts by characters.
+    let stem = stem.trim_start_matches('-');
+    let stem = stem[..stem.len().min(max_chars)].trim_end_matches('-');
+    if stem.is_empty() {
+        fallback.to_owned()
+    } else if is_windows_reserved(stem) {
+        format!("{fallback}-{stem}")
+    } else {
+        stem.to_owned()
+    }
+}
+
 /// Resolve a notebook-relative path that must already exist as a file.
 pub fn resolve_file(root: &Path, relative: &str) -> Result<PathBuf, PathError> {
     let path = validate_relative(relative)?;
@@ -234,6 +284,45 @@ mod tests {
             assert!(
                 !is_windows_reserved(ordinary),
                 "`{ordinary}` should be an ordinary name"
+            );
+        }
+    }
+
+    /// Whatever a picked file or a preset is called, the stem built from it is a name the
+    /// filename rule accepts — the two used to be separate code that merely happened to agree.
+    #[test]
+    fn a_safe_stem_always_makes_a_valid_filename() {
+        for (name, expected) in [
+            ("Lecture 3: Thermo (final)", "Lecture-3-Thermo-final"),
+            ("../../My Style", "My-Style"),
+            ("snake_case", "snake_case"),
+            ("Übung", "bung"),
+            ("---", "document"),
+            ("", "document"),
+            ("con", "document-con"),
+            ("LPT1", "document-LPT1"),
+        ] {
+            let stem = safe_stem(name, 90, "document");
+            assert_eq!(stem, expected, "stem of `{name}`");
+            assert!(
+                validate_filename(&format!("{stem}.pdf")).is_ok(),
+                "`{stem}.pdf`"
+            );
+        }
+        assert_eq!(safe_stem("abc def", 4, "x"), "abc");
+        for invalid in [
+            "",
+            ".pdf",
+            "page.",
+            "page",
+            "a/b.pdf",
+            "con.pdf",
+            "nul.tar.gz",
+            "ü.pdf",
+        ] {
+            assert!(
+                validate_filename(invalid).is_err(),
+                "`{invalid}` should be refused"
             );
         }
     }

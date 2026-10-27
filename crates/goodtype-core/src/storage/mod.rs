@@ -52,7 +52,7 @@ pub use write::{
 /// `MAX_INK_POINTS_PER_LAYER` — the limit actually enforced before a write — with
 /// `MAX_INK_BYTES` only having to stay above what that many quantized samples serialize to.
 pub(crate) const MAX_JSON_BYTES: usize = 8 * 1024 * 1024;
-pub(crate) const MAX_INK_BYTES: usize = 64 * 1024 * 1024;
+pub const MAX_INK_BYTES: usize = 64 * 1024 * 1024;
 pub(crate) const MAX_INK_STROKES_PER_LAYER: usize = 20_000;
 pub(crate) const MAX_INK_POINTS_PER_LAYER: usize = 750_000;
 pub(crate) const MAX_RECOVERY_BYTES: usize = 192 * 1024 * 1024;

@@ -5,10 +5,7 @@
 //! error type, the `blocks/`-style directory checks, and the write-target preparation that only
 //! a writer needs.
 
-use std::{
-    fs,
-    path::{Component, Path, PathBuf},
-};
+use std::path::{Component, Path, PathBuf};
 
 use crate::{
     SourceRole,
@@ -55,11 +52,14 @@ pub(crate) fn prepare_target(root: &Path, relative: &str) -> Result<PathBuf, Sto
             .file_name()
             .ok_or_else(|| StorageError::InvalidPath(relative.display().to_string()))?,
     );
-    if target.exists() {
-        let metadata = fs::symlink_metadata(&target)?;
-        if metadata.file_type().is_symlink() {
-            return Err(StorageError::InvalidPath(relative.display().to_string()));
+    super::files::reject_symlink(&target).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::InvalidInput {
+            StorageError::InvalidPath(relative.display().to_string())
+        } else {
+            StorageError::Io(error)
         }
+    })?;
+    if target.exists() {
         paths::contained(root, &target, &relative.display().to_string())?;
         if !target.is_file() {
             return Err(StorageError::InvalidPath(relative.display().to_string()));
@@ -103,22 +103,7 @@ pub(crate) fn validate_asset_path(value: &str) -> Result<(), StorageError> {
 }
 
 pub(crate) fn validate_safe_filename(filename: &str) -> Result<(), StorageError> {
-    let safe_characters = filename
-        .bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'));
-    let stem = filename.split('.').next().unwrap_or("");
-    let reserved = paths::is_windows_reserved(stem);
-    if filename.is_empty()
-        || filename.len() > 120
-        || filename.starts_with('.')
-        || filename.ends_with('.')
-        || !filename.contains('.')
-        || !safe_characters
-        || reserved
-    {
-        return Err(StorageError::InvalidPath(filename.into()));
-    }
-    Ok(())
+    Ok(paths::validate_filename(filename)?)
 }
 
 #[cfg(test)]

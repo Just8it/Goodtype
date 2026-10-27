@@ -146,7 +146,7 @@ pub(crate) fn write_atomic(root: &Path, relative: &str, bytes: &[u8]) -> Result<
 pub(crate) fn write_once(root: &Path, relative: &str, bytes: &[u8]) -> Result<(), StorageError> {
     let target = prepare_target(root, relative)?;
     if target.exists() {
-        if fs::read(&target)? == bytes {
+        if has_contents(&target, bytes)? {
             return Ok(());
         }
         return Err(StorageError::AlreadyExists(relative.into()));
@@ -171,18 +171,7 @@ pub(crate) fn write_new(root: &Path, relative: &str, bytes: &[u8]) -> Result<(),
 /// and create/contain the parent directory; this primitive never authorizes a path.
 /// `replace` chooses atomic replacement or creation without overwriting an existing file.
 pub fn persist_atomic(target: &Path, bytes: &[u8], replace: bool) -> io::Result<()> {
-    let reject_symlink = || -> io::Result<()> {
-        match target.symlink_metadata() {
-            Ok(metadata) if metadata.file_type().is_symlink() => Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "write target cannot be a symbolic link",
-            )),
-            Ok(_) => Ok(()),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(error),
-        }
-    };
-    reject_symlink()?;
+    reject_symlink(target)?;
     let parent = target
         .parent()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "write target has no parent"))?;
@@ -192,7 +181,7 @@ pub fn persist_atomic(target: &Path, bytes: &[u8], replace: bool) -> io::Result<
     temporary.as_file().sync_all()?;
     let mut attempt = 0;
     loop {
-        reject_symlink()?;
+        reject_symlink(target)?;
         let result = if replace {
             temporary.persist(target)
         } else {
@@ -212,6 +201,23 @@ pub fn persist_atomic(target: &Path, bytes: &[u8], replace: bool) -> io::Result<
     }
 }
 
+/// Refuse a path that is itself a symbolic link (or junction); a missing path is fine.
+///
+/// A write follows a link, so a file replaced by one would land wherever it points. Checked on the
+/// link rather than through it, which is why this is `symlink_metadata`. Every writer — the store,
+/// the desktop app's own files, the export — uses this one check.
+pub fn reject_symlink(target: &Path) -> io::Result<()> {
+    match target.symlink_metadata() {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "that file cannot be a symbolic link",
+        )),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
 /// Retries spread over roughly a second, longer than an on-access virus scan or a sync client
 /// usually holds a file it just saw change.
 const PERSIST_RETRIES: u32 = 8;
@@ -225,22 +231,51 @@ fn briefly_locked(error: &io::Error) -> bool {
     cfg!(windows) && matches!(error.raw_os_error(), Some(5 | 32))
 }
 
-pub(crate) fn read_limited(path: PathBuf, maximum: usize) -> Result<Vec<u8>, StorageError> {
+/// Read a whole file, refusing one larger than `maximum` before allocating for it.
+///
+/// The size is taken from the open handle, not from a separate `metadata` call on the path, and
+/// the read itself stops one byte past the ceiling, so a file that grows or is swapped between the
+/// check and the read is still refused. Every bounded read in Goodtype goes through here; an
+/// oversized file is reported as [`io::ErrorKind::InvalidData`].
+pub fn read_bounded(path: &Path, maximum: usize) -> io::Result<Vec<u8>> {
+    let too_large = |length: u64| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("file is {length} bytes; maximum is {maximum}"),
+        )
+    };
     let file = fs::File::open(path)?;
     let length = file.metadata()?.len();
     if length > maximum as u64 {
-        return Err(StorageError::InvalidNotebook(format!(
-            "file is {length} bytes; maximum is {maximum}"
-        )));
+        return Err(too_large(length));
     }
     let mut bytes = Vec::with_capacity(length as usize);
     file.take(maximum as u64 + 1).read_to_end(&mut bytes)?;
     if bytes.len() > maximum {
-        return Err(StorageError::InvalidNotebook(format!(
-            "file exceeds {maximum} bytes"
-        )));
+        return Err(too_large(bytes.len() as u64));
     }
     Ok(bytes)
+}
+
+/// Whether the file at `target` holds exactly `bytes`. Reads no more than `bytes.len()` of it, so
+/// a large file at the target is refused by its size rather than read whole to be compared.
+pub(crate) fn has_contents(target: &Path, bytes: &[u8]) -> Result<bool, StorageError> {
+    match read_bounded(target, bytes.len()) {
+        Ok(existing) => Ok(existing == bytes),
+        Err(error) if error.kind() == io::ErrorKind::InvalidData => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// [`read_bounded`] in the store's error type: an oversized file is an invalid notebook.
+pub(crate) fn read_limited(path: PathBuf, maximum: usize) -> Result<Vec<u8>, StorageError> {
+    read_bounded(&path, maximum).map_err(|error| {
+        if error.kind() == io::ErrorKind::InvalidData {
+            StorageError::InvalidNotebook(error.to_string())
+        } else {
+            StorageError::Io(error)
+        }
+    })
 }
 
 #[cfg(test)]
