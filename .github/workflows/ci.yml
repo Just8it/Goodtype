@@ -2,8 +2,15 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [dev, main]
   pull_request:
+    types: [opened, synchronize, reopened, edited, ready_for_review]
+  workflow_dispatch:
+
+# Keep every merged dev candidate; only superseded PR checks may be cancelled.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -12,9 +19,27 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  branch-policy:
+    name: Branch policy
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .node-version
+      - run: node scripts/release.mjs policy
+        env:
+          GH_TOKEN: ${{ github.token }}
+
   windows:
     name: Windows verification
     runs-on: windows-2025
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v6
       - uses: pnpm/action-setup@v6
@@ -25,6 +50,20 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: cargo xtask doctor
       - run: cargo xtask verify
+      - name: Build and test portable Windows package
+        shell: pwsh
+        env:
+          BUILD_CHANNEL: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/dev' && 'dev' || 'stable') || 'local' }}
+        run: ./scripts/build-windows-demo.ps1 -Channel $env:BUILD_CHANNEL
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2, same as the importers
+        with:
+          name: windows-x64
+          path: |
+            target/Goodtype-Windows-*.zip
+            target/Goodtype-Windows-*.json
+            target/Goodtype-Windows-*.sha256
+          if-no-files-found: error
+          retention-days: 14
 
   build-smoke:
     name: ${{ matrix.os }} build smoke
@@ -53,3 +92,26 @@ jobs:
         env:
           TAURI_CONFIG: '{"bundle":{"externalBin":[]}}'
       - run: pnpm build
+
+  release:
+    name: Publish Windows release
+    if: github.event_name == 'push'
+    needs: [branch-policy, windows, build-smoke]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .node-version
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2, same as the importers
+        with:
+          name: windows-x64
+          path: release-assets
+      - name: Publish an immutable candidate or stable version
+        run: node scripts/release.mjs publish release-assets
+        env:
+          GH_TOKEN: ${{ github.token }}
