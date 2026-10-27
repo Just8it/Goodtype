@@ -168,6 +168,7 @@ fn export_page_from_bundle(
             pressure: stroke.pressure,
             taper: stroke.taper,
             opacity: stroke.opacity,
+            trim: stroke.trim,
             points: stroke
                 .points
                 .iter()

@@ -24,6 +24,16 @@ pub struct OutlineOptions {
     pub pressure: bool,
     /// Fraction of the stroke length over which the ends taper to a point; 0 disables.
     pub taper: f64,
+    /// For a fragment left by the precise eraser: how much of the original stroke lies before and
+    /// after it, in the same units as the points. `None` for a stroke drawn whole.
+    pub trim: Option<OutlineTrim>,
+}
+
+/// Arc length of the original stroke cut away before and after a fragment (ADR 0037).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OutlineTrim {
+    pub start: f64,
+    pub end: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -105,15 +115,23 @@ fn outline_samples(points: &[OutlinePoint], options: &OutlineOptions) -> Vec<(Ou
         }
     }
 
-    if path
-        .iter()
-        .all(|point| span(*point, path[0]) <= options.width_pt / 2.0)
+    // A fragment keeps its real geometry, however short: a full-width dot would be fatter than the
+    // ink it stands for and could reach back into the area the eraser just cleared.
+    if options.trim.is_none()
+        && path
+            .iter()
+            .all(|point| span(*point, path[0]) <= options.width_pt / 2.0)
     {
         return vec![(path[0], options.width_pt / 2.0)];
     }
 
-    // Two tapered endpoints have zero width; retain a middle section without a move sample.
-    if path.len() == 2 && options.taper > 0.0 {
+    let (before, after) = options
+        .trim
+        .map_or((0.0, 0.0), |trim| (trim.start, trim.end));
+
+    // Two tapered endpoints have zero width; retain a middle section without a move sample. A cut
+    // end keeps its width, so a fragment only needs this when both of its ends are original tips.
+    if path.len() == 2 && options.taper > 0.0 && before == 0.0 && after == 0.0 {
         let (first, last) = (path[0], path[1]);
         path.insert(
             1,
@@ -134,8 +152,9 @@ fn outline_samples(points: &[OutlinePoint], options: &OutlineOptions) -> Vec<(Ou
         cumulative.push(cumulative[index - 1] + dx.hypot(dy));
     }
     let total = cumulative[cumulative.len() - 1];
+    // The taper belongs to the original stroke: a fragment measures it from the original ends.
     let taper_length = if options.taper > 0.0 {
-        (total * options.taper).min(options.width_pt * TAPER_MAX_NIB_WIDTHS)
+        ((before + total + after) * options.taper).min(options.width_pt * TAPER_MAX_NIB_WIDTHS)
     } else {
         0.0
     };
@@ -145,8 +164,8 @@ fn outline_samples(points: &[OutlinePoint], options: &OutlineOptions) -> Vec<(Ou
         .map(|(index, point)| {
             let ramp = if taper_length > 0.0 {
                 1.0_f64
-                    .min(cumulative[index] / taper_length)
-                    .min((total - cumulative[index]) / taper_length)
+                    .min((before + cumulative[index]) / taper_length)
+                    .min((after + total - cumulative[index]) / taper_length)
             } else {
                 1.0
             };
@@ -288,6 +307,8 @@ mod tests {
         width_pt: f64,
         pressure: bool,
         taper: f64,
+        #[serde(default)]
+        trim: Option<[f64; 2]>,
         expected: Vec<[f64; 2]>,
     }
 
@@ -315,6 +336,7 @@ mod tests {
                     width_pt: case.width_pt,
                     pressure: case.pressure,
                     taper: case.taper,
+                    trim: case.trim.map(|[start, end]| OutlineTrim { start, end }),
                 },
             );
             let produced: Vec<[f64; 2]> = produced.iter().map(|v| [v.x, v.y]).collect();
@@ -340,6 +362,7 @@ mod tests {
             width_pt: 4.0,
             pressure: true,
             taper: 0.0,
+            trim: None,
         };
         let polygon = outline_points(&points, &options);
         // First point at zero pressure is the narrowest allowed; the last is the full width.
@@ -356,6 +379,8 @@ mod tests {
             width_pt: f64,
             pressure: bool,
             taper: f64,
+            #[serde(default)]
+            trim: Option<[f64; 2]>,
             expected: Vec<Vec<[f64; 2]>>,
         }
         let cases: Vec<RoundedCase> =
@@ -377,6 +402,7 @@ mod tests {
                     width_pt: case.width_pt,
                     pressure: case.pressure,
                     taper: case.taper,
+                    trim: case.trim.map(|[start, end]| OutlineTrim { start, end }),
                 },
             );
             let actual: Vec<Vec<[f64; 2]>> = polygons
@@ -399,6 +425,7 @@ mod tests {
                 width_pt: 2.0,
                 pressure: false,
                 taper: 0.0,
+                trim: None,
             },
         );
         assert_eq!(polygon.len(), 12);

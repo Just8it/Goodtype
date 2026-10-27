@@ -1131,6 +1131,7 @@ mod tests {
                 opacity: 1.0,
                 pattern: StrokePattern::Solid,
                 pattern_spacing: 1.0,
+                pattern_offset_pt: 0.0,
             },
         });
         with_shape.page.reading_order.push("shape-1".into());

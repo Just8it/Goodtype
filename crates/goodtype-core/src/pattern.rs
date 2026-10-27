@@ -66,16 +66,30 @@ fn point_at(path: &[MeasuredPoint], distance: f64, segment: &mut usize) -> Outli
 pub const MIN_PATTERN_SPACING: f64 = 0.5;
 pub const MAX_PATTERN_SPACING: f64 = 3.0;
 
-fn dashed_runs(path: &[MeasuredPoint], width_pt: f64, spacing: f64) -> Vec<Vec<OutlinePoint>> {
+fn dashed_runs(
+    path: &[MeasuredPoint],
+    width_pt: f64,
+    spacing: f64,
+    offset: f64,
+) -> Vec<Vec<OutlinePoint>> {
     let total = path.last().map(|point| point.distance).unwrap_or(0.0);
     let dash = (width_pt * 4.0).max(6.0);
     let gap = (width_pt * 2.5).max(3.5) * spacing;
     let mut runs = Vec::new();
-    let mut start = 0.0;
+    // A fragment continues its original's dashes, so the first one may already be under way.
+    let mut start = if offset > 0.0 {
+        -(offset % (dash + gap))
+    } else {
+        0.0
+    };
     let mut segment = 0;
     while start < total {
         let end = (start + dash).min(total);
-        let mut run = vec![point_at(path, start, &mut segment)];
+        if end <= 0.0 {
+            start += dash + gap;
+            continue;
+        }
+        let mut run = vec![point_at(path, start.max(0.0), &mut segment)];
         let mut inside = segment + 1;
         while inside < path.len() && path[inside].distance < end {
             run.push(path[inside].point);
@@ -91,11 +105,21 @@ fn dashed_runs(path: &[MeasuredPoint], width_pt: f64, spacing: f64) -> Vec<Vec<O
     runs
 }
 
-fn dotted_runs(path: &[MeasuredPoint], width_pt: f64, factor: f64) -> Vec<Vec<OutlinePoint>> {
+fn dotted_runs(
+    path: &[MeasuredPoint],
+    width_pt: f64,
+    factor: f64,
+    offset: f64,
+) -> Vec<Vec<OutlinePoint>> {
     let total = path.last().map(|point| point.distance).unwrap_or(0.0);
     let mut segment = 0;
     let spacing = (width_pt * 2.75).max(4.0) * factor;
-    let mut distance = 0.0;
+    // A fragment's first dot is the next one its original would have drawn.
+    let mut distance = if offset > 0.0 {
+        (spacing - offset % spacing) % spacing
+    } else {
+        0.0
+    };
     let mut runs = Vec::new();
 
     // Keep the phase fixed at the stroke origin. Redistributing dots across the
@@ -109,11 +133,13 @@ fn dotted_runs(path: &[MeasuredPoint], width_pt: f64, factor: f64) -> Vec<Vec<Ou
 }
 
 /// Centreline runs for a stroke pattern. Public so screen/export parity can be fixture-tested.
+/// `offset` is how far along its original stroke a fragment begins; the phase continues from it.
 pub fn pattern_runs(
     points: &[OutlinePoint],
     width_pt: f64,
     pattern: StrokePattern,
     spacing: f64,
+    offset: f64,
 ) -> Vec<Vec<OutlinePoint>> {
     if points.is_empty() {
         return Vec::new();
@@ -126,8 +152,8 @@ pub fn pattern_runs(
         return vec![vec![path[0].point]];
     }
     match pattern {
-        StrokePattern::Dashed => dashed_runs(&path, width_pt, spacing),
-        StrokePattern::Dotted => dotted_runs(&path, width_pt, spacing),
+        StrokePattern::Dashed => dashed_runs(&path, width_pt, spacing, offset),
+        StrokePattern::Dotted => dotted_runs(&path, width_pt, spacing, offset),
         StrokePattern::Solid => unreachable!(),
     }
 }
@@ -140,7 +166,8 @@ pub fn patterned_outline_points(
     spacing: f64,
     round: bool,
 ) -> Vec<Vec<Vertex>> {
-    let runs = pattern_runs(points, options.width_pt, pattern, spacing);
+    let offset = options.trim.map_or(0.0, |trim| trim.start);
+    let runs = pattern_runs(points, options.width_pt, pattern, spacing, offset);
     if pattern == StrokePattern::Solid {
         return runs
             .iter()
@@ -163,6 +190,7 @@ pub fn patterned_outline_points(
 
     let segment_options = OutlineOptions {
         taper: 0.0,
+        trim: None,
         ..*options
     };
     runs.iter()
@@ -206,7 +234,7 @@ mod tests {
 
     #[test]
     fn dashed_runs_follow_page_distance() {
-        let runs = pattern_runs(&line(), 2.0, StrokePattern::Dashed, 1.0);
+        let runs = pattern_runs(&line(), 2.0, StrokePattern::Dashed, 1.0, 0.0);
         let ends: Vec<[f64; 2]> = runs
             .iter()
             .map(|run| [run[0].x, run.last().unwrap().x])
@@ -216,17 +244,17 @@ mod tests {
 
     #[test]
     fn dotted_runs_are_anchored_at_the_stroke_origin() {
-        let runs = pattern_runs(&line(), 2.0, StrokePattern::Dotted, 1.0);
+        let runs = pattern_runs(&line(), 2.0, StrokePattern::Dotted, 1.0, 0.0);
         let centers: Vec<f64> = runs.iter().map(|run| run[0].x).collect();
         assert_eq!(centers, [0.0, 5.5, 11.0, 16.5]);
     }
 
     #[test]
     fn spacing_scales_only_the_gaps_like_the_editor() {
-        let dots = pattern_runs(&line(), 2.0, StrokePattern::Dotted, 2.0);
+        let dots = pattern_runs(&line(), 2.0, StrokePattern::Dotted, 2.0, 0.0);
         let centers: Vec<f64> = dots.iter().map(|run| run[0].x).collect();
         assert_eq!(centers, [0.0, 11.0]);
-        let dashes = pattern_runs(&line(), 2.0, StrokePattern::Dashed, 2.0);
+        let dashes = pattern_runs(&line(), 2.0, StrokePattern::Dashed, 2.0, 0.0);
         assert_eq!([dashes[0].last().unwrap().x, dashes[1][0].x], [8.0, 18.0]);
     }
 
@@ -249,8 +277,8 @@ mod tests {
                 pressure: 1.0,
             },
         ];
-        let dots_before = pattern_runs(&line(), 2.0, StrokePattern::Dotted, 1.0);
-        let dots_after = pattern_runs(&longer_line, 2.0, StrokePattern::Dotted, 1.0);
+        let dots_before = pattern_runs(&line(), 2.0, StrokePattern::Dotted, 1.0, 0.0);
+        let dots_after = pattern_runs(&longer_line, 2.0, StrokePattern::Dotted, 1.0, 0.0);
         assert_eq!(&dots_after[..dots_before.len()], dots_before.as_slice());
 
         let dash_prefix = vec![
@@ -270,14 +298,14 @@ mod tests {
                 pressure: 1.0,
             },
         ];
-        let completed_dashes = pattern_runs(&dash_prefix, 2.0, StrokePattern::Dashed, 1.0);
+        let completed_dashes = pattern_runs(&dash_prefix, 2.0, StrokePattern::Dashed, 1.0, 0.0);
         let mut extended_dash = dash_prefix.clone();
         extended_dash.push(OutlinePoint {
             x: 40.0,
             y: 0.0,
             pressure: 1.0,
         });
-        let extended_dashes = pattern_runs(&extended_dash, 2.0, StrokePattern::Dashed, 1.0);
+        let extended_dashes = pattern_runs(&extended_dash, 2.0, StrokePattern::Dashed, 1.0, 0.0);
         assert_eq!(
             &extended_dashes[..completed_dashes.len()],
             completed_dashes.as_slice()
@@ -292,6 +320,7 @@ mod tests {
                 width_pt: 2.0,
                 pressure: false,
                 taper: 0.0,
+                trim: None,
             },
             StrokePattern::Dashed,
             1.0,
@@ -320,11 +349,46 @@ mod tests {
                 width_pt: 2.0,
                 pressure: false,
                 taper: 0.0,
+                trim: None,
             },
             StrokePattern::Dashed,
             1.0,
             false,
         );
         assert_eq!(tap.len(), 1);
+    }
+
+    /// The precise eraser's promise: what is left of a patterned stroke keeps every mark where it
+    /// was, because the fragment continues its original's phase instead of starting a new one.
+    #[test]
+    fn a_fragment_keeps_its_original_marks_in_place() {
+        let from = |x: f64| {
+            vec![
+                OutlinePoint {
+                    x,
+                    y: 0.0,
+                    pressure: 1.0,
+                },
+                OutlinePoint {
+                    x: 60.0,
+                    y: 0.0,
+                    pressure: 1.0,
+                },
+            ]
+        };
+        let rounded = |value: f64| (value * 1e9).round() / 1e9;
+        for pattern in [StrokePattern::Dashed, StrokePattern::Dotted] {
+            for cut in [3.0, 9.5, 14.0, 27.25] {
+                let whole = pattern_runs(&from(0.0), 2.0, pattern, 1.0, 0.0);
+                let fragment = pattern_runs(&from(cut), 2.0, pattern, 1.0, cut);
+                let expected: Vec<f64> = whole
+                    .iter()
+                    .filter(|run| run.last().unwrap().x > cut || run[0].x >= cut)
+                    .map(|run| rounded(run[0].x.max(cut)))
+                    .collect();
+                let actual: Vec<f64> = fragment.iter().map(|run| rounded(run[0].x)).collect();
+                assert_eq!(actual, expected, "{pattern:?} cut at {cut}");
+            }
+        }
     }
 }

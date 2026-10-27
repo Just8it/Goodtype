@@ -206,8 +206,32 @@ pub struct Stroke {
     /// is not, and because the setting can change after the stroke was laid down.
     pub opacity: f64,
     pub group_id: Option<String>,
+    /// Where this stroke sat inside the stroke it was cut from by the precise eraser (ADR 0037).
+    /// Absent on every stroke that was drawn whole, so ordinary ink serializes exactly as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trim: Option<StrokeTrim>,
     pub points: Vec<StrokePoint>,
     pub transform: Transform,
+}
+
+/// Arc length of the original stroke that lies before and after a cut fragment, in the stroke's
+/// own points. The taper and the pattern phase are measured from the original ends, so without
+/// this every cut would grow new pointed tips and shift every dash and dot left behind.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StrokeTrim {
+    pub start_pt: f64,
+    pub end_pt: f64,
+}
+
+/// Largest trim the store accepts; far beyond any page, small enough to stay exact in f64.
+pub const MAX_STROKE_TRIM_PT: f64 = 1.0e6;
+
+impl StrokeTrim {
+    pub fn is_valid(&self) -> bool {
+        (0.0..=MAX_STROKE_TRIM_PT).contains(&self.start_pt)
+            && (0.0..=MAX_STROKE_TRIM_PT).contains(&self.end_pt)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]

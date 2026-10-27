@@ -2,7 +2,8 @@ use std::path::{Path, PathBuf};
 
 use goodtype_core::{
     PageBackground, PageGeometry, ShapeGeometry, ShapePoint, ShapeStyle, StrokePattern, StrokeTool,
-    outline::{OutlineOptions, OutlinePoint},
+    StrokeTrim,
+    outline::{OutlineOptions, OutlinePoint, OutlineTrim},
     pattern::patterned_outline_points,
     template::{Area, Edge, TemplateElement, TemplateShape, resolve},
 };
@@ -59,6 +60,9 @@ pub struct ExportStroke {
     /// Ink opacity, 0–1. A highlighter sweep is translucent; leaving it out is what made a
     /// highlighter come out solid in the PDF while it was see-through on screen.
     pub opacity: f64,
+    /// Lineage of a fragment left by the precise eraser, so the PDF keeps its original taper and
+    /// pattern phase exactly as the screen does (ADR 0037).
+    pub trim: Option<StrokeTrim>,
     pub points: Vec<ExportPoint>,
     pub transform: ExportTransform,
 }
@@ -890,6 +894,12 @@ fn ink_svg_for<'a>(
                 width_pt: stroke.width_pt * scale,
                 pressure: stroke.pressure,
                 taper: stroke.taper,
+                // Stored in the stroke's own points; the silhouette is built after the transform,
+                // so the lineage scales with it exactly as the width does.
+                trim: stroke.trim.map(|trim| OutlineTrim {
+                    start: trim.start_pt * scale,
+                    end: trim.end_pt * scale,
+                }),
             },
             stroke.pattern,
             stroke.pattern_spacing,
@@ -999,7 +1009,20 @@ fn shape_element(shape: &ExportShape) -> String {
     let dash = shape_dash_array(&shape.style)
         .map(|[dash, gap]| {
             let tidy = |value: f64| (value * 1000.0).round() / 1000.0;
-            format!(r#" stroke-dasharray="{} {}""#, tidy(dash), tidy(gap))
+            // A piece cut by the precise eraser continues its original's dashes (ADR 0037).
+            let offset = if shape.style.pattern_offset_pt > 0.0 {
+                format!(
+                    r#" stroke-dashoffset="{}""#,
+                    tidy(shape.style.pattern_offset_pt)
+                )
+            } else {
+                String::new()
+            };
+            format!(
+                r#" stroke-dasharray="{} {}"{offset}"#,
+                tidy(dash),
+                tidy(gap)
+            )
         })
         .unwrap_or_default();
     let common = format!(
@@ -1122,6 +1145,7 @@ mod tests {
                 pressure: false,
                 taper: 0.0,
                 opacity: 1.0,
+                trim: None,
                 points: vec![
                     ExportPoint {
                         x: 10.0,
@@ -1201,6 +1225,7 @@ mod tests {
                 opacity: 1.0,
                 pattern: StrokePattern::Solid,
                 pattern_spacing: 1.0,
+                pattern_offset_pt: 0.0,
             },
         });
         let bytes = render_page_pdf(root.path(), &mixed).unwrap();
@@ -1324,6 +1349,7 @@ mod tests {
                 opacity: 1.0,
                 pattern: StrokePattern::Solid,
                 pattern_spacing: 1.0,
+                pattern_offset_pt: 0.0,
             },
         });
 
@@ -1344,6 +1370,15 @@ mod tests {
         // At 1.6pt: dashes of max(6.4, 6) - 1.6 and gaps of max(4, 3.5) + 1.6, as on screen.
         let dashed = patterned(StrokePattern::Dashed);
         assert!(dashed.contains(r#"stroke-dasharray="4.8 5.6""#), "{dashed}");
+        assert!(!dashed.contains("stroke-dashoffset"), "{dashed}");
+        let mut piece = page.shapes[0].clone();
+        piece.style.pattern = StrokePattern::Dashed;
+        piece.style.pattern_offset_pt = 12.5;
+        let continued = shape_svg(&page, &[&piece]);
+        assert!(
+            continued.contains(r#"stroke-dasharray="4.8 5.6" stroke-dashoffset="12.5""#),
+            "{continued}"
+        );
         let dotted = patterned(StrokePattern::Dotted);
         assert!(
             dotted.contains(r#"stroke-dasharray="0.01 4.4""#),
@@ -1378,6 +1413,7 @@ mod tests {
                 opacity: 1.0,
                 pattern: StrokePattern::Solid,
                 pattern_spacing: 1.0,
+                pattern_offset_pt: 0.0,
             },
         };
 

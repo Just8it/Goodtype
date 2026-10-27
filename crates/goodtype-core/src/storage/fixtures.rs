@@ -113,6 +113,7 @@ pub(super) fn snapshot() -> NotebookSnapshot {
                 taper: 0.0,
                 opacity: 1.0,
                 group_id: None,
+                trim: None,
                 points: vec![StrokePoint {
                     x: 80.0,
                     y: 140.0,
@@ -165,6 +166,7 @@ pub(super) fn handwriting_layer(strokes: usize, points_per_stroke: usize) -> Ink
                 taper: 0.0,
                 opacity: 1.0,
                 group_id: None,
+                trim: None,
                 points: (0..points_per_stroke)
                     .map(|point| {
                         let step = (stroke * points_per_stroke + point) as f64;

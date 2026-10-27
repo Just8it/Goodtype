@@ -11,7 +11,7 @@ use crate::storage::{
 };
 use crate::{
     InkLayer, MIN_SUPPORTED_SCHEMA_VERSION, SCHEMA_VERSION, Stroke, StrokePattern, StrokePoint,
-    StrokeTool, Transform,
+    StrokeTool, StrokeTrim, Transform,
 };
 
 const MAGIC: &[u8; 8] = b"GTINK\0\r\n";
@@ -20,9 +20,14 @@ const CODEC_VERSION: u32 = 1;
 /// as codec 2 only when a stroke actually carries a spacing, so ordinary layers keep their exact
 /// codec-1 bytes and older readers fail visibly only on ink they could not render correctly.
 const CODEC_VERSION_SPACING: u32 = 2;
+/// Codec 3 is codec 2 plus an optional per-stroke `trim` (ADR 0037), written only when the
+/// precise eraser has cut a stroke on this layer.
+const CODEC_VERSION_TRIM: u32 = 3;
 
 fn codec_version(layer: &InkLayer) -> u32 {
-    if layer
+    if layer.strokes.iter().any(|stroke| stroke.trim.is_some()) {
+        CODEC_VERSION_TRIM
+    } else if layer
         .strokes
         .iter()
         .any(|stroke| !crate::is_unit_spacing(&stroke.pattern_spacing))
@@ -62,6 +67,9 @@ struct StrokeMetadata {
     taper: f64,
     opacity: f64,
     group_id: Option<String>,
+    /// Codec 3 only; its presence in older metadata is rejected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    trim: Option<StrokeTrim>,
     point_count: u32,
     transform: TransformMetadata,
 }
@@ -131,7 +139,7 @@ pub fn decode(bytes: &[u8]) -> Result<InkLayer, StorageError> {
     }
 
     let version = header_u32(bytes, 8)?;
-    if version != CODEC_VERSION && version != CODEC_VERSION_SPACING {
+    if !(CODEC_VERSION..=CODEC_VERSION_TRIM).contains(&version) {
         return invalid(format!("unsupported binary ink codec version {version}"));
     }
     let metadata_len = usize::try_from(header_u32(bytes, 12)?)
@@ -189,6 +197,9 @@ pub fn decode(bytes: &[u8]) -> Result<InkLayer, StorageError> {
     {
         return invalid("codec-1 binary ink cannot carry patternSpacing");
     }
+    if version < CODEC_VERSION_TRIM && metadata.strokes.iter().any(|stroke| stroke.trim.is_some()) {
+        return invalid("binary ink before codec 3 cannot carry trim");
+    }
 
     let mut offset = metadata_end;
     let mut strokes = Vec::with_capacity(metadata.strokes.len());
@@ -216,6 +227,7 @@ pub fn decode(bytes: &[u8]) -> Result<InkLayer, StorageError> {
             taper: stroke.taper,
             opacity: stroke.opacity,
             group_id: stroke.group_id,
+            trim: stroke.trim,
             points,
             transform: Transform {
                 translate_x: stroke.transform.translate_x,
@@ -265,6 +277,7 @@ fn metadata_bytes(layer: &InkLayer) -> Result<(Vec<u8>, usize), StorageError> {
                     taper: stroke.taper,
                     opacity: stroke.opacity,
                     group_id: stroke.group_id.clone(),
+                    trim: stroke.trim,
                     point_count: u32::try_from(stroke.points.len())
                         .map_err(|_| invalid_error("binary ink stroke sample count exceeds u32"))?,
                     transform: TransformMetadata {
@@ -368,6 +381,7 @@ mod tests {
                 taper: f64::from_bits(0x3fc9_9999_9999_999a),
                 opacity: f64::from_bits(0x3fe0_0000_0000_0001),
                 group_id: Some("group-1".into()),
+                trim: None,
                 points: vec![
                     StrokePoint {
                         x: -0.0,
@@ -446,6 +460,45 @@ mod tests {
         let mut relabelled = encoded.clone();
         relabelled[8..12].copy_from_slice(&CODEC_VERSION.to_le_bytes());
         assert!(decode(&relabelled).is_err());
+    }
+
+    #[test]
+    fn trim_selects_codec_3_round_trips_and_is_refused_by_older_codecs() {
+        assert!(!String::from_utf8_lossy(&encode(&layer()).unwrap()).contains("trim"));
+
+        let mut cut = layer();
+        cut.strokes[0].pattern_spacing = 2.25;
+        cut.strokes[0].trim = Some(StrokeTrim {
+            start_pt: f64::from_bits(0x4029_0000_0000_0001),
+            end_pt: 0.0,
+        });
+        let encoded = encode(&cut).unwrap();
+        assert_eq!(header_u32(&encoded, 8).unwrap(), CODEC_VERSION_TRIM);
+        assert_eq!(encoded.len(), encoded_len(&cut).unwrap());
+        let decoded = decode(&encoded).unwrap();
+        let trim = decoded.strokes[0].trim.unwrap();
+        assert_f64(trim.start_pt, f64::from_bits(0x4029_0000_0000_0001));
+        assert_f64(trim.end_pt, 0.0);
+        assert_eq!(decoded.strokes[0].pattern_spacing, 2.25);
+
+        for older in [CODEC_VERSION, CODEC_VERSION_SPACING] {
+            let mut relabelled = encoded.clone();
+            relabelled[8..12].copy_from_slice(&older.to_le_bytes());
+            assert!(decode(&relabelled).is_err(), "codec {older} accepted trim");
+        }
+    }
+
+    #[test]
+    fn invalid_trim_is_rejected_before_encoding() {
+        for (start_pt, end_pt) in [
+            (-1.0, 0.0),
+            (0.0, f64::NAN),
+            (crate::MAX_STROKE_TRIM_PT * 2.0, 0.0),
+        ] {
+            let mut cut = layer();
+            cut.strokes[0].trim = Some(StrokeTrim { start_pt, end_pt });
+            assert!(encode(&cut).is_err(), "{start_pt} {end_pt}");
+        }
     }
 
     #[test]
@@ -563,7 +616,7 @@ mod tests {
         wrong_magic[0] ^= 0xff;
         assert!(decode(&wrong_magic).is_err());
         let mut future = encoded;
-        future[8..12].copy_from_slice(&(CODEC_VERSION_SPACING + 1).to_le_bytes());
+        future[8..12].copy_from_slice(&(CODEC_VERSION_TRIM + 1).to_le_bytes());
         assert!(decode(&future).is_err());
     }
 
