@@ -118,8 +118,11 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-windows-
 ```
 
 The script installs locked frontend dependencies, builds the release app and ink decoder, then
-creates `target\Goodtype-Windows-<date>-<time>\` and the matching `.zip`. Both contain
-`Goodtype.exe`, `tinymist.exe`, `goodtype-ink.exe`, `ink-v1.md`, and `README.txt`.
+creates `target\Goodtype-Windows-<version>-local.<timestamp>\` and the matching `.zip`.
+Both contain `Goodtype.exe`, `tinymist.exe`, `goodtype-ink.exe`, `ink-v1.md`, `README.txt`,
+`LICENSE`, and `NOTICE`. A JSON manifest and `.sha256` alongside the ZIP record the version,
+source commit, dirty-source status, and checksums. The script checks a fresh extraction,
+the executable's version and the relocated ink decoder before reporting success.
 Open `Goodtype.exe` directly; keep the entire folder together. No launcher script is needed.
 The build is not code-signed, so SmartScreen
 will warn about an unrecognised app.
@@ -143,7 +146,44 @@ the two cannot drift apart without failing `cargo xtask verify`.
 ## Contributing
 
 Issues and pull requests are welcome. `cargo xtask verify` is the gate; it runs formatting, Clippy
-with warnings denied, both test suites, type-checking, and a production build, and it runs offline.
+with warnings denied, Rust/frontend/release tests, type-checking, and a production build, and it runs offline.
+
+### Branches and releases
+
+Use **feature branch → `dev` → tested Windows candidate → `main`**.
+
+- Start feature/fix branches from `dev` and open small PRs against `dev`. Both long-lived
+  branches require PRs, passing CI and resolved conversations; force pushes and deletion are blocked.
+- Every successful push to `dev` runs full verification, macOS/Linux build smoke checks and
+  portable Windows packaging. It publishes a uniquely versioned prerelease
+  `v<base>-dev.<workflow-run-number>.<attempt>` with the ZIP, JSON manifest and SHA-256 file.
+  Candidates are also downloadable as the run's `windows-x64` artifact for 14 days.
+- Test that exact extracted candidate on Windows. Record the build tag, actual tests/results
+  and remaining limitations; automated integrity/decoder checks do not establish physical pen,
+  touch or recovery validation. Agents must not claim unperformed tests or promote unaccepted
+  interaction changes solely because CI is green.
+- Open a **`dev` → `main`** promotion PR. Its body must include these two lines with real values:
+
+  ```text
+  Tested dev build: v0.1.0-dev.123.1
+  Test evidence: describe the completed tests, results and any accepted limitations
+  ```
+
+  CI checks that the candidate is published, the dev build passed, its tag points to the exact
+  dev head, and the stable version does not already exist. New changes to dev require a new
+  candidate and a new test record. Merge the promotion with a merge commit to retain ancestry.
+- A push to `main` verifies and rebuilds the portable package from the promoted source, then
+  publishes the stable `v<base>` release. This is a rebuild, so its hashes differ from the dev ZIP.
+  Neither channel overwrites published tags/assets; failed builds publish nothing. A retry after
+  a published stable release fails safely rather than replacing it.
+- Before the next stable promotion, update the shared base version together in `Cargo.toml`,
+  `apps/desktop/package.json`, `apps/desktop/src-tauri/tauri.conf.json`, and `Cargo.lock` through
+  a feature PR to dev. Synchronize main back into dev through a PR after promotion.
+
+`main` is the stable publication channel; current packages remain unsigned development software.
+Local package cleanup keeps only the newest two successful verified builds and their ZIPs;
+it must preserve notebooks, originals, backups and Git worktrees. GitHub release history is
+retained independently; local cleanup never deletes remote releases.
 
 ## License
 
