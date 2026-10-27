@@ -1,7 +1,10 @@
+import { get } from "svelte/store";
+import { locale } from "../i18n";
+import { translate, formatNumber } from "../i18n";
 import { invoke } from "@tauri-apps/api/core";
 
-// The optional Goodnotes importer (ADR 0029). Rust owns the download, the installation, the
-// source path and the process; this side only asks and shows.
+// The optional Goodnotes and OneNote importers (ADR 0029, 0032). Rust owns the download, the
+// installation, the source path and the process; this side only asks and shows.
 
 export type NotebookOutcomeStatus = "imported" | "failed" | "needsArtwork" | "cancelled" | "alreadyThere";
 
@@ -49,27 +52,41 @@ export type ImporterStatus = {
   updateProblem: string | null;
 };
 
-export const importerStatus = () => invoke<ImporterStatus>("goodnotes_importer_status");
+/** The optional importers. Each keeps its own installation, chosen file and job in Rust. */
+export type ImporterId = "goodnotes" | "onenote";
+export const IMPORTERS: ImporterId[] = ["goodnotes", "onenote"];
+
+export const importerStatus = (tool: ImporterId) => invoke<ImporterStatus>("importer_status", { tool });
 
 /** Starts the download of the pinned release. Only ever from the user's explicit action. */
-export const installImporter = () => invoke<void>("goodnotes_importer_install");
-export const checkImporterUpdate = () => invoke<void>("goodnotes_importer_check_update");
-export const updateImporter = () => invoke<void>("goodnotes_importer_update");
+export const installImporter = (tool: ImporterId) => invoke<void>("importer_install", { tool });
+export const checkImporterUpdate = (tool: ImporterId) => invoke<void>("importer_check_update", { tool });
+export const updateImporter = (tool: ImporterId) => invoke<void>("importer_update", { tool });
 
-export const cancelImporter = () => invoke<void>("goodnotes_importer_cancel");
+export const cancelImporter = (tool: ImporterId) => invoke<void>("importer_cancel", { tool });
 
-export const dismissImporter = () => invoke<void>("goodnotes_importer_dismiss");
+export const dismissImporter = (tool: ImporterId) => invoke<void>("importer_dismiss", { tool });
 
 /** Native file dialog in Rust; the chosen path never comes here. */
-export const pickImportSource = () =>
-  invoke<{ name: string; sizeBytes: number } | null>("goodnotes_import_pick_source");
+export const pickImportSource = (tool: ImporterId) =>
+  invoke<{ name: string; sizeBytes: number } | null>("import_pick_source", { tool, uiLanguage: get(locale) });
 
 /**
  * Imports the picked source into a new batch folder inside the Library folder `parent`, or with
  * `into` adds what is missing to an earlier batch.
  */
-export const startImport = (parent: string, allowDerived: boolean, into: string | null = null) =>
-  invoke<void>("goodnotes_import_start", { parent, allowDerived, into });
+export const startImport = (
+  tool: ImporterId,
+  parent: string,
+  allowDerived: boolean,
+  into: string | null = null,
+) => invoke<void>("import_start", { tool, parent, allowDerived, into });
+
+/** Every importer's status, for the Library toolbar and for choosing which tab to open. */
+export async function allImporterStatus(): Promise<Record<ImporterId, ImporterStatus>> {
+  const [goodnotes, onenote] = await Promise.all(IMPORTERS.map(importerStatus));
+  return { goodnotes, onenote };
+}
 
 /** True while a download, install or import is running. */
 export function importerBusy(activity: ImporterActivity): boolean {
@@ -78,7 +95,7 @@ export function importerBusy(activity: ImporterActivity): boolean {
 
 export function megabytes(bytes: number): string {
   const value = bytes / (1024 * 1024);
-  return `${value < 10 ? value.toFixed(1) : Math.round(value)} MB`;
+  return translate("ipc.mb", { "value1": formatNumber(value, { maximumFractionDigits: value < 10 ? 1 : 0 }) });
 }
 
 /** Counts for the result summary, in the order the sentence names them. */

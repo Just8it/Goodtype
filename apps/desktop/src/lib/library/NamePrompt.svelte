@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { t } from "../i18n";
   import { untrack } from "svelte";
   import { focusTrap } from "../workspace/focus";
   import { nameProblem } from "./library";
@@ -32,7 +33,7 @@
   let value = $state(untrack(() => initial));
   let field = $state<HTMLInputElement>();
 
-  const problem = $derived(value ? nameProblem(value) : null);
+  const problem = $derived(value ? nameProblem(value, $t) : null);
   const ready = $derived(value.length > 0 && problem === null && !busy);
 
   $effect(() => {
@@ -77,7 +78,7 @@
       <!-- Reserves its line whether or not there is a problem, so the buttons never jump. -->
       <p id="name-prompt-problem" class="problem" class:shown={problem !== null}>{problem ?? " "}</p>
       <div class="actions">
-        <button type="button" class="quiet" disabled={busy} onclick={onCancel}>Abbrechen</button>
+        <button type="button" class="quiet" disabled={busy} onclick={onCancel}>{$t("library.cancel")}</button>
         <button type="submit" class="primary" disabled={!ready}>{confirmLabel}</button>
       </div>
     </form>

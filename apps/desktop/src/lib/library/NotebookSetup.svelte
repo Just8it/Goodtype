@@ -1,10 +1,13 @@
 <script lang="ts">
+  import { t } from "../i18n";
   import { onMount } from "svelte";
   import { focusTrap } from "../workspace/focus";
+  import { errorDetails } from "../ipc/errors";
   import { listTypstPresets, pickTypstPreset } from "../ipc/presets";
+  import { presetPresentation } from "../page/presets";
   import type { NotebookSetup, PresetChoice, PresetSummary } from "../page/presets";
-  import { DEFAULT_PAGE_SIZE, PAGE_SIZES, geometryOf, type Orientation } from "../page/sizes";
-  import { PAPER_TONES, templateGroups } from "../page/templates";
+  import { DEFAULT_PAGE_SIZE, PAGE_SIZES, pageSizes, geometryOf, type Orientation } from "../page/sizes";
+  import { PAPER_TONES, paperTones, templateGroups } from "../page/templates";
   import { nameProblem } from "./library";
 
   let { busy = false, onConfirm, onCancel }: {
@@ -25,14 +28,14 @@
   let field = $state<HTMLInputElement>();
 
   const tone = $derived(PAPER_TONES.find((item) => item.id === toneId) ?? PAPER_TONES[0]);
-  const templates = $derived(templateGroups(tone).flatMap((group) => group.templates));
-  const problem = $derived(name ? nameProblem(name) : null);
+  const templates = $derived(templateGroups(tone, $t).flatMap((group) => group.templates));
+  const problem = $derived(name ? nameProblem(name, $t) : null);
   const ready = $derived(Boolean(name) && !problem && !busy);
 
   onMount(async () => {
     field?.focus();
     try { presets = (await listTypstPresets()).filter((item) => item.kind === "builtin"); }
-    catch { failure = "Typst-Voreinstellungen sind gerade nicht verfügbar."; }
+    catch { failure = $t("library.typstPresetsAreNotAvailableRightNow"); }
   });
 
   $effect(() => {
@@ -49,7 +52,7 @@
         if (picked) preset = picked;
         else presetValue = preset.kind === "builtin" ? preset.id : preset.kind === "imported" ? "import" : "none";
       } catch (error) {
-        failure = error instanceof Error ? error.message : String(error);
+        failure = errorDetails(error);
         presetValue = "none";
         preset = { kind: "none" };
       }
@@ -78,46 +81,46 @@
   <div use:focusTrap class="setup" role="dialog" aria-modal="true" aria-labelledby="notebook-setup-title" tabindex="-1">
     <form onsubmit={submit}>
       <header>
-      <h2 id="notebook-setup-title">Neues Notizbuch</h2>
-      <p>Richte das Papier so ein, wie du am liebsten arbeitest.</p>
+      <h2 id="notebook-setup-title">{$t("library.newNotebook")}</h2>
+      <p>{$t("library.setUpThePaperTheWayYou")}</p>
       </header>
 
-      <label class="wide">Name
+      <label class="wide">{$t("library.name")}
       <input bind:this={field} bind:value={name} maxlength="80" autocomplete="off" spellcheck="false" aria-invalid={problem !== null} aria-describedby="notebook-name-help" />
-      <small id="notebook-name-help" class:error={problem}>{problem ?? "Lokal in deiner Goodtype-Bibliothek gespeichert"}</small>
+      <small id="notebook-name-help" class:error={problem}>{problem ?? $t("library.savedLocallyInYourGoodtypeLibrary")}</small>
       </label>
 
       <div class="fields">
-      <label>Seitengröße
-        <select bind:value={sizeId}>{#each PAGE_SIZES as size}<option value={size.id}>{size.name} · {size.detail}</option>{/each}</select>
+      <label>{$t("library.pageSize")}
+        <select bind:value={sizeId}>{#each pageSizes($t) as size}<option value={size.id}>{size.name} · {size.detail}</option>{/each}</select>
       </label>
       <fieldset>
-        <legend>Ausrichtung</legend>
+        <legend>{$t("library.orientation")}</legend>
         <div class="segmented">
-          <button type="button" class:active={orientation === "portrait"} aria-pressed={orientation === "portrait"} onclick={() => (orientation = "portrait")}>Hochformat</button>
-          <button type="button" class:active={orientation === "landscape"} aria-pressed={orientation === "landscape"} onclick={() => (orientation = "landscape")}>Querformat</button>
+          <button type="button" class:active={orientation === "portrait"} aria-pressed={orientation === "portrait"} onclick={() => (orientation = "portrait")}>{$t("library.portrait")}</button>
+          <button type="button" class:active={orientation === "landscape"} aria-pressed={orientation === "landscape"} onclick={() => (orientation = "landscape")}>{$t("library.landscape")}</button>
         </div>
       </fieldset>
-      <label>Papierfarbe
-        <select bind:value={toneId}>{#each PAPER_TONES as paper}<option value={paper.id}>{paper.name}</option>{/each}</select>
+      <label>{$t("library.paperColour")}
+        <select bind:value={toneId}>{#each paperTones($t) as paper}<option value={paper.id}>{paper.name}</option>{/each}</select>
       </label>
-      <label>Papiervorlage
+      <label>{$t("library.paperTemplate")}
         <select bind:value={templateId}>{#each templates as template}<option value={template.id}>{template.name}</option>{/each}</select>
       </label>
-      <label class="wide">Typst-Voreinstellung
+      <label class="wide">{$t("library.typstPreset")}
         <select value={presetValue} onchange={(event) => void choosePreset(event.currentTarget.value)}>
-          <option value="none">Keine</option>
-          {#each presets as item}<option value={item.id}>{item.name} · {item.description}</option>{/each}
-          <option value="import">.typ-Datei importieren…</option>
+          <option value="none">{$t("library.none")}</option>
+          {#each presets as item}<option value={item.id}>{presetPresentation(item, $t).name} · {presetPresentation(item, $t).description}</option>{/each}
+          <option value="import">{$t("library.importTypFile")}</option>
         </select>
-        <small>Wird beim ersten Öffnen von Seitentext angewendet.</small>
+        <small>{$t("library.appliedTheFirstTimePageTextIs")}</small>
       </label>
       </div>
 
       {#if failure}<p class="failure" role="alert">{failure}</p>{/if}
       <footer>
-        <button type="button" class="quiet" disabled={busy} onclick={onCancel}>Abbrechen</button>
-        <button type="submit" class="primary" disabled={!ready}>Notizbuch anlegen</button>
+        <button type="button" class="quiet" disabled={busy} onclick={onCancel}>{$t("library.cancel")}</button>
+        <button type="submit" class="primary" disabled={!ready}>{$t("library.createNotebook")}</button>
       </footer>
     </form>
   </div>

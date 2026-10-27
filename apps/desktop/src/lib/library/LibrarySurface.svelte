@@ -1,12 +1,20 @@
 <script lang="ts">
+  import { errorDetails } from "../ipc/errors";
+  import { t, notice, type UiText, displayLocale, formatDate } from "../i18n";
   import { onDestroy, untrack } from "svelte";
   import BrandMark from "../brand/BrandMark.svelte";
   import NamePrompt from "./NamePrompt.svelte";
   import NotebookSetup from "./NotebookSetup.svelte";
   import type { NotebookSetup as NotebookSetupValue } from "../page/presets";
   import NotebookCover from "./NotebookCover.svelte";
-  import GoodnotesImport from "./GoodnotesImport.svelte";
-  import { importerBusy, importerStatus } from "../ipc/importer";
+  import ImportPanel from "./ImportPanel.svelte";
+  import {
+    IMPORTERS,
+    allImporterStatus,
+    importerBusy,
+    type ImporterId,
+    type ImporterStatus,
+  } from "../ipc/importer";
   import ShelfMenu, { type ShelfMenuItem } from "./ShelfMenu.svelte";
   import type { ShelfLocation, ShelfView } from "./location";
   import {
@@ -45,6 +53,7 @@
     onLocationChange,
     onStatus,
     showNotebookSetup = false,
+    onSettings,
   }: {
     tauriAvailable: boolean;
     coverRevision?: number;
@@ -66,8 +75,9 @@
     returnLabel?: string;
     onReturn?: () => void;
     onLocationChange?: (location: ShelfLocation) => void;
-    onStatus: (message: string) => void;
+    onStatus: (message: UiText) => void;
     showNotebookSetup?: boolean;
+    onSettings?: () => void;
   } = $props();
 
   const COVER_WIDTH_PX = 152;
@@ -113,20 +123,38 @@
   let menu = $state<"new" | "sort" | null>(null);
   let entryMenu = $state<string | null>(null);
   let prompt = $state<Prompt | null>(null);
-  /// The Goodnotes import panel. Its job runs in Rust, so it reopens on its own when the Library
-  /// comes back while an import is running or has a result waiting.
+  /// The import panel (Goodnotes or OneNote). Jobs run in Rust, so it reopens on its own when the
+  /// Library comes back while an import is running or has a result waiting.
   let importing = $state(false);
+  /// The source the panel opens on: the one with a job, else the one used last this session.
+  let importTool = $state<ImporterId>("goodnotes");
   /// While the panel is closed: a job still running, or a finished one with a result to read.
   let importJob = $state<"running" | "done" | null>(null);
   let importPoll: ReturnType<typeof setInterval> | undefined;
+
+  /** The source whose job needs attention: running first, then a result waiting to be read. */
+  function sourceWithJob(statuses: Record<ImporterId, ImporterStatus>): ImporterId | null {
+    const kind = (id: ImporterId) => statuses[id].activity.kind;
+    return (
+      IMPORTERS.find((id) => importerBusy(statuses[id].activity)) ??
+      IMPORTERS.find((id) => kind(id) === "finished" || kind(id) === "importFailed") ??
+      IMPORTERS.find((id) => kind(id) !== "idle") ??
+      null
+    );
+  }
 
   function closeImport() {
     importing = false;
     void followImport();
   }
 
-  function openImport() {
+  async function openImport() {
     stopImportPoll();
+    try {
+      importTool = sourceWithJob(await allImporterStatus()) ?? importTool;
+    } catch {
+      // The panel reports a status it cannot read itself.
+    }
     importJob = null;
     importing = true;
   }
@@ -142,13 +170,14 @@
     stopImportPoll();
     const check = async () => {
       try {
-        const { activity } = await importerStatus();
-        if (importerBusy(activity)) {
+        const statuses = await allImporterStatus();
+        if (IMPORTERS.some((id) => importerBusy(statuses[id].activity))) {
           importJob = "running";
           return;
         }
         stopImportPoll();
-        if (activity.kind === "finished" || activity.kind === "importFailed") {
+        const kinds = IMPORTERS.map((id) => statuses[id].activity.kind);
+        if (kinds.includes("finished") || kinds.includes("importFailed")) {
           if (importJob === "running") void reload();
           importJob = "done";
         } else {
@@ -172,7 +201,7 @@
   let dragFrame: number | null = null;
   let suppressClickPath: string | null = null;
 
-  const crumbs = $derived(breadcrumb(path));
+  const crumbs = $derived(breadcrumb(path, $t("library.library")));
   const shelf = $derived(bands(entries, order));
   const up = $derived(parentPath(path));
   const starred = $derived(new Set(favourites));
@@ -183,6 +212,7 @@
   });
 
   onDestroy(() => {
+    listingGeneration += 1;
     clearDrag();
     stopImportPoll();
   });
@@ -193,8 +223,14 @@
       libraryRoot = await readLibraryRoot();
       if (libraryRoot) {
         await reload();
-        void importerStatus()
-          .then((status) => { if (status.activity.kind !== "idle") importing = true; })
+        void allImporterStatus()
+          .then((statuses) => {
+            const source = sourceWithJob(statuses);
+            if (source) {
+              importTool = source;
+              importing = true;
+            }
+          })
           .catch(() => {});
         if (showNotebookSetup && !setupShown) {
           setupShown = true;
@@ -219,7 +255,7 @@
         setupShown = true;
         prompt = { kind: "notebook" };
       }
-      onStatus(`Library set to ${chosen}`);
+      onStatus(notice("library.librarySetTo", { "chosen": chosen }));
     } catch (error) {
       failure = message(error);
     } finally {
@@ -234,24 +270,35 @@
    * writer has already navigated away from is dropped. Without that, a slow listing of a deep
    * folder can land after a fast one of its parent and repaint the wrong shelf.
    */
+  let listingGeneration = 0;
   async function reload() {
+    const generation = ++listingGeneration;
+    const requestedRoot = libraryRoot;
+    const requestedView = view;
+    const wanted = path;
+    const current = () => generation === listingGeneration && libraryRoot === requestedRoot &&
+      view === requestedView && path === wanted;
     busy = true;
     failure = null;
     try {
-      favourites = await libraryFavourites();
-      if (view === "favourites") {
-        entries = await listLibraryFavourites();
+      const stars = await libraryFavourites();
+      if (!current()) return;
+      if (requestedView === "favourites") {
+        const result = await listLibraryFavourites();
+        if (!current()) return;
+        entries = result;
       } else {
-        const wanted = path;
         const listing = await listLibrary(wanted);
-        if (listing.path !== path) return;
+        if (!current() || listing.path !== wanted) return;
         entries = listing.entries;
       }
+      favourites = stars;
     } catch (error) {
+      if (!current()) return;
       entries = [];
       failure = message(error);
     } finally {
-      busy = false;
+      if (current()) busy = false;
     }
   }
 
@@ -307,12 +354,12 @@
     if (pending.kind === "folder") {
       await mutate(
         () => createLibraryFolder(path, name),
-        `Ordner „${name}" angelegt`,
+        $t("library.createdFolder", { "name": name }),
       );
     } else if (pending.kind === "rename") {
       await mutate(
         () => renameLibraryEntry(pending.path, name),
-        `In „${name}" umbenannt`,
+        $t("library.renamedTo", { "name": name }),
       );
     }
   }
@@ -338,7 +385,7 @@
   async function remove(paths: string[]) {
     await mutate(async () => {
       for (const each of paths) await deleteLibraryEntry(each);
-    }, paths.length === 1 ? "In den Papierkorb verschoben" : `${paths.length} in den Papierkorb verschoben`);
+    }, paths.length === 1 ? $t("library.movedToTheTrash") : $t("library.movedItemsToTheTrash", { "length": paths.length }));
     picked = null;
   }
 
@@ -356,8 +403,8 @@
     if (moved) {
       onStatus(
         moveStatus ?? (sourcePaths.length === 1
-          ? `„${pathName(sourcePaths[0])}“ verschoben`
-          : `${sourcePaths.length} Elemente verschoben`),
+          ? $t("library.moved", { "value1": pathName(sourcePaths[0]) })
+          : $t("library.movedItems", { "length": sourcePaths.length })),
       );
     }
   }
@@ -563,22 +610,22 @@
     return [
       {
         id: "rename",
-        label: "Umbenennen",
+        label: $t("library.rename"),
         onSelect: () => (prompt = { kind: "rename", path: entry.path, initial: entry.name }),
       },
       {
         id: "favourite",
-        label: starred.has(entry.path) ? "Favorit entfernen" : "Zu Favoriten",
+        label: starred.has(entry.path) ? $t("library.removeFromFavourites") : $t("library.addToFavourites"),
         onSelect: () => void toggleFavourite(entry.path),
       },
       {
         id: "move",
-        label: "Verschieben…",
+        label: $t("library.move"),
         onSelect: () => beginMove(entry),
       },
       {
         id: "delete",
-        label: "In den Papierkorb",
+        label: $t("library.moveToTrash"),
         destructive: true,
         onSelect: () => void remove([entry.path]),
       },
@@ -588,25 +635,25 @@
   const sortItems: ShelfMenuItem[] = $derived([
     {
       id: "name",
-      label: "Name",
+      label: $t("library.name"),
       checked: order === "name",
       onSelect: () => (order = "name"),
     },
     {
       id: "modified",
-      label: "Zuletzt geändert",
+      label: $t("library.lastModified"),
       checked: order === "modified",
       onSelect: () => (order = "modified"),
     },
   ]);
 
   const newItems: ShelfMenuItem[] = $derived([
-    { id: "notebook", label: "New notebook", onSelect: () => (prompt = { kind: "notebook" }) },
-    { id: "folder", label: "New folder", onSelect: () => (prompt = { kind: "folder" }) },
-    { id: "goodnotes", label: "Import from Goodnotes…", onSelect: openImport },
+    { id: "notebook", label: $t("library.newNotebook"), onSelect: () => (prompt = { kind: "notebook" }) },
+    { id: "folder", label: $t("library.newFolder"), onSelect: () => (prompt = { kind: "folder" }) },
+    { id: "import", label: $t("library.importNotebooks2"), onSelect: () => void openImport() },
     // The way out of the library, kept because a notebook someone sends you lands in Downloads
     // and has to be openable without being filed first.
-    { id: "elsewhere", label: "Open another notebook…", onSelect: () => void openElsewhere() },
+    { id: "elsewhere", label: $t("library.openAnotherNotebook"), onSelect: () => void openElsewhere() },
   ]);
 
   async function openElsewhere() {
@@ -622,25 +669,21 @@
   }
 
   function message(error: unknown): string {
-    return error instanceof Error ? error.message : String(error);
+    return errorDetails(error);
   }
 
   function whenModified(modifiedMs: number | null): string {
     if (!modifiedMs) return "—";
-    return new Date(modifiedMs).toLocaleDateString(undefined, {
-      day: "numeric",
-      month: "short",
-      year: "numeric",
-    });
+    return formatDate(modifiedMs, $displayLocale);
   }
 
   function pages(count: number | null): string {
-    if (count === null) return "Manifest unlesbar";
-    return count === 1 ? "1 Seite" : `${count} Seiten`;
+    if (count === null) return $t("library.manifestUnlesbar");
+    return $t("counts.pages", { count });
   }
 
   function items(count: number): string {
-    return count === 1 ? "1 Element" : `${count} Elemente`;
+    return $t("counts.items", { count });
   }
 </script>
 
@@ -656,17 +699,17 @@
     {#if onReturn}
       <button type="button" class="return-to-notebook" onclick={onReturn}>
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14 6-6 6 6 6" /></svg>
-        <span>{returnLabel ?? "Offenes Notizbuch"}</span>
+        <span>{returnLabel ?? $t("library.openNotebook")}</span>
       </button>
     {/if}
 
     {#if libraryRoot}
       <div class="where">
         <div class="where-text">
-          <div class="overline">Bibliothek</div>
+          <div class="overline">{$t("library.library")}</div>
           <div class="where-path" title={libraryRoot}>{libraryRoot}</div>
         </div>
-        <button type="button" class="link" disabled={busy} onclick={chooseLibrary}>Ändern</button>
+        <button type="button" class="link" disabled={busy} onclick={chooseLibrary}>{$t("library.change")}</button>
       </div>
 
       <nav class="views">
@@ -681,7 +724,7 @@
             <path d="M4 5.5h6.5v13H4zM13.5 5.5H20v13h-6.5z" />
             <path d="M7.25 9h0M16.75 9h0" />
           </svg>
-          <span class="grow">Bibliothek</span>
+          <span class="grow">{$t("library.library")}</span>
         </button>
         <button
           type="button"
@@ -693,7 +736,7 @@
           <svg viewBox="0 0 24 24" aria-hidden="true">
             <path d="m12 4 2.4 5 5.6.7-4 3.9 1 5.4-5-2.7-5 2.7 1-5.4-4-3.9 5.6-.7L12 4Z" />
           </svg>
-          <span class="grow">Favoriten</span>
+          <span class="grow">{$t("library.favourites")}</span>
           {#if favourites.length > 0}<span class="tally">{favourites.length}</span>{/if}
         </button>
       </nav>
@@ -704,14 +747,28 @@
          that every rename and move has to invalidate, and it is the one control on this surface
          you would have to put the pen down for. Jumping between branches is what Favoriten and
          search are for, and moving is a drag onto a crumb or a folder tile. -->
+
+    {#if onSettings}
+      <div class="rail-footer">
+        <button type="button" class="settings-link" aria-haspopup="dialog"
+          aria-label={$t("library.settings")} title={$t("library.settings")} onclick={onSettings}>
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M10 3h4l.5 2.5 1.7 1 2.4-.8 2 3.5-1.9 1.7v2.2l1.9 1.7-2 3.5-2.4-.8-1.7 1L14 21h-4l-.5-2.5-1.7-1-2.4.8-2-3.5 1.9-1.7v-2.2L3.4 9.2l2-3.5 2.4.8 1.7-1z" />
+            <circle cx="12" cy="12" r="3" />
+          </svg>
+          <span>{$t("library.settings")}</span>
+          <svg class="settings-arrow" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6" /></svg>
+        </button>
+      </div>
+    {/if}
   </aside>
 
   <section class="shelf" aria-busy={busy}>
     <header class="bar">
       {#if view === "favourites"}
-        <span class="here-label">Favoriten</span>
+        <span class="here-label">{$t("library.favourites")}</span>
       {:else}
-        <nav class="crumbs" aria-label="Pfad">
+        <nav class="crumbs" aria-label={$t("library.path")}>
           {#each crumbs as crumb, index (crumb.path)}
             {#if index > 0}<span class="separator" aria-hidden="true">/</span>{/if}
             <button
@@ -724,7 +781,7 @@
               data-library-drop-kind="crumb"
               aria-current={index === crumbs.length - 1 ? "page" : undefined}
               aria-label={moving && isMoveTarget(crumb.path)
-                ? `${crumb.name}, Auswahl hierher verschieben`
+                ? $t("library.moveTheSelectionHere", { "name": crumb.name })
                 : crumb.name}
               disabled={busy || (moving !== null && !isMoveTarget(crumb.path))}
               onclick={() => moving ? chooseDestination(crumb.path) : void show(crumb.path)}
@@ -738,13 +795,13 @@
 
       {#if libraryRoot}
         {#if importJob && !importing}
-          <button type="button" class="control import-job" class:done={importJob === "done"} onclick={openImport}>
+          <button type="button" class="control import-job" class:done={importJob === "done"} onclick={() => void openImport()}>
             {#if importJob === "running"}
               <span class="import-pulse" aria-hidden="true"></span>
-              <span>Import running…</span>
+              <span>{$t("library.importRunning3")}</span>
             {:else}
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7.5" /></svg>
-              <span>Import finished</span>
+              <span>{$t("library.importFinished")}</span>
             {/if}
           </button>
         {/if}
@@ -757,13 +814,13 @@
             disabled={busy || moving !== null}
             onclick={() => (menu = menu === "sort" ? null : "sort")}
           >
-            <span>Sortieren: {order === "name" ? "Name" : "Datum"}</span>
+            <span>{$t("library.sort", { "value2": order === "name" ? $t("library.name") : $t("library.date") })}</span>
             <svg class:open={menu === "sort"} viewBox="0 0 24 24" aria-hidden="true">
               <path d="m7 9.5 5 5 5-5" />
             </svg>
           </button>
           {#if menu === "sort"}
-            <ShelfMenu label="Sortieren" items={sortItems} onClose={() => (menu = null)} />
+            <ShelfMenu label={$t("library.sort2")} items={sortItems} onClose={() => (menu = null)} />
           {/if}
         </div>
 
@@ -774,7 +831,7 @@
           disabled={busy || moving !== null}
           onclick={() => (picked = selecting ? null : [])}
         >
-          {selecting ? "Fertig" : "Auswählen"}
+          {selecting ? $t("library.done") : $t("library.select")}
         </button>
 
         {#if view === "library"}
@@ -788,13 +845,13 @@
               onclick={() => (menu = menu === "new" ? null : "new")}
             >
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
-              <span>New</span>
+              <span>{$t("library.new")}</span>
               <svg class="menu-caret" class:open={menu === "new"} viewBox="0 0 24 24" aria-hidden="true">
                 <path d="m7 9.5 5 5 5-5" />
               </svg>
             </button>
             {#if menu === "new"}
-              <ShelfMenu label="New" items={newItems} onClose={() => (menu = null)} />
+              <ShelfMenu label={$t("library.new")} items={newItems} onClose={() => (menu = null)} />
             {/if}
           </div>
         {/if}
@@ -804,33 +861,33 @@
     {#if moving}
       <div class="action-bar move-bar" role="status">
         <span class="move-title">
-          {moving.paths.length === 1 ? `„${moving.lead.name}“` : `${moving.paths.length} Elemente`} verschieben
+          {$t("library.move2", { "value2": moving.paths.length === 1 ? `“${moving.lead.name}”` : $t("library.items2", { "length": moving.paths.length }) })}
         </span>
-        <span class="move-help">Zielordner oder Pfad wählen</span>
+        <span class="move-help">{$t("library.chooseADestinationFolderOrPath")}</span>
         <div class="spacer"></div>
-        <button type="button" class="control" onclick={() => (moving = null)}>Abbrechen</button>
+        <button type="button" class="control" onclick={() => (moving = null)}>{$t("library.cancel")}</button>
       </div>
     {:else if selecting && picked && picked.length > 0}
       <div class="action-bar">
-        <span>{picked.length} ausgewählt</span>
+        <span>{$t("library.selected", { "length": picked.length })}</span>
         <div class="spacer"></div>
         <button type="button" class="control" disabled={busy} onclick={beginPickedMove}>
-          Verschieben…
+          {$t("library.move")}
         </button>
         <button type="button" class="control destructive" disabled={busy} onclick={() => void remove(picked ?? [])}>
-          In den Papierkorb
+          {$t("library.moveToTrash")}
         </button>
       </div>
     {/if}
 
     {#if mutationFailure}
       <div class="operation-error" role="alert">
-        <span>{mutationFailure}</span>
+        <span>{$t("errors.operation", { details: mutationFailure })}</span>
         <div class="spacer"></div>
         <button
           type="button"
           class="error-dismiss"
-          aria-label="Fehlermeldung schließen"
+          aria-label={$t("library.dismissError")}
           onclick={() => (mutationFailure = null)}
         >
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" /></svg>
@@ -840,7 +897,7 @@
 
     <div class="contents" bind:this={contentsElement}>
       {#if !tauriAvailable}
-        <p class="notice">Die Bibliothek benötigt die Desktop-App, damit sie deinen Ordner lesen kann.</p>
+        <p class="notice">{$t("library.theLibraryNeedsTheDesktopAppTo")}</p>
       {:else if !libraryRoot}
         <div class="first-run">
           <div class="first-run-mark" aria-hidden="true">
@@ -848,36 +905,35 @@
               <path d="M3.5 7.5A1.5 1.5 0 0 1 5 6h4l2 2.5h8A1.5 1.5 0 0 1 20.5 10v8A1.5 1.5 0 0 1 19 19.5H5A1.5 1.5 0 0 1 3.5 18V7.5Z" />
             </svg>
           </div>
-          <h1>Wo sollen deine Notizbücher liegen?</h1>
+          <h1>{$t("library.whereShouldYourNotebooksLive")}</h1>
           <p>
-            Wähle den Ordner, in dem Goodtype deine Notizbücher zeigt. Unterordner werden direkt
-            übernommen; Goodtype legt keine zusätzliche Datenbank an.
+            {$t("library.chooseTheFolderGoodtypeShowsYourNotebooks")}
           </p>
           <button type="button" class="primary" disabled={busy} onclick={chooseLibrary}>
-            Bibliotheksordner wählen
+            {$t("library.chooseLibraryFolder")}
           </button>
         </div>
       {:else if failure}
-        <p class="notice failure">{failure}</p>
+        <p class="notice failure">{$t("errors.operation", { details: failure })}</p>
       {:else if entries.length === 0}
         <div class="empty">
           <p>
             {busy
-              ? "Wird gelesen…"
+              ? $t("library.loading")
               : view === "favourites"
-                ? "Noch keine Favoriten."
-                : "Dieser Ordner ist leer."}
+                ? $t("library.noFavouritesYet")
+                : $t("library.thisFolderIsEmpty")}
           </p>
           {#if view === "library" && up !== null && !busy}
             <button type="button" class="control" onclick={() => void show(up)}>
-              Eine Ebene zurück
+              {$t("library.upOneLevel")}
             </button>
           {/if}
         </div>
       {:else}
         {#if shelf.folders.length > 0}
           <div class="band">
-            <span class="band-label">Ordner</span>
+            <span class="band-label">{$t("library.folders")}</span>
             <span class="band-count">{shelf.folders.length}</span>
             <span class="band-rule"></span>
           </div>
@@ -897,7 +953,7 @@
                   type="button"
                   class="hit"
                   aria-label={moving && isMoveTarget(folder.path)
-                    ? `${folder.name}, Auswahl hierher verschieben`
+                    ? $t("library.moveTheSelectionHere", { "name": folder.name })
                     : folder.name}
                   aria-disabled={moving !== null && !isMoveTarget(folder.path)}
                   aria-pressed={selecting ? picked?.includes(folder.path) : undefined}
@@ -919,7 +975,7 @@
                   <span class="grow"></span>
                   <span class="tile-name">{folder.name}</span>
                   <span class="tile-meta">
-                    {isPointerTarget("folder", folder.path) ? "Hier ablegen" : items(folder.childCount)}
+                    {isPointerTarget("folder", folder.path) ? $t("library.dropHere") : items(folder.childCount)}
                   </span>
                 </button>
                 {@render tileMarks(folder)}
@@ -930,7 +986,7 @@
 
         {#if shelf.notebooks.length > 0}
           <div class="band">
-            <span class="band-label">Notizbücher</span>
+            <span class="band-label">{$t("library.notebooks")}</span>
             <span class="band-count">{shelf.notebooks.length}</span>
             <span class="band-rule"></span>
           </div>
@@ -945,7 +1001,7 @@
                 <button
                   type="button"
                   class="hit"
-                  aria-label={`${notebook.name}, ${pages(notebook.pageCount)}, zuletzt geändert ${whenModified(notebook.modifiedMs)}`}
+                  aria-label={$t("library.lastModified2", { "name": notebook.name, "value2": pages(notebook.pageCount), "value3": whenModified(notebook.modifiedMs) })}
                   aria-pressed={selecting ? picked?.includes(notebook.path) : undefined}
                   disabled={busy || moving !== null}
                   onpointerdown={(event) => beginEntryDrag(event, notebook)}
@@ -992,7 +1048,7 @@
       </svg>
     {/if}
     <span>
-      {drag.paths.length === 1 ? drag.lead.name : `${drag.paths.length} Elemente`}
+      {drag.paths.length === 1 ? drag.lead.name : $t("library.items2", { "length": drag.paths.length })}
     </span>
     {#if drag.paths.length > 1}<span class="drag-count">{drag.paths.length}</span>{/if}
   </div>
@@ -1000,7 +1056,7 @@
 
 {#snippet tileMarks(entry: LibraryEntry)}
   {#if starred.has(entry.path)}
-    <span class="star" aria-label="Favorit">
+    <span class="star" aria-label={$t("library.favourite")}>
       <svg width="13" height="13" viewBox="0 0 24 24" aria-hidden="true">
         <path d="M12 4l2.4 5 5.6.7-4 3.9 1 5.4-5-2.7-5 2.7 1-5.4-4-3.9 5.6-.7L12 4z" />
       </svg>
@@ -1013,8 +1069,8 @@
       <button
         type="button"
         class="chevron"
-        aria-label={`Aktionen für ${entry.name}`}
-        title="Weitere Aktionen"
+        aria-label={$t("library.actionsFor", { "name": entry.name })}
+        title={$t("library.moreActions")}
         aria-haspopup="menu"
         aria-expanded={entryMenu === entry.path}
         disabled={busy}
@@ -1028,7 +1084,7 @@
       </button>
       {#if entryMenu === entry.path}
         <ShelfMenu
-          label={`Aktionen für ${entry.name}`}
+          label={$t("library.actionsFor", { "name": entry.name })}
           title={entry.name}
           items={entryMenuItems(entry)}
           onClose={() => (entryMenu = null)}
@@ -1039,9 +1095,10 @@
 {/snippet}
 
 {#if importing && libraryRoot}
-  <GoodnotesImport
+  <ImportPanel
+    bind:tool={importTool}
     folder={path}
-    folderName={crumbs.at(-1)?.name ?? "Library"}
+    folderName={crumbs.at(-1)?.name ?? $t("library.library")}
     onClose={closeImport}
     onShowFolder={(batch) => void show(batch)}
     onImported={() => void reload()}
@@ -1057,9 +1114,9 @@
 {:else if prompt}
   <NamePrompt
     heading={prompt.kind === "folder"
-      ? "Neuer Ordner"
-      : "Umbenennen"}
-    confirmLabel={prompt.kind === "rename" ? "Umbenennen" : "Anlegen"}
+      ? $t("library.newFolder")
+      : $t("library.rename")}
+    confirmLabel={prompt.kind === "rename" ? $t("library.rename") : $t("library.create")}
     initial={prompt.kind === "rename" ? prompt.initial : ""}
     {busy}
     onConfirm={(name) => void confirmPrompt(name)}
@@ -1099,6 +1156,50 @@
     font-weight: 600;
     letter-spacing: -0.01em;
   }
+
+  .rail-footer {
+    margin-top: auto;
+    padding-top: 12px;
+    border-top: 1px solid var(--edge-soft, rgb(255 255 255 / 7%));
+  }
+
+  .settings-link {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    width: 100%;
+    min-height: var(--control-touch, 44px);
+    padding: 8px 10px;
+    border: 0;
+    border-radius: var(--radius, 6px);
+    background: transparent;
+    color: var(--muted, #aeb5be);
+    font-size: var(--text-md, 13px);
+    text-align: left;
+    cursor: pointer;
+    touch-action: manipulation;
+    transition: background 120ms ease, color 120ms ease;
+  }
+
+  .settings-link:hover {
+    background: var(--wash, rgb(255 255 255 / 8%));
+    color: var(--text, #e9ebee);
+  }
+
+  .settings-link:active { background: rgb(255 255 255 / 12%); }
+  .settings-link:focus-visible { outline: 2px solid var(--blueprint, #4c8df0); outline-offset: 2px; }
+  .settings-link span { flex: 1; }
+  .settings-link svg {
+    flex: none;
+    width: var(--icon, 20px);
+    height: var(--icon, 20px);
+    fill: none;
+    stroke: currentColor;
+    stroke-width: var(--stroke, 1.7);
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+  .settings-link .settings-arrow { width: 14px; height: 14px; color: var(--quiet, #6a727c); }
 
   .return-to-notebook {
     display: flex;
@@ -1325,7 +1426,7 @@
     color: var(--oxide, #e5645e);
   }
 
-  /* A running or finished Goodnotes import, while its panel is closed. */
+  /* A running or finished import, while its panel is closed. */
   .import-job {
     color: var(--text, #e9ebee);
   }
@@ -1928,6 +2029,16 @@
       padding: 0 6px 0 0;
     }
 
+    .rail-footer {
+      flex: none;
+      margin: 0 0 0 auto;
+      padding: 0 0 0 12px;
+      border-top: 0;
+      border-left: 1px solid var(--edge-soft, rgb(255 255 255 / 7%));
+    }
+    .settings-link { width: auto; }
+    .settings-link .settings-arrow { display: none; }
+
     .return-to-notebook {
       width: auto;
       margin: 0;
@@ -1955,6 +2066,9 @@
   }
 
   @media (max-width: 520px) {
+    .settings-link span { display: none; }
+    .settings-link { width: var(--control-touch, 44px); padding: 8px; justify-content: center; }
+    .rail-footer { padding-left: 8px; }
     .brand span,
     .where-text {
       display: none;
@@ -2001,6 +2115,7 @@
   }
 
   @media (prefers-reduced-motion: reduce) {
+    .settings-link { transition: none; }
     .tile,
     .folder,
     .crumb,
