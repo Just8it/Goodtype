@@ -1,8 +1,10 @@
 <script lang="ts">
+  import { t } from "../i18n";
   import type { RenderTask } from "pdfjs-dist";
-  import { untrack } from "svelte";
+  import { onDestroy, untrack } from "svelte";
   import { zoomTier } from "../geometry/coordinates";
   import { pdfDocument } from "./document";
+  import { schedulePdfRaster, retainPdfRaster, releasePdfRaster, trimPdfRasters } from "./raster";
 
   const SETTLE_MS = 180;
 
@@ -21,6 +23,24 @@
   } = $props();
 
   let canvas = $state<HTMLCanvasElement>();
+  let visible = $state(false);
+  let renderedKey = "";
+  let evicted = false;
+  $effect(() => {
+    if (!canvas) return;
+    const observer = new IntersectionObserver(entries => {
+      visible = entries.some(entry => entry.isIntersecting);
+      trimPdfRasters();
+    });
+    observer.observe(canvas);
+    return () => observer.disconnect();
+  });
+  onDestroy(() => {
+    if (canvas) {
+      releasePdfRaster(canvas);
+      canvas.width = canvas.height = 1;
+    }
+  });
 
   /**
    * The zoom the raster is drawn for. It trails the live zoom: during a pinch the existing bitmap
@@ -41,35 +61,46 @@
   $effect(() => {
     if (!canvas) return;
     const target = canvas;
+    const isVisible = visible;
     const pixelRatio = Math.min(4, Math.max(1, window.devicePixelRatio * renderZoom));
+    const key = JSON.stringify([root, sourcePath, page, widthPt, pixelRatio]);
+    if ((!evicted && renderedKey === key) || (evicted && !isVisible)) return;
+    const requestRoot = root, requestPath = sourcePath, requestPage = page, requestWidth = widthPt;
     let cancelled = false;
     let renderTask: RenderTask | null = null;
 
-    void pdfDocument(root, sourcePath)
-      .then((pdf) => pdf.getPage(page))
+    void schedulePdfRaster(() => pdfDocument(requestRoot, requestPath)
+      .then((pdf) => pdf.getPage(requestPage))
       .then(async (sourcePage) => {
         if (cancelled) return;
         const natural = sourcePage.getViewport({ scale: 1 });
         const viewport = sourcePage.getViewport({
-          scale: (widthPt * pixelRatio) / natural.width,
+          scale: (requestWidth * pixelRatio) / natural.width,
         });
         // Rendered off screen and copied over when complete: resizing the visible canvas clears
         // it, and the page used to flash blank for the length of every render.
         const offscreen = document.createElement("canvas");
         offscreen.width = Math.ceil(viewport.width);
         offscreen.height = Math.ceil(viewport.height);
-        const offscreenContext = offscreen.getContext("2d");
-        if (!offscreenContext) return;
-        renderTask = sourcePage.render({ canvas: offscreen, canvasContext: offscreenContext, viewport });
-        await renderTask.promise;
-        if (cancelled) return;
-        target.width = offscreen.width;
-        target.height = offscreen.height;
-        target.getContext("2d")?.drawImage(offscreen, 0, 0);
-      })
+        try {
+          const offscreenContext = offscreen.getContext("2d");
+          if (!offscreenContext) return;
+          renderTask = sourcePage.render({ canvas: offscreen, canvasContext: offscreenContext, viewport });
+          await renderTask.promise;
+          if (cancelled) return;
+          target.width = offscreen.width;
+          target.height = offscreen.height;
+          target.getContext("2d")?.drawImage(offscreen, 0, 0);
+          renderedKey = key;
+          evicted = false;
+          retainPdfRaster(target, () => visible, () => { evicted = true; });
+        } finally {
+          offscreen.width = offscreen.height = 1;
+        }
+      }), () => !cancelled, () => visible)
       .catch((error) => {
         if (!cancelled && error?.name !== "RenderingCancelledException") {
-          console.error("Could not render PDF background", error);
+          console.error($t("pdf.couldNotRenderPDFBackground"), error);
         }
       });
 

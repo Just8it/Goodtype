@@ -20,11 +20,22 @@ export function pdfDocument(root: string, sourcePath: string): Promise<PDFDocume
   const opened = readPdfReference(root, sourcePath)
     .then(openPdf)
     .catch((error) => {
-      documents.delete(key);
+      if (documents.get(key) === opened) documents.delete(key);
       throw error;
     });
   documents.set(key, opened);
   return opened;
+}
+
+/** Called after the old notebook's page effects have cancelled their render tasks. */
+export async function releasePdfDocuments(root: string): Promise<void> {
+  const released: Promise<void>[] = [];
+  for (const [key, opened] of documents) {
+    if (!key.startsWith(`${root}\0`)) continue;
+    documents.delete(key);
+    released.push(opened.then(pdf => pdf.destroy()).catch(() => {}));
+  }
+  await Promise.all(released);
 }
 
 /** Shared worker/decoder configuration for originals and disposable rendered-page previews. */
