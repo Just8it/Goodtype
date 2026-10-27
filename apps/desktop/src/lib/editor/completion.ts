@@ -28,6 +28,25 @@ export function fromByteOffset(text: string, byteOffset: number): number {
   return decoder.decode(bytes.slice(0, byteOffset)).length;
 }
 
+/** One source pass for a whole analysis reply, rather than encoding it twice per token. */
+export function byteOffsetMapper(text: string): (byteOffset: number) => number {
+  const offsets = new Uint32Array(encoder.encode(text).length + 1);
+  let byte = 0, unit = 0;
+  for (const character of text) {
+    const code = character.codePointAt(0)!;
+    const width = code <= 0x7f ? 1 : code <= 0x7ff ? 2 : code <= 0xffff ? 3 : 4;
+    for (let inside = 1; inside < width; inside += 1) offsets[byte + inside] = unit + 1;
+    byte += width;
+    unit += character.length;
+    offsets[byte] = unit;
+  }
+  return (byteOffset) => {
+    const index = Math.min(offsets.length - 1, Math.max(0, Math.trunc(byteOffset)));
+    // Match the existing prefix decoder's BOM handling and its full-source clamp.
+    return offsets[index] - (text.startsWith("\ufeff") && index >= 3 && index < offsets.length - 1 ? 1 : 0);
+  };
+}
+
 /** CodeMirror snippet fields are `#{…}`; Tinymist uses numbered LSP tab stops. */
 export function toSnippetTemplate(apply: string): string {
   return apply

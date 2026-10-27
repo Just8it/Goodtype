@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { PAPER_TONES, templateGroups } from "./templates";
-import { pageTextLayout, pageTextSource } from "./pageText";
+import { pageTextLayout } from "./pageText";
 import { resolveTemplate } from "./template";
 
 describe("page text paper alignment", () => {
@@ -32,37 +32,4 @@ describe("page text paper alignment", () => {
     expect(grid.x).toBeCloseTo(firstGridColumn + 2);
   });
 
-  it("uses the same exact baseline rhythm for wrapped lines and separate paragraphs", () => {
-    const source = pageTextSource({
-      x: 36,
-      y: 36,
-      width: 523,
-      height: 770,
-      lineSpacingPt: 16,
-      textColor: "#16212b",
-      columns: 1,
-      description: "test",
-    }, "first\n\nsecond");
-
-    expect(source).toContain("top-edge: 1em, bottom-edge: 0em");
-    expect(source).toContain("par(leading: 5pt, spacing: 5pt)");
-    expect(source).toContain("#show heading: goodtype_snap_block");
-    expect(source).toContain("math.equation.where(block: true)");
-    expect(source).toContain("align(bottom, it)");
-  });
-
-  it("can leave Typst block spacing untouched", () => {
-    const source = pageTextSource({
-      x: 36,
-      y: 36,
-      width: 523,
-      height: 770,
-      lineSpacingPt: 16,
-      textColor: "#16212b",
-      columns: 1,
-      description: "test",
-    }, "= Heading", false);
-
-    expect(source).not.toContain("goodtype_snap_block");
-  });
 });

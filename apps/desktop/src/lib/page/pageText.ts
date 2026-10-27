@@ -1,3 +1,4 @@
+import { translate, type Translator, formatNumber } from "../i18n";
 import type { Area, PageBackground, PageGeometry, TemplateElement } from "../model";
 import { resolveTemplate } from "./template";
 
@@ -20,8 +21,9 @@ export type PageTextLayout = {
 export function pageTextLayout(
   background: PageBackground,
   geometry: PageGeometry,
+  t: Translator = translate,
 ): PageTextLayout {
-  const fallback = defaultLayout(background, geometry);
+  const fallback = defaultLayout(background, geometry, t);
   if (background.kind !== "template") return fallback;
 
   const guide = background.template.elements.find(isWritingGuide);
@@ -58,43 +60,11 @@ export function pageTextLayout(
     columns: background.template.elements.some(
       (element) => element.kind === "rule" && element.edge === "center_x",
     ) ? 2 : 1,
-    description: `Aligned to ${millimetres(spacing)} mm paper rhythm`,
+    description: t("page.alignedToMmPaperRhythm", { "value1": millimetres(spacing) }),
   };
 }
 
-export function pageTextSource(
-  layout: PageTextLayout,
-  source: string,
-  snapBlocksToGrid = true,
-): string {
-  const gap = Math.max(0, layout.lineSpacingPt - DEFAULT_FONT_PT);
-  // Fix the conceptual line box to exactly 1em. Otherwise Typst uses font-specific cap-height
-  // metrics, and the tiny difference accumulates until later baselines visibly miss the paper.
-  let prelude = `#set text(size: ${DEFAULT_FONT_PT}pt, fill: rgb("${layout.textColor}"), top-edge: 1em, bottom-edge: 0em)\n#set par(leading: ${gap}pt, spacing: ${gap}pt)\n#let goodtype_rhythm = ${snapBlocksToGrid ? `${layout.lineSpacingPt}pt` : "1em"}`;
-  if (snapBlocksToGrid) {
-    // Reserve whole rows and put the visible block on the final row instead of at the top.
-    prelude += `
-#let goodtype_gap = ${gap}pt
-#let goodtype_snap_block(it) = block(
-  above: goodtype_gap,
-  below: goodtype_gap,
-  layout(size => {
-    let measured = measure(width: size.width, it)
-    let rows = calc.max(1, calc.ceil((measured.height + goodtype_gap) / goodtype_rhythm))
-    block(width: size.width, height: rows * goodtype_rhythm - goodtype_gap, align(bottom, it))
-  }),
-)
-#show heading: set block(above: 0pt, below: 0pt)
-#show math.equation.where(block: true): set block(above: 0pt, below: 0pt)
-#show heading: goodtype_snap_block
-#show math.equation.where(block: true): goodtype_snap_block`;
-  }
-  return layout.columns === 2
-    ? `${prelude}\n#columns(2, gutter: ${layout.lineSpacingPt}pt)[\n${source}\n]`
-    : `${prelude}\n${source}`;
-}
-
-function defaultLayout(background: PageBackground, geometry: PageGeometry): PageTextLayout {
+function defaultLayout(background: PageBackground, geometry: PageGeometry, t: Translator): PageTextLayout {
   const color = background.kind === "plain"
     ? background.color
     : background.kind === "template"
@@ -108,7 +78,7 @@ function defaultLayout(background: PageBackground, geometry: PageGeometry): Page
     lineSpacingPt: 16,
     textColor: readableText(color),
     columns: 1,
-    description: "Standard page margins",
+    description: t("page.standardPageMargins"),
   };
 }
 
@@ -137,5 +107,5 @@ function readableText(color: string): string {
 }
 
 function millimetres(points: number): string {
-  return (points * 25.4 / 72).toFixed(1).replace(".0", "");
+  return formatNumber(points * 25.4 / 72, { maximumFractionDigits: 1 });
 }
