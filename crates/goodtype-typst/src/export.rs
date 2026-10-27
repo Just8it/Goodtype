@@ -218,13 +218,8 @@ fn compile_pdf(
     let mut overlay: Vec<(String, Vec<u8>)> = Vec::new();
     for (page_index, page) in pages.iter().enumerate() {
         if let Some(page_text) = &page.page_typst {
-            let source = match page.shared_style.as_deref() {
-                _ if has_managed_preset(page_text) => page_text_source(page, page_text),
-                Some(style) if !style.is_empty() => {
-                    format!("{style}\n{}", page_text_source(page, page_text))
-                }
-                _ => page_text_source(page, page_text),
-            };
+            let source =
+                prepared_page_text(root, page, page_text).map_err(ExportError::CompilerFailed)?;
             overlay.push((format!("page-text-{page_index}.typ"), source.into_bytes()));
         }
         for (index, block) in page.blocks.iter().enumerate() {
@@ -264,15 +259,10 @@ fn compile_pdf(
     .map_err(ExportError::CompilerFailed)
 }
 
+/// The notebook's filename rule, plus a `.pdf` extension. Shared rather than restated, so an export
+/// cannot be named something the store would refuse — a Windows device name such as `con.pdf`.
 fn validate_output_name(name: &str) -> Result<(), ExportError> {
-    let stem = name
-        .strip_suffix(".pdf")
-        .filter(|stem| !stem.is_empty())
-        .ok_or_else(|| ExportError::InvalidOutputName(name.to_owned()))?;
-    if !stem
-        .bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-    {
+    if !name.ends_with(".pdf") || goodtype_core::paths::validate_filename(name).is_err() {
         return Err(ExportError::InvalidOutputName(name.to_owned()));
     }
     Ok(())
@@ -744,6 +734,20 @@ fn page_text_layout(page: &ExportPage) -> PageTextLayout {
     }
 }
 
+pub fn prepared_page_text(root: &Path, page: &ExportPage, source: &str) -> Result<String, String> {
+    validate_page(root, page).map_err(|error| error.to_string())?;
+    let prepared = crate::page_source::prepare(root, source)?;
+    let body = page_text_source(page, &prepared.body);
+    Ok(match prepared.preamble {
+        Some(template) => format!("{template}\n{body}"),
+        None if !prepared.managed => match page.shared_style.as_deref() {
+            Some(style) if !style.is_empty() => format!("{style}\n{body}"),
+            _ => body,
+        },
+        _ => body,
+    })
+}
+
 fn page_text_source(page: &ExportPage, source: &str) -> String {
     let layout = page_text_layout(page);
     let color = match &page.background {
@@ -776,8 +780,6 @@ fn page_text_source(page: &ExportPage, source: &str) -> String {
         format!("{prelude}\n{source}")
     }
 }
-
-use crate::has_managed_preset;
 
 fn page_text_bounds(area: &Area, width_pt: f64, height_pt: f64) -> Option<PageTextBounds> {
     let bounds = PageTextBounds {
@@ -1516,6 +1518,54 @@ mod tests {
         );
     }
 
+    #[test]
+    fn preamble_and_function_templates_share_preview_export_and_cover_source() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("styles")).unwrap();
+        let mut page = page();
+        page.blocks.clear();
+        page.strokes.clear();
+        let canonical = "#import \"/styles/a.typ\": preset\n#show: preset.with(rhythm: goodtype_rhythm)\n\n#import \"/styles/a.typ\": custom\n#custom[Hello]";
+        page.page_typst = Some(canonical.to_owned());
+        for template in [
+            "#let custom(body) = strong(body)\n#set text(fill: blue)",
+            "#set page(paper: \"a4\", header: [Document header])\n#let custom(body) = strong(body)",
+            "#let custom(body) = strong(body)\n#let preset(body, rhythm: 16pt) = body",
+        ] {
+            std::fs::write(root.path().join("styles/a.typ"), template).unwrap();
+            for grid in [true, false] {
+                page.page_text_baseline_grid = grid;
+                let prepared = prepared_page_text(root.path(), &page, canonical).unwrap();
+                let preview = crate::compile_block(
+                    root.path(),
+                    &crate::CompileRequest {
+                        source: prepared,
+                        width_pt: page_text_layout(&page).width,
+                        generation: 1,
+                        allow_remote_packages: false,
+                    },
+                )
+                .unwrap();
+                assert!(preview.svg.is_some(), "{:?}", preview.diagnostics);
+                assert!(
+                    render_page_pdf(root.path(), &page)
+                        .unwrap()
+                        .starts_with(b"%PDF-")
+                );
+                assert!(
+                    export_pages(
+                        root.path(),
+                        "template-check.pdf",
+                        std::slice::from_ref(&page),
+                        false
+                    )
+                    .is_ok()
+                );
+            }
+        }
+        assert!(!root.path().join("page-text-0.typ").exists());
+    }
+
     /// A template is paper, so it has to be under the ink and reach the page edge — and it has
     /// to be the *same* paper the screen drew, which is what the shared fixture guarantees.
     #[test]
@@ -1665,7 +1715,13 @@ mod tests {
 
     #[test]
     fn rejects_unsafe_names_paths_and_numbers() {
-        for name in ["../page.pdf", "folder/page.pdf", "page.PDF", ".pdf"] {
+        for name in [
+            "../page.pdf",
+            "folder/page.pdf",
+            "page.PDF",
+            ".pdf",
+            "con.pdf",
+        ] {
             assert!(matches!(
                 validate_output_name(name),
                 Err(ExportError::InvalidOutputName(_))
