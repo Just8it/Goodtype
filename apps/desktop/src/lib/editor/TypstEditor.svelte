@@ -1,11 +1,13 @@
 <script lang="ts">
+  import { t, notice, renderMessage, type UiText } from "../i18n";
   import { acceptCompletion, autocompletion } from "@codemirror/autocomplete";
   import { setDiagnostics, type Diagnostic } from "@codemirror/lint";
   import { keymap, tooltips } from "@codemirror/view";
-  import { Compartment, Prec } from "@codemirror/state";
+  import { Compartment, EditorState, Prec } from "@codemirror/state";
+  import { editorPhrases } from "./phrases";
   import { basicSetup, EditorView } from "codemirror";
   import { onMount } from "svelte";
-  import { createTypstCompletionSource, fromByteOffset, toByteOffset } from "./completion";
+  import { byteOffsetMapper, createTypstCompletionSource, fromByteOffset, toByteOffset } from "./completion";
   import { setTypstHighlights, typstHighlighting } from "./highlighting";
   import { newlineInsidePair, spaceInsideMath, typstPairLanguageData } from "./smartPairs";
   import { typstSnippetSource } from "./snippets";
@@ -15,7 +17,7 @@
   let {
     value,
     root = null,
-    ariaLabel = "Typst source",
+    ariaLabel = "",
     maxLines = 10,
     lineWrap = false,
     onChange,
@@ -40,9 +42,12 @@
   let applyingExternalValue = false;
   let highlightTimer: ReturnType<typeof setTimeout> | undefined;
   let highlightGeneration = 0;
+  let formatGeneration = 0;
   let help = $state<TypstHover | null>(null);
-  let helpStatus = $state("");
+  let helpStatus = $state<UiText>("");
   const lineWrapCompartment = new Compartment();
+  const languageCompartment = new Compartment();
+  const effectiveAriaLabel = $derived(ariaLabel || $t("editor.typstSource"));
   const lineCount = $derived(value ? value.split("\n").length : 1);
   const hiddenLines = $derived(
     maxLines === null ? 0 : Math.max(0, lineCount - maxLines),
@@ -106,7 +111,10 @@
             },
           ]),
         ),
-        EditorView.contentAttributes.of({ "aria-label": ariaLabel }),
+        languageCompartment.of([
+          EditorView.contentAttributes.of({ "aria-label": effectiveAriaLabel }),
+          EditorState.phrases.of(editorPhrases($t)),
+        ]),
         EditorView.domEventHandlers({
           keydown(event) {
             if (event.key !== "Escape") return false;
@@ -151,34 +159,42 @@
   export async function showHelp() {
     if (!view || !root) return;
     const source = view.state.doc.toString();
-    helpStatus = "Looking up Typst help...";
+    helpStatus = notice("editor.lookingUpTypstHelp");
     try {
       help = await hoverTypst(
         root,
         source,
         toByteOffset(source, view.state.selection.main.head),
       );
-      helpStatus = help ? "" : "No Typst help at the caret";
+      helpStatus = help ? "" : notice("editor.noTypstHelpAtTheCaret");
     } catch {
       help = null;
-      helpStatus = "Typst help is unavailable";
+      helpStatus = notice("editor.typstHelpIsUnavailable");
     }
   }
 
   export async function formatDocument() {
     if (!view || !root) return;
-    const source = view.state.doc.toString();
-    helpStatus = "Formatting Typst...";
+    const editor = view;
+    const document = editor.state.doc;
+    const source = document.toString();
+    const requestedRoot = root;
+    const generation = ++formatGeneration;
+    const current = () => generation === formatGeneration && view === editor &&
+      root === requestedRoot && editor.state.doc === document;
+    helpStatus = notice("editor.formattingTypst");
     try {
-      const formatted = await formatTypst(root, source);
+      const formatted = await formatTypst(requestedRoot, source);
+      if (!current()) return;
       if (formatted !== source) {
         view.dispatch({
           changes: { from: 0, to: view.state.doc.length, insert: formatted },
         });
       }
-      helpStatus = formatted === source ? "Typst source is already formatted" : "Formatted Typst source";
+      helpStatus = formatted === source ? notice("editor.typstSourceIsAlreadyFormatted") : notice("editor.formattedTypstSource");
     } catch {
-      helpStatus = "Typst formatting failed";
+      if (!current()) return;
+      helpStatus = notice("editor.typstFormattingFailed");
     }
   }
 
@@ -201,19 +217,20 @@
         // No analyzer answered — keep whatever is already coloured rather than blanking the
         // document. An empty result from a working analyzer is a real answer and does clear it.
         if (!analysis.available) return;
+        const offset = byteOffsetMapper(source);
         const diagnostics: Diagnostic[] = analysis.diagnostics.map((diagnostic) => ({
           severity: diagnostic.severity,
           message: diagnostic.message,
-          from: fromByteOffset(source, diagnostic.from),
-          to: fromByteOffset(source, diagnostic.to),
+          from: offset(diagnostic.from),
+          to: offset(diagnostic.to),
         }));
         view.dispatch(
           {
             effects: setTypstHighlights.of(analysis.highlights.map((token) => ({
               kind: token.kind,
               modifiers: token.modifiers,
-              from: fromByteOffset(source, token.from),
-              to: fromByteOffset(source, token.to),
+              from: offset(token.from),
+              to: offset(token.to),
             }))),
           },
           setDiagnostics(view.state, diagnostics),
@@ -254,20 +271,29 @@
       effects: lineWrapCompartment.reconfigure(lineWrap ? EditorView.lineWrapping : []),
     });
   });
+
+  $effect(() => {
+    const phrases = editorPhrases($t);
+    const label = effectiveAriaLabel;
+    if (!view) return;
+    view.dispatch({ effects: languageCompartment.reconfigure([
+      EditorState.phrases.of(phrases),
+      EditorView.contentAttributes.of({ "aria-label": label }),
+    ]) });
+  });
 </script>
 
 <div class="editor" class:filled={maxLines === null} style:--max-lines={maxLines ?? 0}>
   <div class="host" bind:this={host}></div>
   {#if help || helpStatus}
     <div class:code={help?.code} class="help" role="status" aria-live="polite">
-      {help?.value ?? helpStatus}
+      {renderMessage(help?.value ?? helpStatus, $t)}
     </div>
   {/if}
   {#if hiddenLines > 0}
     <!-- The box is capped on purpose, so say so rather than looking truncated. -->
     <p class="overflow-hint">
-      {hiddenLines}
-      {hiddenLines === 1 ? "more line" : "more lines"} — open the side view for the full source
+      {$t("counts.hiddenLines", { count: hiddenLines })}
     </p>
   {/if}
 </div>
