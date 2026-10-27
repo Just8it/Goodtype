@@ -23,6 +23,16 @@ function stroke(overrides: Partial<Stroke> = {}): Stroke {
 }
 
 describe("paintOrder", () => {
+  it("reuses unchanged strata across zoom tiers but invalidates narrow ink and object order", () => {
+    const strokes = [stroke()];
+    const first = paintStrata(strokes, [], 0.5);
+    expect(paintStrata(strokes, [], 0.25)).toBe(first);
+    expect(paintStrata(strokes, [], 0.25)).toEqual([{ key: "stroke-1", zIndex: 1_000_000, paths: paintOrder(strokes) }]);
+    expect(paintStrata(strokes, [2], 0.25)).not.toBe(first);
+    const hairlines = [stroke({ widthPt: 0.1 })];
+    expect(paintStrata(hairlines, [], 0.5)).not.toBe(paintStrata(hairlines, [], 0.25));
+    expect(paintStrata(hairlines, [], 0.25)[0].paths).toEqual(paintOrder(hairlines, 0.25));
+  });
   // The whole display layer rests on this: an ordinary stroke has to produce a fillable path.
   it("paints an ordinary stroke as one closed, filled shape", () => {
     const [painted] = paintOrder([stroke()]);
@@ -122,5 +132,40 @@ describe("paintOrder", () => {
     expect(strata.map(({ key, zIndex }) => ({ key, zIndex }))).toEqual([
       { key: "sweep", zIndex: -1 }, { key: "pen", zIndex: 3 },
     ]);
+  });
+});
+
+describe("live ink under the precise eraser", () => {
+  const moved = (id: string, dy: number) => stroke({ id, points: stroke().points.map((point) => ({ ...point, y: point.y + dy })) });
+
+  it("paints live strokes as runs of their own and leaves the other runs' strings untouched", () => {
+    const before = [moved("a", 0), moved("b", 20), moved("c", 40), moved("d", 60)];
+    const settled = paintOrder(before);
+    expect(settled).toHaveLength(1);
+
+    // Frame one: "b" is being cut. It splits out, and the runs around it are built once.
+    const cut = [before[0], { ...before[1], points: before[1].points.slice(0, 2) }, before[2], before[3]];
+    const live = new Set(["b"]);
+    const first = paintOrder(cut, 0, undefined, 1, live);
+    expect(first.map((path) => path.key)).toEqual(["a", "b", "c"]);
+
+    // Frame two: only "b" changes again; the runs before and after keep the very same strings,
+    // so the DOM has nothing to re-parse for them.
+    const again = [cut[0], { ...cut[1], points: cut[1].points.slice(0, 1) }, cut[2], cut[3]];
+    const second = paintOrder(again, 0, undefined, 1, live);
+    expect(second[0].d).toBe(first[0].d);
+    expect(second[2].d).toBe(first[2].d);
+    expect(second[1].d).not.toBe(first[1].d);
+  });
+
+  it("draws a fragment with its original's taper rather than new pointed ends", () => {
+    const tapered = stroke({ id: "t", pressure: false, taper: 0.5,
+      points: [0, 10, 20, 30, 40].map((x) => ({ x, y: 0, pressure: 1, timeMs: x, tiltX: 0, tiltY: 0 })) });
+    const middle = { ...tapered, id: "m", points: tapered.points.slice(1, 4), trim: { startPt: 10, endPt: 10 } };
+    const untrimmed = { ...middle, id: "u", trim: undefined };
+    // At the cut end x = 10 the whole stroke is 10/12 of the way up its 12 pt taper, so the
+    // fragment keeps that half-width there; without its lineage it would start from a point.
+    expect(paintOrder([middle])[0].d).toMatch(/^M 10 0\.833 L 20 1 /);
+    expect(paintOrder([untrimmed])[0].d).toMatch(/^M 10 0 L 20 1 /);
   });
 });
