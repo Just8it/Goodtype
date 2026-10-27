@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { t } from "../i18n";
   import { onDestroy, onMount } from "svelte";
   import {
     applyTypstCompileResult,
@@ -8,7 +9,8 @@
     type TypstCompileResult,
   } from "../editor/typst";
   import type { PageBackground, PageGeometry } from "../model";
-  import { pageTextLayout, pageTextSource } from "../page/pageText";
+  import { pageTextLayout } from "../page/pageText";
+  import type { TypstCompileRequest } from "../ipc/typst";
 
   let {
     source,
@@ -29,7 +31,7 @@
     snapBlocksToGrid?: boolean;
     compileDependency?: number;
     readingOrder?: number;
-    onCompile: (request: { source: string; widthPt: number; generation: number }) => void;
+    onCompile: (request: TypstCompileRequest) => void;
   } = $props();
 
   let preview = $state(emptyTypstPreview());
@@ -40,7 +42,7 @@
   let appliedContext = $state("");
   let appliedLayoutKey = $state("");
   let appliedDependency = $state(0);
-  const layout = $derived(pageTextLayout(background, geometry));
+  const layout = $derived(pageTextLayout(background, geometry, $t));
   const layoutKey = $derived(`${layout.x}:${layout.y}:${layout.width}:${layout.lineSpacingPt}:${layout.columns}:${layout.textColor}:${snapBlocksToGrid}`);
   const svgWidth = $derived((preview.widthPt ?? layout.width) + 2 * preview.padPt);
   const overflow = $derived((preview.heightPt ?? 0) > layout.height);
@@ -86,7 +88,9 @@
     compileTimer = setTimeout(() => {
       preview = requestTypstCompile(preview);
       onCompile({
-        source: `${compileContext}\n${pageTextSource(layout, source, snapBlocksToGrid)}`,
+        source,
+        sharedStyle: compileContext,
+        pageText: { background, geometry, snapBlocksToGrid },
         widthPt: layout.width,
         generation: preview.requestedGeneration,
       });
@@ -100,19 +104,19 @@
   style:top={`${layout.y}px`}
   style:width={`${layout.width}px`}
   style:height={`${layout.height}px`}
-  aria-label={`Page text, reading position ${readingOrder + 1}. ${layout.description}. Edit from the Page text tool.`}
+  aria-label={$t("workspace.pageTextDescription", { position: readingOrder + 1, description: layout.description })}
 >
   {#if svgUrl}
     <img
       src={svgUrl}
-      alt="Rendered page text"
+      alt={$t("workspace.renderedPageText")}
       draggable="false"
       style:width={`${svgWidth}px`}
       style:margin={`${-preview.padPt}px`}
     />
   {/if}
   {#if overflow}
-    <span class="overflow" role="status">Page text continues past the writing area</span>
+    <span class="overflow" role="status">{$t("workspace.pageTextContinuesPastTheWritingArea")}</span>
   {/if}
 </section>
 

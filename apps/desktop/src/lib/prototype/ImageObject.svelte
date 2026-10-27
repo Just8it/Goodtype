@@ -1,5 +1,7 @@
 <script lang="ts">
+  import { t } from "../i18n";
   import { keepOnPage } from "../geometry/placement";
+  import { rotatedVector } from "../geometry/coordinates";
 
   type Position = { x: number; y: number };
   type Gesture =
@@ -28,6 +30,7 @@
     widthPt: number;
     heightPt: number;
     scale: number;
+    rotation?: number;
     zIndex?: number;
     readingOrder?: number;
     selected?: boolean;
@@ -49,6 +52,7 @@
     widthPt,
     heightPt,
     scale,
+    rotation = 0,
     zIndex = 0,
     readingOrder = 0,
     selected = false,
@@ -116,11 +120,12 @@
         { x: gesture.x + delta.x, y: gesture.y + delta.y },
         { widthPt: widthPt * previewScale, heightPt: heightPt * previewScale },
         { widthPt: pageWidthPt, heightPt: pageHeightPt },
+        undefined, rotation,
       );
       previewX = held.x;
       previewY = held.y;
     } else {
-      previewScale = Math.max(0.1, gesture.scale + delta.x / widthPt);
+      previewScale = Math.max(0.1, gesture.scale + rotatedVector(delta, -rotation).x / widthPt);
     }
   }
 
@@ -156,6 +161,7 @@
           moves[event.key],
           { widthPt: widthPt * scale, heightPt: heightPt * scale },
           { widthPt: pageWidthPt, heightPt: pageHeightPt },
+          undefined, rotation,
         ),
       );
     } else if (event.key === "+" || event.key === "=") {
@@ -176,15 +182,15 @@
   style:top={`${previewY}px`}
   style:width={`${widthPt}px`}
   style:height={`${heightPt}px`}
-  style:transform={`scale(${previewScale})`}
+  style:transform={`rotate(${rotation}deg) scale(${previewScale})`}
   style:z-index={zIndex}
-  aria-label={`${alt}, reading position ${readingOrder + 1}`}
+  aria-label={$t("workspace.readingPosition2", { "alt": alt, "value2": readingOrder + 1 })}
 >
   <button
     class="move-surface"
     type="button"
     aria-pressed={selected}
-    aria-label={`Move ${alt}`}
+    aria-label={$t("workspace.move", { "alt": alt })}
     onpointerdown={beginMove}
     onpointermove={update}
     onpointerup={finish}
@@ -197,7 +203,7 @@
     <button
       class="scale-handle"
       type="button"
-      aria-label={`Scale ${alt}`}
+      aria-label={$t("workspace.scale", { "alt": alt })}
       onpointerdown={beginScale}
       onpointermove={update}
       onpointerup={finish}

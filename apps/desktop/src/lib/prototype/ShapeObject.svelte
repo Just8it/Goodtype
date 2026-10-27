@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { t } from "../i18n";
   import { untrack } from "svelte";
   import type { Point } from "../geometry/coordinates";
   import {
@@ -71,7 +72,7 @@
       preview.geometry.kind === "ellipse" ||
       (preview.geometry.kind === "spline" && preview.geometry.closed),
   );
-  const label = $derived(`${describeShape(preview.geometry)}, reading position ${preview.readingOrder + 1}`);
+  const label = $derived($t("workspace.readingPosition", { "value1": describeShape(preview.geometry, $t), "value2": preview.readingOrder + 1 }));
   const controlScale = $derived(1 / Math.max(zoom * preview.scale, 0.05));
   const spline = $derived(preview.geometry.kind === "spline" ? preview.geometry : null);
   const rotationHandle = $derived(rotationHandlePoint(preview.geometry, 28 * controlScale));
@@ -205,8 +206,8 @@
   function anchorName(anchor: ShapeAnchor): string {
     if (typeof anchor === "string") return anchor.replaceAll("-", " ");
     return "handle" in anchor
-      ? `${anchor.handle} curve handle for anchor ${anchor.node + 1}`
-      : `anchor ${anchor.node + 1}`;
+      ? $t("workspace.curveHandleForAnchor", { "handle": anchor.handle === "in" ? $t("terms.incoming") : $t("terms.outgoing"), "value2": anchor.node + 1 })
+      : $t("workspace.anchor", { "value1": anchor.node + 1 });
   }
 
   function nodePoint(anchor: Extract<ShapeAnchor, { node: number }>): Point | null {
@@ -237,6 +238,7 @@
       stroke={preview.style.strokeColor}
       stroke-width={preview.style.strokeWidthPt}
       stroke-dasharray={shapeDashArray(preview.style)?.join(" ")}
+      stroke-dashoffset={preview.style.patternOffsetPt}
       stroke-linecap="round"
       stroke-linejoin="round"
       opacity={preview.style.opacity}
@@ -251,7 +253,7 @@
       role="button"
       tabindex={grabbable && onSelect ? 0 : -1}
       aria-pressed={selected}
-      aria-label={`${label}. Press Enter to edit anchor points${spline ? ", then C to open or close the curve and Delete to remove an anchor" : ""}.`}
+      aria-label={$t("workspace.pressEnterToEditAnchorPoints", { "label": label, "value2": spline ? $t("workspace.thenCToOpenOrCloseThe") : "" })}
       onpointerdown={(event) => begin(event, "move")}
       onpointermove={update}
       onpointerup={finish}
@@ -273,7 +275,7 @@
   viewBox={`0 0 ${pageWidthPt} ${pageHeightPt}`}
   width={pageWidthPt}
   height={pageHeightPt}
-  aria-label={`${label} controls`}
+  aria-label={$t("workspace.controls", { "label": label })}
 >
   <g data-object-id={preview.id}
     transform={`translate(${preview.x} ${preview.y}) rotate(${preview.rotation}) scale(${preview.scale})`}>
@@ -304,7 +306,7 @@
           r={22 * controlScale}
           role="button"
           tabindex={grabbable ? 0 : -1}
-          aria-label={`Rotate ${describeShape(preview.geometry)}, currently ${Math.round(preview.rotation)} degrees. Hold Shift to snap to 15 degree steps, or use the bracket keys.`}
+          aria-label={$t("workspace.rotateCurrentlyDegreesHoldShiftToSnap", { "value1": describeShape(preview.geometry, $t), "value2": Math.round(preview.rotation) })}
           onpointerdown={(event) => begin(event, "rotate")}
           onpointermove={update}
           onpointerup={finish}
@@ -319,7 +321,7 @@
           r={22 * controlScale}
           role="button"
           tabindex={grabbable ? 0 : -1}
-          aria-label={`Resize ${describeShape(preview.geometry)}. Hold Shift to keep proportions.`}
+          aria-label={$t("workspace.resizeHoldShiftToKeepProportions", { "value1": describeShape(preview.geometry, $t) })}
           onpointerdown={(event) => begin(event, "resize")}
           onpointermove={update}
           onpointerup={finish}
@@ -352,7 +354,7 @@
             r={22 * controlScale}
             role="button"
             tabindex={grabbable ? 0 : -1}
-            aria-label={`Move ${anchorName(item.anchor)}`}
+            aria-label={$t("workspace.move2", { "value1": anchorName(item.anchor) })}
             onpointerdown={(event) => begin(event, "anchor", item.anchor)}
             onpointermove={update}
             onpointerup={finish}

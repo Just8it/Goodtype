@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { shapeMessage, toolMessage } from "../i18n/labels";
+  import { t, notice, renderMessage, type UiText } from "../i18n";
   import type { Point } from "../geometry/coordinates";
   import {
     boundedRasterScale,
@@ -32,9 +34,15 @@
   } from "../ink/pipeline";
   import { patternedOutlinePoints } from "../ink/pattern";
   import { limitedTaper, outlinePath } from "../ink/outline";
-  import { paintStrata } from "../ink/paint";
+  import type { PaintedStratum } from "../ink/paint";
+  import { preparedStrata } from "../ink/prepare";
+  import { onDestroy } from "svelte";
+  import { finishInkPreview, inkPreviewBounds, previewMatrix, type InkPreview } from "../ink/preview";
   import { straightenStroke } from "../ink/straighten";
-  import type { EraserReach } from "../settings";
+  import type { EraserMode, EraserReach } from "../settings";
+  import { eraseThrough, foldReplacements, INK_LAYER_LIMITS, type EraserSweep } from "../ink/erase";
+  import { eraseShapesThrough } from "../shape/erase";
+  import type { ShapeView } from "./pageView";
   import {
     shapeFromDrag,
     shapeDashArray,
@@ -59,6 +67,7 @@
     onLassoSelect?: (polygon: Point[], strokeIds: string[]) => void;
     showSelectionBounds?: boolean;
     strokes?: Stroke[];
+    strokePreview?: InkPreview | null;
     newStrokeZIndex?: number;
     objectZIndices?: number[];
     selectedStrokeIds?: string[];
@@ -89,12 +98,22 @@
     eraseRadiusPt?: number;
     /** Highlighter-only leaves pen ink and shapes alone. */
     eraserReach?: EraserReach;
+    /** Whole strokes, or only the ink under the eraser (ADR 0037). */
+    eraserMode?: EraserMode;
+    /** Strokes the precise eraser may cut; ink the page protects as a whole is left alone. */
+    erasable?: (stroke: Stroke) => boolean;
     calibration?: PressureCalibration;
     pointerMapping?: PointerMapping;
     /// The topmost shape the eraser reaches at this point, if any. Shapes live above this
     /// component, so it asks rather than holding them.
     shapeAt?: (point: Point, reachPt: number) => { id: string; zIndex: number } | null;
     onEraseShape?: (id: string) => void;
+    /** Shapes the precise eraser may cut. Absent on a page that is not being edited. */
+    shapes?: ShapeView[];
+    /** What the shapes look like mid-gesture: each cut shape and its pieces, or null when done. */
+    onShapeErasePreview?: (preview: ReadonlyMap<string, ShapeView[]> | null) => void;
+    /** On pen-up: each shape the precise eraser cut, and the pieces that replace it. */
+    onShapesErased?: (replaced: ReadonlyMap<string, ShapeView[]>) => void;
     /** Fires as an erase gesture lifts, whether or not it reached anything. */
     onEraseEnd?: () => void;
     /** An erase began from the pen's eraser end or side button while another tool was held. */
@@ -102,7 +121,8 @@
     onStrokeFinalized?: (stroke: Stroke) => void;
     onShapeFinalized?: (shape: ShapeDraft) => void;
     onInkShapeRecognized?: (stroke: Stroke, shape: ShapeDraft) => void;
-    onStrokesChange?: (strokes: Stroke[]) => void;
+    /** `replaced` maps each stroke a precise erase changed to the fragments now standing for it. */
+    onStrokesChange?: (strokes: Stroke[], replaced?: ReadonlyMap<string, string[]>) => void;
     onSelectionChange?: (strokeIds: string[]) => void;
     onStrokeMetrics?: (metrics: StrokePerformance) => void;
   };
@@ -112,6 +132,7 @@
     onLassoSelect,
     showSelectionBounds = true,
     strokes = [],
+    strokePreview = null,
     newStrokeZIndex = 1_000_001,
     objectZIndices = [],
     selectedStrokeIds = [],
@@ -140,10 +161,15 @@
     heldLineMinimumPt = 6,
     eraseRadiusPt = 8,
     eraserReach = "everything",
+    eraserMode = "stroke",
+    erasable,
     calibration = DEFAULT_PRESSURE_CALIBRATION,
     pointerMapping = DEFAULT_POINTER_MAPPING,
     shapeAt,
     onEraseShape,
+    shapes,
+    onShapeErasePreview,
+    onShapesErased,
     onEraseEnd,
     onEraserEngaged,
     onStrokeFinalized,
@@ -156,7 +182,7 @@
 
   let surface = $state<HTMLDivElement>();
   let immediateCanvas = $state<HTMLCanvasElement>();
-  let status = $state("No ink selected");
+  let status = $state<UiText>(notice("workspace.noInkSelected"));
   let strokeCount = $state(0);
   let eraserCursor = $state<Point | null>(null);
   let eraserPressed = $state(false);
@@ -164,6 +190,15 @@
   // deep-proxying five thousand strokes and their samples would be pure cost.
   let localStrokes = $state.raw<Stroke[]>([]);
   let localSelection = $state.raw<string[]>([]);
+  let localPreview = $state.raw<InkPreview | null>(null);
+  /** Fragments a precise erase is still cutting; they paint as runs of their own until pen-up. */
+  let liveInk = $state.raw<ReadonlySet<string> | undefined>(undefined);
+  let eraseFrame = 0;
+  const preview = $derived(strokePreview ?? localPreview);
+  const previewIds = $derived(preview?.ids);
+  const previewScale = $derived(preview?.scale ?? 1);
+  let paintedTransform = $state<string | undefined>();
+  $effect(() => { if (preview) paintedTransform = previewMatrix(preview); });
 
   type Gesture =
     | {
@@ -190,6 +225,7 @@
         pointerId: number;
         initial: Stroke[];
         initialSelection: string[];
+        precise: PreciseGesture | null;
       }
     | {
         kind: "move";
@@ -205,6 +241,17 @@
         initial: Stroke[];
       };
 
+  /** The precise eraser's path not yet cut, and what it has cut so far in this gesture. */
+  type PreciseGesture = {
+    last: Point;
+    pending: EraserSweep[];
+    replaced: Map<string, string[]>;
+    limited: boolean;
+    /** The page's shapes as this gesture has cut them so far, and their lineage. */
+    shapes: ShapeView[];
+    shapesReplaced: Map<string, string[]>;
+  };
+
   let gesture: Gesture | null = null;
   let holdTimer: ReturnType<typeof setTimeout> | undefined;
   let splineFrame: number | undefined;
@@ -219,14 +266,13 @@
     // Reads `strokes`, never `localStrokes`: now that the local copy is reactive, reading it here
     // would make this effect depend on its own output, and every freshly drawn stroke would be
     // wiped by a re-run before the parent had committed it back.
-    localStrokes = strokes.slice();
+    localStrokes = strokes;
     strokeCount = strokes.length;
     localSelection = selectedStrokeIds.slice();
     pageWidthPt;
     pageHeightPt;
     const canvas = immediateCanvas;
     if (!canvas) return;
-    sizeCanvas(canvas);
     redrawImmediate();
   });
 
@@ -238,44 +284,32 @@
   // The hairline floor follows zoom in half-octave tiers, not every pinch step: with a per-step
   // floor every page rebuilt and re-joined all of its outlines dozens of times a second.
   const inkZoomTier = $derived(zoomTier(zoom));
-  const committedStrata = $derived(
-    paintStrata(localStrokes, objectZIndices, 0.5 / inkZoomTier),
-  );
-  const selectedBounds = $derived(selectionBounds(localStrokes, localSelection));
+  let committedStrata = $state.raw<PaintedStratum[]>([]);
+  $effect(() => {
+    const current = localStrokes;
+    const boundaries = objectZIndices;
+    const floor = 0.5 / inkZoomTier;
+    const selected = previewIds;
+    const scale = previewScale;
+    const live = liveInk;
+    let cancelled = false;
+    void preparedStrata(current, boundaries, floor, selected, scale, live).then(result => {
+      if (!cancelled) {
+        committedStrata = result;
+        paintedTransform = preview ? previewMatrix(preview) : undefined;
+      }
+    });
+    return () => { cancelled = true; };
+  });
+  const selectedBounds = $derived(inkPreviewBounds(localStrokes, localSelection, preview));
   const eraserRadiusOnPage = $derived(eraseRadiusPt / zoom);
-
-  function sizeCanvas(canvas: HTMLCanvasElement): void {
-    const width = Math.max(pageWidthPt, 1);
-    const height = Math.max(pageHeightPt, 1);
-    const density = window.devicePixelRatio || 1;
-    // The parent page already applies zoom as a GPU-composited CSS transform. This transient
-    // canvas only needs device resolution; scaling it with zoom caused a large bitmap allocation
-    // on every pinch update, even on empty pages.
-    const renderScale = boundedRasterScale(
-      { width, height },
-      density,
-      MAX_IMMEDIATE_CANVAS_PIXELS,
-    );
-    canvas.style.width = `${width}px`;
-    canvas.style.height = `${height}px`;
-    const pixelWidth = Math.ceil(width * renderScale);
-    const pixelHeight = Math.ceil(height * renderScale);
-    if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
-      canvas.width = pixelWidth;
-      canvas.height = pixelHeight;
-    }
-    canvas.style.left = "0px";
-    canvas.style.top = "0px";
-    canvas.getContext("2d")?.setTransform(renderScale, 0, 0, renderScale, 0, 0);
-  }
 
   /**
    * Re-fit the live canvas to what is on screen, at the resolution the zoom actually shows.
    *
-   * The page-sized bitmap above is device resolution at 100%, and the zoom transform enlarges it,
-   * so a live stroke at 4x looked four times blurrier than the same stroke once committed as SVG.
-   * Covering only the visible part of the page keeps the bitmap near one screen of pixels at any
-   * zoom. It runs once as a gesture starts, never during a pinch, so zooming allocates nothing.
+   * Dormant pages need no backing bitmap. Covering only the visible part of the page keeps live
+   * ink crisp near one screen of pixels at any zoom. Allocate as a gesture starts, never during
+   * a pinch or a committed-stroke update.
    */
   function fitCanvasToView(canvas: HTMLCanvasElement): void {
     if (!surface) return;
@@ -343,13 +377,20 @@
     if (role === "erase") {
       if (tool !== "eraser") onEraserEngaged?.();
       eraserPressed = true;
+      const point = pagePoint(event);
+      const precise = eraserMode === "precise"
+        ? { last: point, pending: [], replaced: new Map<string, string[]>(), limited: false,
+          shapes: shapes ?? [], shapesReplaced: new Map<string, string[]>() }
+        : null;
       gesture = {
         kind: "erase",
         pointerId: event.pointerId,
         initial: localStrokes,
         initialSelection: localSelection,
+        precise,
       };
-      eraseAt(pagePoint(event));
+      if (precise) sweepEraser(precise, [point]);
+      else eraseAt(point);
       return;
     }
     if (role === "draw") {
@@ -465,24 +506,22 @@
     } else if (gesture.kind === "lasso") {
       gesture.points.push(pagePoint(event));
     } else if (gesture.kind === "erase") {
-      eraseAt(pagePoint(event));
+      if (gesture.precise) {
+        const events = event.getCoalescedEvents?.() ?? [];
+        sweepEraser(gesture.precise, (events.length > 0 ? events : [event]).map(pagePoint));
+      } else eraseAt(pagePoint(event));
     } else if (gesture.kind === "move") {
       const point = pagePoint(event);
-      localStrokes = moveSelected(gesture.initial, localSelection, {
-        x: point.x - gesture.start.x,
-        y: point.y - gesture.start.y,
-      });
+      localPreview = { ids: localSelection, delta: {
+        x: point.x - gesture.start.x, y: point.y - gesture.start.y,
+      }, scale: 1, anchor: { x: 0, y: 0 } };
     } else {
       const point = pagePoint(event);
       const distance = Math.hypot(point.x - gesture.anchor.x, point.y - gesture.anchor.y);
-      localStrokes = scaleSelected(
-        gesture.initial,
-        localSelection,
-        gesture.anchor,
-        distance / gesture.startDistance,
-      );
+      localPreview = { ids: localSelection, delta: { x: 0, y: 0 },
+        anchor: gesture.anchor, scale: Math.max(0.05, distance / gesture.startDistance) };
     }
-    redrawImmediate();
+    requestImmediate();
   }
 
   function pointerUp(event: PointerEvent): void {
@@ -502,12 +541,12 @@
       );
       const stroke = completedStroke(gesture.strokeTool, points);
       if (heldShape && onInkShapeRecognized) {
-        status = `Converted held ink to ${heldShape.geometry.kind}`;
+        status = notice("workspace.convertedHeldInkTo", { "kind": shapeMessage(heldShape.geometry.kind) });
         onInkShapeRecognized(stroke, heldShape);
       } else {
         localStrokes = [...localStrokes, stroke];
         strokeCount = localStrokes.length;
-        status = `Added ${stroke.tool} stroke`;
+        status = notice("workspace.addedStroke", { "tool": toolMessage(stroke.tool) });
         onStrokeFinalized?.(stroke);
       }
       onStrokeMetrics?.({
@@ -525,10 +564,10 @@
       };
       const draft = shapeDraft(finalGesture);
       if (draft) {
-        status = `Added ${draft.geometry.kind}`;
+        status = notice("workspace.added", { "kind": shapeMessage(draft.geometry.kind) });
         onShapeFinalized?.(draft);
       } else {
-        status = "Shape was too small to add";
+        status = notice("workspace.shapeWasTooSmallToAdd");
       }
     } else if (gesture.kind === "lasso") {
       const polygon = gesture.points.concat(pagePoint(event));
@@ -538,19 +577,34 @@
       if (onLassoSelect) onLassoSelect(polygon, ids);
       else setSelection(ids);
     } else if (gesture.kind === "erase") {
+      const precise = gesture.precise;
+      if (precise) {
+        // Cut the last stretch now rather than on a frame that would arrive after the commit.
+        sweepEraser(precise, [pagePoint(event)]);
+        cancelEraseFrame();
+        applyPreciseErase();
+        status = preciseStatus(precise) ?? status;
+        liveInk = undefined;
+        if (precise.shapesReplaced.size > 0) {
+          onShapesErased?.(shapePieces(precise));
+          onShapeErasePreview?.(null);
+        }
+      }
       if (localStrokes !== gesture.initial) {
-        onStrokesChange?.(localStrokes);
+        onStrokesChange?.(localStrokes, precise?.replaced);
         onSelectionChange?.(localSelection);
       }
       finishPointer(event.pointerId);
       onEraseEnd?.();
       return;
     } else {
+      if (localPreview && (gesture.kind === "move" || gesture.kind === "scale"))
+        localStrokes = finishInkPreview(gesture.initial, localPreview);
       onStrokesChange?.(localStrokes);
       status =
         gesture.kind === "move"
-          ? `Moved ${localSelection.length} selected stroke${localSelection.length === 1 ? "" : "s"}`
-          : `Scaled ${localSelection.length} selected stroke${localSelection.length === 1 ? "" : "s"}`;
+          ? notice("counts.movedStrokes", { count: localSelection.length })
+          : notice("counts.scaledStrokes", { count: localSelection.length });
     }
     finishPointer(event.pointerId);
   }
@@ -581,7 +635,12 @@
   function finishPointer(pointerId: number): void {
     clearHoldTimer();
     clearSplineFrame();
+    cancelEraseFrame();
+    liveInk = undefined;
+    // A cancelled gesture leaves no pieces behind; a finished one has already handed them over.
+    if (gesture?.kind === "erase" && gesture.precise?.shapesReplaced.size) onShapeErasePreview?.(null);
     gesture = null;
+    localPreview = null;
     eraserPressed = false;
     if (surface?.hasPointerCapture(pointerId)) surface.releasePointerCapture(pointerId);
     redrawImmediate();
@@ -603,7 +662,7 @@
     if (!shape && !stroke) return;
     if (shape && (!stroke || shape.zIndex >= (stroke.zIndex ?? DEFAULT_INK_Z_INDEX))) {
       onEraseShape?.(shape.id);
-      status = "Erased one shape";
+      status = notice("workspace.erasedOneShape");
       return;
     }
     const next = eraseStrokeAt(localStrokes, point, eraserRadiusOnPage, reaches);
@@ -614,15 +673,86 @@
       localStrokes.some((stroke) => stroke.id === id),
     );
     redrawImmediate();
-    status = "Erased one complete stroke";
+    status = notice("workspace.erasedOneCompleteStroke");
+  }
+
+  /** Queue the eraser's path since the last event. Ink is cut once a frame, never per sample. */
+  function sweepEraser(precise: PreciseGesture, points: Point[]): void {
+    for (const point of points) {
+      precise.pending.push({ from: precise.last, to: point, radius: eraserRadiusOnPage });
+      precise.last = point;
+    }
+    if (!eraseFrame) {
+      eraseFrame = requestAnimationFrame(() => {
+        eraseFrame = 0;
+        applyPreciseErase();
+      });
+    }
+  }
+
+  function cancelEraseFrame(): void {
+    if (eraseFrame) cancelAnimationFrame(eraseFrame);
+    eraseFrame = 0;
+  }
+
+  /**
+   * Cut every reachable stroke under the queued path. Unlike the whole-stroke eraser this takes
+   * everything under it, not just the top mark, the way a real eraser takes every layer of ink.
+   */
+  function applyPreciseErase(): void {
+    const precise = gesture?.kind === "erase" ? gesture.precise : null;
+    if (!precise || precise.pending.length === 0) return;
+    const sweeps = precise.pending;
+    precise.pending = [];
+    const highlighterOnly = eraserReach === "highlighter";
+    if (!highlighterOnly) cutShapes(precise, sweeps);
+    const result = eraseThrough(localStrokes, sweeps, {
+      reaches: (stroke) => (!highlighterOnly || stroke.tool === "highlighter") && (erasable?.(stroke) ?? true),
+      newId: () => crypto.randomUUID(),
+      limits: INK_LAYER_LIMITS,
+    });
+    precise.limited ||= result.limited;
+    if (result.strokes === localStrokes) return;
+    foldReplacements(precise.replaced, result.replaced);
+    liveInk = new Set([...precise.replaced.values()].flat());
+    localStrokes = result.strokes;
+    strokeCount = localStrokes.length;
+    const remaining = new Set(localStrokes.map((stroke) => stroke.id));
+    localSelection = localSelection.filter((id) => remaining.has(id));
+  }
+
+  /** Cut the page's shapes along the same path; they render elsewhere, so they go as a preview. */
+  function cutShapes(precise: PreciseGesture, sweeps: EraserSweep[]): void {
+    const result = eraseShapesThrough(precise.shapes, sweeps, () => crypto.randomUUID());
+    if (result.shapes === precise.shapes) return;
+    precise.shapes = result.shapes;
+    foldReplacements(precise.shapesReplaced, result.replaced);
+    onShapeErasePreview?.(shapePieces(precise));
+  }
+
+  function shapePieces(precise: PreciseGesture): Map<string, ShapeView[]> {
+    const byId = new Map(precise.shapes.map((shape) => [shape.id, shape]));
+    return new Map([...precise.shapesReplaced].map(([id, pieces]) =>
+      [id, pieces.map((piece) => byId.get(piece)!).filter(Boolean)]));
+  }
+
+  /** One message for the whole gesture, announced once as it lifts. */
+  function preciseStatus(precise: PreciseGesture): UiText | null {
+    if (precise.limited) return notice("workspace.inkLimitReached");
+    const outcomes = [...precise.replaced.values()];
+    const cut = outcomes.filter((fragments) => fragments.length > 0).length;
+    if (cut > 0) return notice("workspace.erasedPartOfStrokes", { count: cut });
+    if (outcomes.length > 0) return notice("workspace.erasedStrokes", { count: outcomes.length });
+    if (precise.shapesReplaced.size > 0) return notice("workspace.erasedTheShape");
+    return null;
   }
 
   function setSelection(ids: string[]): void {
     localSelection = ids;
     status =
       ids.length === 0
-        ? "No ink selected"
-        : `${ids.length} stroke${ids.length === 1 ? "" : "s"} selected`;
+        ? notice("workspace.noInkSelected")
+        : notice("counts.selectedStrokes", { count: ids.length });
     onSelectionChange?.(ids);
     redrawImmediate();
   }
@@ -640,7 +770,7 @@
       strokeCount = localStrokes.length;
       onStrokesChange?.(localStrokes);
       setSelection([]);
-      status = "Deleted selected ink";
+      status = notice("workspace.deletedSelectedInk");
       return;
     }
     const amount = event.shiftKey ? 10 : 1;
@@ -654,7 +784,7 @@
       event.preventDefault();
       localStrokes = moveSelected(localStrokes, localSelection, deltas[event.key]);
       onStrokesChange?.(localStrokes);
-      status = "Moved selected ink";
+      status = notice("workspace.movedSelectedInk");
       redrawImmediate();
       return;
     }
@@ -669,12 +799,14 @@
         event.key === "-" ? 0.9 : 1.1,
       );
       onStrokesChange?.(localStrokes);
-      status = "Scaled selected ink";
+      status = notice("workspace.scaledSelectedInk");
       redrawImmediate();
     }
   }
 
   function redrawImmediate(): void {
+    if (immediateFrame) cancelAnimationFrame(immediateFrame);
+    immediateFrame = 0;
     const context = canvasContext(immediateCanvas);
     if (!context || !immediateCanvas) return;
     context.clearRect(0, 0, pageWidthPt, pageHeightPt);
@@ -703,6 +835,17 @@
       context.restore();
     }
   }
+
+  let immediateFrame = 0;
+  function requestImmediate(): void {
+    if (!immediateFrame) immediateFrame = requestAnimationFrame(() => redrawImmediate());
+  }
+  onDestroy(() => {
+    if (immediateFrame) cancelAnimationFrame(immediateFrame);
+    cancelEraseFrame();
+    clearHoldTimer();
+    clearSplineFrame();
+  });
 
   /**
    * The stroke still under the pen. It lives on canvas because immediate feedback matters more
@@ -809,7 +952,7 @@
         { snapDegrees: shapeConstrain ? SHAPE_SNAP_DEGREES : 0, minimumLineLengthPt: heldLineMinimumPt },
       )?.draft ?? null;
       if (active.shapePreview) {
-        status = `Release to use ${active.shapePreview.geometry.kind}; continue drawing to keep ink`;
+        status = notice("workspace.releaseToUseContinueDrawingToKeep", { "kind": shapeMessage(active.shapePreview.geometry.kind) });
         redrawImmediate();
       }
     }, SHAPE_HOLD_MS);
@@ -891,11 +1034,13 @@
     aria-hidden="true"
   >
     {#each stratum.paths as painted (painted.key)}
-      <path d={painted.d} fill={painted.color} fill-opacity={painted.opacity} fill-rule="nonzero" />
+      <path d={painted.d} transform={painted.selected ? paintedTransform : undefined} fill={painted.color} fill-opacity={painted.opacity} fill-rule="nonzero" />
     {/each}
   </svg>
 {/each}
 <canvas
+  width="1"
+  height="1"
   bind:this={immediateCanvas}
   class="immediate"
   style:z-index={tool === "highlighter" && newStrokeZIndex < 0 ? newStrokeZIndex : 2147483645}
@@ -909,7 +1054,7 @@
   style:width={`${pageWidthPt}px`}
   style:height={`${pageHeightPt}px`}
   role="button"
-  aria-label={`Ink canvas. ${strokeCount} strokes. ${status}. Arrow keys move selected ink; plus and minus scale it; Delete removes it.`}
+  aria-label={$t("workspace.inkCanvasStrokesArrowKeysMoveSelected", { "strokeCount": strokeCount, "value2": renderMessage(status, $t) })}
   tabindex="0"
   onpointerdown={pointerDown}
   onpointermove={pointerMove}
@@ -975,7 +1120,7 @@
   {/if}
 </div>
 
-<p class="status" aria-live="polite">{status}</p>
+<p class="status" aria-live="polite">{renderMessage(status, $t)}</p>
 
 <style>
   .ink-surface {

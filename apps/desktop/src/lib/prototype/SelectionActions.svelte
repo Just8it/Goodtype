@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { subjectLabel } from "../i18n/labels";
+  import { t } from "../i18n";
   type Props = {
     /** "page" is the context bar over empty canvas, where only Paste applies. */
     subject: "ink" | "image" | "shape" | "Typst block" | "items" | "page";
@@ -49,13 +51,13 @@
   class="selection-actions"
   style:left={`${left}px`}
   style:top={`${top}px`}
-  aria-label={subject === "page" ? "Page actions" : `Selected ${subject} actions`}
+  aria-label={subject === "page" ? $t("workspace.pageActions") : $t("workspace.selectedActions", { "subject": subjectLabel(subject, $t) })}
 >
   {#if onMove}
   <button
     type="button"
-    title={`Move selected ${subject} back one layer`}
-    aria-label={`Move selected ${subject} back one layer`}
+    title={$t("workspace.moveSelectedBackOneLayer", { "subject": subjectLabel(subject, $t) })}
+    aria-label={$t("workspace.moveSelectedBackOneLayer", { "subject": subjectLabel(subject, $t) })}
     disabled={!canMoveBack}
     onclick={() => onMove(-1)}
   >
@@ -67,8 +69,8 @@
   </button>
   <button
     type="button"
-    title={`Move selected ${subject} forward one layer`}
-    aria-label={`Move selected ${subject} forward one layer`}
+    title={$t("workspace.moveSelectedForwardOneLayer", { "subject": subjectLabel(subject, $t) })}
+    aria-label={$t("workspace.moveSelectedForwardOneLayer", { "subject": subjectLabel(subject, $t) })}
     disabled={!canMoveForward}
     onclick={() => onMove(1)}
   >
@@ -82,10 +84,10 @@
   {#if onGroup}
     <button
       type="button"
-      title={grouped ? "Ungroup ink from Typst" : "Group ink with selected Typst block"}
+      title={grouped ? $t("workspace.ungroupInkFromTypst") : $t("workspace.groupSelectedInkWithTheSelectedTypst")}
       aria-label={grouped
-        ? "Ungroup selected ink from its Typst block"
-        : "Group selected ink with the selected Typst block"}
+        ? $t("workspace.ungroupInkFromTypst")
+        : $t("workspace.groupSelectedInkWithTheSelectedTypst")}
       onclick={onGroup}
     >
       {#if grouped}
@@ -106,8 +108,8 @@
   {#if onConvert}
     <button
       type="button"
-      title="Convert selected ink to an editable shape"
-      aria-label="Convert selected ink to an editable shape"
+      title={$t("workspace.convertSelectedInkToAnEditableShape")}
+      aria-label={$t("workspace.convertSelectedInkToAnEditableShape")}
       onclick={onConvert}
     >
       <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -117,7 +119,7 @@
     </button>
   {/if}
   {#if onCut}
-    <button type="button" title="Cut (Ctrl+X)" aria-label={`Cut selected ${subject}`} onclick={onCut}>
+    <button type="button" title={$t("workspace.cutCtrlX")} aria-label={$t("workspace.cutSelected", { "subject": subjectLabel(subject, $t) })} onclick={onCut}>
       <svg viewBox="0 0 24 24" aria-hidden="true">
         <circle class="ring" cx="6.5" cy="7" r="2.5"></circle>
         <circle class="ring" cx="6.5" cy="17" r="2.5"></circle>
@@ -128,8 +130,8 @@
   {#if onCopy}
     <button
       type="button"
-      title={`Copy (Ctrl+C)`}
-      aria-label={`Copy selected ${subject}`}
+      title={$t("workspace.copyCtrlC")}
+      aria-label={$t("workspace.copySelected", { "subject": subjectLabel(subject, $t) })}
       onclick={onCopy}
     >
       <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -141,8 +143,8 @@
   {#if onPaste}
     <button
       type="button"
-      title={pasteDisabled ? "Nothing copied yet" : "Paste here (Ctrl+V)"}
-      aria-label="Paste here"
+      title={pasteDisabled ? $t("workspace.nothingCopiedYet") : $t("workspace.pasteHereCtrlV")}
+      aria-label={$t("workspace.pasteHere")}
       disabled={pasteDisabled}
       onclick={onPaste}
     >
@@ -155,8 +157,8 @@
   {#if onDuplicate}
     <button
       type="button"
-      title={`Duplicate (Ctrl+D)`}
-      aria-label={`Duplicate selected ${subject}`}
+      title={$t("workspace.duplicateCtrlD")}
+      aria-label={$t("workspace.duplicateSelected", { "subject": subjectLabel(subject, $t) })}
       onclick={onDuplicate}
     >
       <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -169,8 +171,8 @@
   {#if onDelete}
     <button
       type="button"
-      title={`Remove ${subject}`}
-      aria-label={`Remove selected ${subject} from this page`}
+      title={$t("workspace.remove2", { "subject": subjectLabel(subject, $t) })}
+      aria-label={$t("workspace.removeSelectedFromPage", { subject: subjectLabel(subject, $t) })}
       onclick={onDelete}
     >
       <svg viewBox="0 0 24 24" aria-hidden="true">

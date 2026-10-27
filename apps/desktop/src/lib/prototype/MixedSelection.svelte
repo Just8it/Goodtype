@@ -1,13 +1,25 @@
 <script lang="ts">
+  import { t } from "../i18n";
   import type { Bounds } from "../ink/selection";
   import type { Point } from "../geometry/coordinates";
   import { viewportToPage } from "../geometry/coordinates";
+  import { onDestroy } from "svelte";
   let { bounds, zoom, onStart, onPreview, onEnd }: {
     bounds: Bounds; zoom: number; onStart: () => void;
     onPreview: (delta: Point, scale: number, anchor: Point) => void;
     onEnd: (cancelled: boolean) => void;
   } = $props();
   let drag: { id: number; x: number; y: number; bounds: Bounds; scale: boolean } | null = null;
+  let previewFrame = 0;
+  let pending: { delta: Point; scale: number; anchor: Point } | null = null;
+  function flushPreview() {
+    if (previewFrame) cancelAnimationFrame(previewFrame);
+    previewFrame = 0;
+    const preview = pending;
+    pending = null;
+    if (preview) onPreview(preview.delta, preview.scale, preview.anchor);
+  }
+  onDestroy(() => { if (previewFrame) cancelAnimationFrame(previewFrame); });
   function begin(event: PointerEvent, scale = false) {
     if (event.button !== 0 || event.buttons !== 1) return;
     event.preventDefault(); event.stopPropagation();
@@ -25,13 +37,15 @@
     const b = drag.bounds;
     const scale = drag.scale ? Math.max(0.05, Math.hypot(b.right - b.left + dx, b.bottom - b.top + dy) /
       Math.max(1, Math.hypot(b.right - b.left, b.bottom - b.top))) : 1;
-    onPreview(drag.scale ? { x: 0, y: 0 } : { x: dx, y: dy }, scale, { x: b.left, y: b.top });
+    pending = { delta: drag.scale ? { x: 0, y: 0 } : { x: dx, y: dy }, scale, anchor: { x: b.left, y: b.top } };
+    if (!previewFrame) previewFrame = requestAnimationFrame(flushPreview);
   }
   function end(event: PointerEvent) {
     if (!drag || event.pointerId !== drag.id) return;
     event.preventDefault(); event.stopPropagation();
     const cancelled = event.type !== "pointerup";
-    if (!cancelled) move(event);
+    if (!cancelled) { move(event); flushPreview(); }
+    else { pending = null; flushPreview(); }
     drag = null;
     onEnd(cancelled);
   }
@@ -44,11 +58,11 @@
   }
 </script>
 
-<svg class="mixed-selection" role="group" aria-label="Mixed canvas selection" style:--zoom={zoom}>
-  <rect role="button" tabindex="0" aria-label="Move selected items" use:focusOnMount
+<svg class="mixed-selection" role="group" aria-label={$t("workspace.mixedCanvasSelection")} style:--zoom={zoom}>
+  <rect role="button" tabindex="0" aria-label={$t("workspace.moveSelectedItems")} use:focusOnMount
     x={bounds.left} y={bounds.top} width={Math.max(1, bounds.right - bounds.left)} height={Math.max(1, bounds.bottom - bounds.top)}
     onkeydown={keydown} onpointerdown={event => begin(event)} onpointermove={move} onpointerup={end} onpointercancel={end} onlostpointercapture={end} />
-  <circle role="button" tabindex="0" aria-label="Scale selected items" cx={bounds.right} cy={bounds.bottom} r={22 / zoom}
+  <circle role="button" tabindex="0" aria-label={$t("workspace.scaleSelectedItems")} cx={bounds.right} cy={bounds.bottom} r={22 / zoom}
     onkeydown={keydown} onpointerdown={event => begin(event, true)} onpointermove={move} onpointerup={end} onpointercancel={end} onlostpointercapture={end} />
   <circle class="visible-handle" cx={bounds.right} cy={bounds.bottom} r={6 / zoom} />
 </svg>

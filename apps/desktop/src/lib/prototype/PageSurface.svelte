@@ -4,7 +4,8 @@
   import type { StrokePerformance } from "../ink/metrics";
   import type { TypstCompileResult } from "../editor/typst";
   import { getCachedTypst } from "../editor/typstCache";
-  import { isPresetTemplate, pagePresetPath, templatePreamble, withPagePreset } from "../page/presets";
+  import { pagePresetPath } from "../page/presets";
+  import type { TypstCompileRequest } from "../ipc/typst";
   import {
     DEFAULT_POINTER_MAPPING,
     DEFAULT_PRESSURE_CALIBRATION,
@@ -12,7 +13,7 @@
     type PointerMapping,
     type PressureCalibration,
   } from "../ink/pipeline";
-  import type { EraserReach } from "../settings";
+  import type { EraserMode, EraserReach } from "../settings";
   import ImageObject from "./ImageObject.svelte";
   import InkSurface from "./InkSurface.svelte";
   import ShapeObject from "./ShapeObject.svelte";
@@ -40,6 +41,7 @@
     shapes = [],
     results = {},
     strokes = [],
+    strokePreview = null,
     newStrokeZIndex = 1_000_001,
     selectedStrokeIds = [],
     lassoTargets,
@@ -55,7 +57,6 @@
     sharedStyle = "",
     pageTextBaselineGrid = true,
     presetRevision = 0,
-    templateSources = {},
     onRequestEdit,
     tool = "select",
     color = "#16212b",
@@ -79,6 +80,8 @@
     heldLineMinimumPt = 6,
     eraseRadiusPt = 8,
     eraserReach = "everything",
+    eraserMode = "stroke",
+    erasable,
     calibration = DEFAULT_PRESSURE_CALIBRATION,
     pointerMapping = DEFAULT_POINTER_MAPPING,
     onEraseEnd,
@@ -101,6 +104,7 @@
     onChangeShape,
     onEditShape,
     onEraseShape,
+    onShapesErased,
     onStrokeFinalized,
     onShapeFinalized,
     onInkShapeRecognized,
@@ -116,6 +120,7 @@
     strokes?: Stroke[];
     newStrokeZIndex?: number;
     selectedStrokeIds?: string[];
+    strokePreview?: import("../ink/preview").InkPreview | null;
     lassoTargets?: import("./lasso").LassoTargets;
     onLassoSelect?: (polygon: import("../geometry/coordinates").Point[], strokeIds: string[]) => void;
     showSelectionBounds?: boolean;
@@ -132,8 +137,6 @@
     sharedStyle?: string;
     pageTextBaselineGrid?: boolean;
     presetRevision?: number;
-    /** Each notebook template's text by import path, to tell preamble templates from presets. */
-    templateSources?: Record<string, string>;
     onRequestEdit?: (id: string) => void;
     tool?: InkTool;
     color?: string;
@@ -153,6 +156,8 @@
     heldLineMinimumPt?: number;
     eraseRadiusPt?: number;
     eraserReach?: EraserReach;
+    eraserMode?: EraserMode;
+    erasable?: (stroke: Stroke) => boolean;
     calibration?: PressureCalibration;
     pointerMapping?: PointerMapping;
     onEraseEnd?: () => void;
@@ -166,12 +171,7 @@
     editingShapeId?: string | null;
     onCompile: (
       id: string,
-      request: {
-        source: string;
-        sharedStyle?: string | null;
-        widthPt: number;
-        generation: number;
-      },
+      request: TypstCompileRequest,
     ) => void;
     onSourceChange?: (id: string, source: string) => void;
     onTransform?: (id: string, transform: TypstTransform) => void;
@@ -184,13 +184,23 @@
     onChangeShape?: (shape: ShapeView, commit?: ShapeEditCommit) => void;
     onEditShape?: (id: string, editing: boolean) => void;
     onEraseShape?: (id: string) => void;
+    onShapesErased?: (replaced: ReadonlyMap<string, ShapeView[]>) => void;
     onStrokeFinalized?: (stroke: Stroke) => void;
     onShapeFinalized?: (shape: ShapeDraft) => void;
     onInkShapeRecognized?: (stroke: Stroke, shape: ShapeDraft) => void;
-    onStrokesChange?: (strokes: Stroke[]) => void;
+    onStrokesChange?: (strokes: Stroke[], replaced?: ReadonlyMap<string, string[]>) => void;
     onSelectionChange?: (ids: string[]) => void;
     onStrokeMetrics?: (metrics: StrokePerformance) => void;
   } = $props();
+
+  /**
+   * Shapes as a precise erase is cutting them. Held here rather than in the page's shapes so the
+   * gesture stays local; the pieces become real shapes once, on pen-up.
+   */
+  let shapeErasePreview = $state.raw<ReadonlyMap<string, ShapeView[]> | null>(null);
+  const displayedShapes = $derived(shapeErasePreview
+    ? shapes.flatMap((shape) => shapeErasePreview!.get(shape.id) ?? [shape])
+    : shapes);
 
   const toPageDelta = (screenDx: number, screenDy: number) => ({
     x: screenDx / zoom,
@@ -204,12 +214,10 @@
 
 {#snippet pageTextFor(typst: NonNullable<typeof pageTypst>)}
   {@const templatePath = pagePresetPath(typst.source)}
-  {@const template = templatePath ? templateSources[templatePath] : undefined}
-  {@const preamble = template !== undefined && !isPresetTemplate(template)}
   <PageText
-    source={preamble ? withPagePreset(typst.source, null) : typst.source}
+    source={typst.source}
     compileResult={results[typst.id] ?? null}
-    compileContext={preamble ? templatePreamble(template) : templatePath ? "" : sharedStyle}
+    compileContext={templatePath ? "" : sharedStyle}
     {background}
     geometry={{ widthPt: pageWidthPt, heightPt: pageHeightPt }}
     snapBlocksToGrid={pageTextBaselineGrid}
@@ -234,16 +242,18 @@
       initialY={block.y}
       initialLayoutWidthPt={block.layoutWidthPt}
       initialScale={block.scale}
+      rotation={block.rotation ?? 0}
       zIndex={block.zIndex}
       readingOrder={block.readingOrder}
       compileResult={results[block.id] ?? null}
-      cached={getCachedTypst(`${sharedStyle}\n${block.source}`, block.layoutWidthPt) ?? null}
+      cached={getCachedTypst(`${sharedStyle}\n${block.source}`, block.layoutWidthPt, root ?? "") ?? null}
       compileContext={sharedStyle}
       {root}
       selected={interactive && selectedBlockId === block.id}
       {toPageDelta}
       {pageWidthPt}
       {pageHeightPt}
+      {zoom}
       onSelect={interactive ? () => onSelectBlock?.(block.id) : undefined}
       onDeselect={interactive ? () => onDeselectBlock?.() : undefined}
       onCompile={(request) => onCompile(block.id, { ...request, sharedStyle })}
@@ -265,6 +275,7 @@
       widthPt={image.widthPt}
       heightPt={image.heightPt}
       scale={image.scale}
+      rotation={image.rotation ?? 0}
       zIndex={image.zIndex}
       readingOrder={image.readingOrder}
       selected={interactive && selectedImageId === image.id}
@@ -276,7 +287,7 @@
       onScale={(scale) => onScaleImage?.(image.id, scale)}
     />
   {/each}
-  {#each shapes as shape (shape.id)}
+  {#each displayedShapes as shape (shape.id)}
     <ShapeObject
       {shape}
       grabbable={interactive && shapesGrabbable}
@@ -294,12 +305,13 @@
 </div>
 <div class:object-input={directObjectInput} class="ink-layer">
   <InkSurface
+    {strokePreview}
     {strokes}
     {newStrokeZIndex}
     objectZIndices={[
       ...blocks.map((block) => block.zIndex),
       ...images.map((image) => image.zIndex),
-      ...shapes.map((shape) => shape.zIndex),
+      ...displayedShapes.map((shape) => shape.zIndex),
       ...(pageTypst ? [0] : []),
     ]}
     {selectedStrokeIds}
@@ -326,6 +338,8 @@
     {heldLineMinimumPt}
     {eraseRadiusPt}
     {eraserReach}
+    {eraserMode}
+    {erasable}
     {calibration}
     {pointerMapping}
     shapeAt={interactive
@@ -335,12 +349,15 @@
         }
       : undefined}
     onEraseShape={interactive ? (id) => onEraseShape?.(id) : undefined}
+    shapes={interactive ? shapes : undefined}
+    onShapeErasePreview={(preview) => (shapeErasePreview = preview)}
+    onShapesErased={interactive ? (replaced) => onShapesErased?.(replaced) : undefined}
     onEraseEnd={interactive ? () => onEraseEnd?.() : undefined}
     onEraserEngaged={interactive ? () => onEraserEngaged?.() : undefined}
     onStrokeFinalized={(stroke) => onStrokeFinalized?.(stroke)}
     onShapeFinalized={(shape) => onShapeFinalized?.(shape)}
     onInkShapeRecognized={(stroke, shape) => onInkShapeRecognized?.(stroke, shape)}
-    onStrokesChange={(next) => onStrokesChange?.(next)}
+    onStrokesChange={(next, replaced) => onStrokesChange?.(next, replaced)}
     onSelectionChange={(next) => onSelectionChange?.(next)}
     onStrokeMetrics={(metrics) => onStrokeMetrics?.(metrics)}
   />

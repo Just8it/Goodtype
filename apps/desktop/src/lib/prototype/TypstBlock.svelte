@@ -1,6 +1,8 @@
 <script lang="ts">
+  import { t } from "../i18n";
   import { onDestroy, onMount } from "svelte";
   import TypstEditor from "../editor/TypstEditor.svelte";
+  import TypstSizeControls from "./TypstSizeControls.svelte";
   import {
     applyTypstCompileResult,
     emptyTypstPreview,
@@ -10,14 +12,17 @@
   } from "../editor/typst";
   import type { CachedTypst } from "../editor/typstCache";
   import { keepOnPage } from "../geometry/placement";
+  import { rotatedVector } from "../geometry/coordinates";
   import type { TypstTransform } from "./pageView";
+  import { MIN_TYPST_WIDTH_PT, scaleTypstCorner } from "./typstSizing";
 
   type Gesture = {
-    kind: "move" | "reflow";
+    kind: "move" | "reflow" | "scale";
     pointerId: number;
     clientX: number;
     clientY: number;
     start: TypstTransform;
+    heightPt: number;
   };
 
   let {
@@ -27,6 +32,7 @@
     initialY,
     initialLayoutWidthPt,
     initialScale = 1,
+    rotation = 0,
     zIndex = 0,
     readingOrder = 0,
     compileResult = null,
@@ -45,6 +51,7 @@
     onEditingChange,
     inlineEditing = true,
     onRequestEdit,
+    zoom = 1,
   }: {
     id: string;
     source: string;
@@ -52,6 +59,7 @@
     initialY: number;
     initialLayoutWidthPt: number;
     initialScale?: number;
+    rotation?: number;
     zIndex?: number;
     readingOrder?: number;
     compileResult?: TypstCompileResult | null;
@@ -80,6 +88,7 @@
     inlineEditing?: boolean;
     /** Asks the page to edit this block in the side view. */
     onRequestEdit?: () => void;
+    zoom?: number;
   } = $props();
 
   let x = $state(0);
@@ -89,7 +98,8 @@
   let draftSource = $state("");
   let editing = $state(false);
   let blockElement = $state<HTMLElement>();
-  let editorAbove = $state(false);
+  let editorPosition = $state({ x: 0, y: 0 });
+  let editorWidthPx = $state(360);
   /// Roughly the docked editor's height (10 lines plus chrome); used only to choose a side.
   const DOCKED_EDITOR_HEIGHT_PX = 260;
   let gesture = $state<Gesture | null>(null);
@@ -158,12 +168,13 @@
     if (gesture) return;
     x = initialX;
     y = initialY;
+    const widthChanged = layoutWidthPt !== initialLayoutWidthPt;
     layoutWidthPt = initialLayoutWidthPt;
     scale = initialScale;
     if (draftSource !== source) {
       draftSource = source;
       requestCompile(0);
-    }
+    } else if (mounted && widthChanged) requestCompile(0);
   });
 
   $effect(() => {
@@ -179,14 +190,16 @@
     onEditingChange?.(editing);
   });
 
-  // The docked editor opens below the block, or above it when the block sits too close to the
-  // bottom of the window for the panel to fit.
+  // Place once on entry, outside the block transform: scaling/reflow must not move its controls.
   $effect(() => {
     if (!editing || !blockElement) return;
     const rect = blockElement.getBoundingClientRect();
-    editorAbove =
-      rect.bottom + DOCKED_EDITOR_HEIGHT_PX > window.innerHeight &&
-      rect.top > DOCKED_EDITOR_HEIGHT_PX;
+    const parent = blockElement.parentElement!.getBoundingClientRect();
+    editorWidthPx = Math.min(360, window.innerWidth - 24);
+    const above = rect.bottom + DOCKED_EDITOR_HEIGHT_PX > window.innerHeight && rect.top > DOCKED_EDITOR_HEIGHT_PX;
+    const left = Math.max(12, Math.min(rect.left, window.innerWidth - editorWidthPx - 12));
+    const top = above ? rect.top - DOCKED_EDITOR_HEIGHT_PX - 12 : rect.bottom + 12;
+    editorPosition = toPageDelta(left - parent.left, top - parent.top);
   });
 
   onDestroy(() => {
@@ -207,6 +220,8 @@
   }
 
   function startGesture(event: PointerEvent, kind: Gesture["kind"]) {
+    if (event.button !== 0) return;
+    onSelect?.();
     const target = event.currentTarget as HTMLElement;
     target.setPointerCapture(event.pointerId);
     gesture = {
@@ -214,7 +229,8 @@
       pointerId: event.pointerId,
       clientX: event.clientX,
       clientY: event.clientY,
-      start: { x, y, layoutWidthPt, scale },
+      start: { x, y, layoutWidthPt, scale, rotation },
+      heightPt: renderedHeightPt,
     };
     event.preventDefault();
   }
@@ -233,13 +249,16 @@
         { x: gesture.start.x + delta.x, y: gesture.start.y + delta.y },
         { widthPt: layoutWidthPt * scale, heightPt: renderedHeightPt * scale },
         { widthPt: pageWidthPt, heightPt: pageHeightPt },
+        undefined, rotation,
       );
       x = held.x;
       y = held.y;
+    } else if (gesture.kind === "scale") {
+      scale = scaleTypstCorner(gesture.start, gesture.heightPt, delta);
     } else {
       layoutWidthPt = Math.max(
-        72,
-        gesture.start.layoutWidthPt + delta.x / gesture.start.scale,
+        MIN_TYPST_WIDTH_PT,
+        gesture.start.layoutWidthPt + rotatedVector(delta, -rotation).x / gesture.start.scale,
       );
       requestCompile();
     }
@@ -247,7 +266,14 @@
 
   function finishGesture(event: PointerEvent) {
     if (!gesture || event.pointerId !== gesture.pointerId) return;
+    if (event.type === "pointerup") moveGesture(event);
     const completed = gesture;
+    if (event.type !== "pointerup") {
+      ({ x, y, layoutWidthPt, scale } = completed.start);
+      if (completed.kind === "reflow") requestCompile(0);
+      gesture = null;
+      return;
+    }
     gesture = null;
     if (completed.kind === "reflow") requestCompile(0);
     if (
@@ -256,12 +282,11 @@
       layoutWidthPt !== completed.start.layoutWidthPt ||
       scale !== completed.start.scale
     ) {
-      onTransform({ x, y, layoutWidthPt, scale });
+      onTransform({ x, y, layoutWidthPt, scale, rotation });
     }
   }
 
   function beginMove(event: PointerEvent) {
-    onSelect?.();
     startGesture(event, "move");
   }
 
@@ -281,36 +306,21 @@
   style:left={`${x}px`}
   style:top={`${y}px`}
   style:width={`${layoutWidthPt}px`}
-  style:transform={`scale(${scale})`}
+  style:transform={`rotate(${rotation}deg) scale(${scale})`}
+  style:--handle-scale={1 / (zoom * scale)}
   style:z-index={editing ? 1000 : zIndex}
-  aria-label={`Typst block ${id}, reading position ${readingOrder + 1}`}
+  aria-label={$t("workspace.typstBlockReadingPosition", { "id": id, "value2": readingOrder + 1 })}
   onpointermove={moveGesture}
   onpointerup={finishGesture}
   onpointercancel={finishGesture}
+  onlostpointercapture={finishGesture}
 >
-  {#if editing}
-    <!-- Floated out of flow so opening the editor never shifts the rendered block: the preview
-         stays exactly where it was and the source docks beside it. -->
-    <div class="editor-dock" class:above={editorAbove}>
-      <TypstEditor
-        value={draftSource}
-        {root}
-        ariaLabel={`Source for Typst block ${id}`}
-        onChange={updateSource}
-        onExit={() => {
-          editing = false;
-          onDeselect?.();
-        }}
-      />
-    </div>
-  {/if}
-
   <button
     type="button"
     class="preview"
     aria-pressed={selected}
-    aria-label={`Select Typst block ${id}; double-click to edit`}
-    title="Click to select; double-click to edit"
+    aria-label={$t("workspace.selectTypstBlockDoubleClickToEdit", { "id": id })}
+    title={$t("workspace.clickToSelectDoubleClickToEdit")}
     onpointerdown={beginMove}
     ondblclick={() => (inlineEditing ? (editing = true) : onRequestEdit?.())}
     onclick={onSelect}
@@ -318,13 +328,13 @@
     {#if svgUrl}
       <img
         src={svgUrl}
-        alt="Rendered Typst content"
+        alt={$t("workspace.renderedTypstContent")}
         draggable="false"
         style:width={`${svgWidthPx}px`}
         style:margin={`${-preview.padPt}px`}
       />
     {:else}
-      <span class="empty">No valid preview</span>
+      <span class="empty">{$t("workspace.noValidPreview")}</span>
     {/if}
   </button>
 
@@ -336,14 +346,39 @@
     </ul>
   {/if}
 
+  {#if selected}
   <button
     type="button"
     class="handle resize"
-    aria-label="Change Typst layout width"
-    title="Drag to change line wrapping"
+    aria-label={$t("workspace.changeTypstLayoutWidth")}
+    title={$t("workspace.dragToChangeLineWrapping")}
     onpointerdown={(event) => startGesture(event, "reflow")}></button
   >
+  <button
+    type="button"
+    class="handle scale-corner"
+    aria-label={$t("workspace.scaleTypstBlock")}
+    title={$t("workspace.dragToScaleTypstBlock")}
+    onpointerdown={(event) => startGesture(event, "scale")}></button
+  >
+  {/if}
 </section>
+
+{#if editing}
+  <div class="editor-dock" data-preserve-selection
+    style:left={`${editorPosition.x}px`} style:top={`${editorPosition.y}px`}
+    style:width={`${editorWidthPx}px`} style:transform={`scale(${1 / zoom})`}>
+    <TypstSizeControls {scale} {layoutWidthPt}
+      onChange={change => onTransform({ x, y, layoutWidthPt, scale, rotation, ...change })} />
+    <TypstEditor
+      value={draftSource}
+      {root}
+      ariaLabel={$t("workspace.sourceForTypstBlock", { "id": id })}
+      onChange={updateSource}
+      onExit={() => { editing = false; onDeselect?.(); }}
+    />
+  </div>
+{/if}
 
 <style>
   /* The block's box is its Typst layout box, which runs cap height to baseline — that is what the
@@ -385,19 +420,17 @@
     z-index: 3;
   }
 
-  /* Out of flow, so the rendered block never moves when the source opens. */
   .editor-dock {
     position: absolute;
-    /* Clears the gutter as well as the box, so the source never sits on the block's frame. */
-    top: calc(100% + var(--block-gutter) + 6px);
-    left: 0;
-    z-index: 4;
-    min-width: 100%;
-  }
-
-  .editor-dock.above {
-    top: auto;
-    bottom: calc(100% + var(--block-gutter) + 6px);
+    z-index: 1001;
+    padding: 5px;
+    border: 1px solid var(--edge);
+    border-radius: var(--radius-lg);
+    background: var(--panel);
+    color: var(--text);
+    pointer-events: auto;
+    transform-origin: top left;
+    box-shadow: 0 18px 44px rgb(0 0 0 / 35%);
   }
 
   .preview:focus-visible,
@@ -465,7 +498,8 @@
     min-width: 28px;
     height: 44px;
     min-height: 44px;
-    transform: translateY(-50%);
+    transform: translateY(-50%) scale(var(--handle-scale));
+    transform-origin: center;
     border: 0;
     background: transparent;
     cursor: ew-resize;
@@ -480,6 +514,24 @@
     border: 1.5px solid white;
     border-radius: 3px;
     background: #2f6fdb;
+    content: "";
+  }
+  .scale-corner {
+    right: calc(-22px - var(--block-gutter));
+    bottom: calc(-22px - var(--block-gutter));
+    width: 44px;
+    height: 44px;
+    border: 0;
+    background: transparent;
+    transform: scale(var(--handle-scale));
+    cursor: nwse-resize;
+  }
+  .scale-corner::after {
+    position: absolute;
+    inset: 16px;
+    border: 2px solid #2f6fdb;
+    border-radius: 2px;
+    background: white;
     content: "";
   }
 </style>
