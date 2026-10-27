@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { t, formatNumber, displayLocale } from "../i18n";
   import { dismissable } from "./dismiss";
   import { resolvePosition, type AddPageGroup, type AddPageSource, type AddPageWhere } from "./addPage";
 
@@ -64,16 +65,16 @@
     onClose: () => void;
   } = $props();
 
-  const CHOICES: { value: AddPageWhere; label: string }[] = [
-    { value: "before", label: "Before" },
-    { value: "after", label: "After" },
-    { value: "last", label: "Last page" },
-  ];
+  const CHOICES: { value: AddPageWhere; label: string }[] = $derived([
+    { value: "before", label: $t("workspace.before") },
+    { value: "after", label: $t("workspace.after") },
+    { value: "last", label: $t("workspace.lastPage") },
+  ]);
 
-  const ORIENTATIONS = [
-    { value: "portrait" as const, label: "Portrait" },
-    { value: "landscape" as const, label: "Landscape" },
-  ];
+  const ORIENTATIONS = $derived([
+    { value: "portrait" as const, label: $t("library.portrait") },
+    { value: "landscape" as const, label: $t("library.landscape") },
+  ]);
 
   const MM_PER_PT = 25.4 / 72;
   const MAX_RUN = 50;
@@ -114,8 +115,8 @@
     const width = geometry.widthPt * MM_PER_PT;
     const height = geometry.heightPt * MM_PER_PT;
     return inches
-      ? `${(width / 25.4).toFixed(1)} × ${(height / 25.4).toFixed(1)} in`
-      : `${Math.round(width)} × ${Math.round(height)} mm`;
+      ? $t("workspace.in", { "value1": formatNumber(width / 25.4, { minimumFractionDigits: 1, maximumFractionDigits: 1 }, $displayLocale), "value2": formatNumber(height / 25.4, { minimumFractionDigits: 1, maximumFractionDigits: 1 }, $displayLocale) })
+      : $t("workspace.mm3", { "value1": Math.round(width), "value2": Math.round(height) });
   });
 
   // Reads back what the choice actually means for this notebook, so "Before" on page 1 says so
@@ -123,15 +124,15 @@
   const destination = $derived(
     !canPlaceRelative || where === "last"
       ? pageCount > 0
-        ? `new page ${pageCount + 1}, at the end`
-        : "the first page of the notebook"
+        ? $t("workspace.newPageAtTheEnd", { "value1": pageCount + 1 })
+        : $t("workspace.theFirstPageOfTheNotebook")
       : where === "before"
-        ? `new page ${pageNumber}, pushing page ${pageNumber} down`
-        : `new page ${pageNumber + 1}, after the page you are on`,
+        ? $t("workspace.newPagePushingPageDown", { "pageNumber": pageNumber, "pageNumber2": pageNumber })
+        : $t("workspace.newPageAfterThePageYouAre", { "value1": pageNumber + 1 }),
   );
 
   const addLabel = $derived(
-    importing ? "Import PDF" : count > 1 ? `Add ${count} pages` : "Add page",
+    importing ? $t("workspace.importPDF") : count > 1 ? $t("workspace.addPages", { "count": count }) : $t("workspace.addPage"),
   );
 
   const summary = $derived([
@@ -223,25 +224,25 @@
   class="add-page-panel"
   role="dialog"
   tabindex="-1"
-  aria-label="Add page"
+  aria-label={$t("workspace.addPage")}
   onkeydown={keydown}
 >
   <header>
     <div class="subject">
-      <strong>Add page</strong>
+      <strong>{$t("workspace.addPage")}</strong>
       <!-- Re-keyed so the line fades when it changes: it is the one thing here that answers
            "what will this do", and a silent swap is easy to miss. -->
       {#key destination}<span class="destination">{destination}</span>{/key}
     </div>
 
-    <div class="run" role="group" aria-label="How many pages">
-      <span class="run-label">pages</span>
-      <button type="button" aria-label="One fewer page" disabled={count <= 1} onclick={() => step(-1)}>−</button>
+    <div class="run" role="group" aria-label={$t("workspace.howManyPages")}>
+      <span class="run-label">{$t("workspace.pages")}</span>
+      <button type="button" aria-label={$t("workspace.oneFewerPage")} disabled={count <= 1} onclick={() => step(-1)}>−</button>
       <output aria-live="polite">{count}</output>
-      <button type="button" aria-label="One more page" disabled={count >= MAX_RUN} onclick={() => step(1)}>+</button>
+      <button type="button" aria-label={$t("workspace.oneMorePage")} disabled={count >= MAX_RUN} onclick={() => step(1)}>+</button>
     </div>
 
-    <button type="button" class="close" aria-label="Close" onclick={onClose}>
+    <button type="button" class="close" aria-label={$t("library.close")} onclick={onClose}>
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18" /></svg>
     </button>
   </header>
@@ -250,8 +251,8 @@
     <!-- Column A. Everything that decides the shape of the page, visible at once. -->
     <div class="settings">
       <section>
-        <div class="eyebrow">Where</div>
-        <div class="row" role="radiogroup" aria-label="Where the new page goes">
+        <div class="eyebrow">{$t("workspace.where")}</div>
+        <div class="row" role="radiogroup" aria-label={$t("workspace.whereTheNewPageGoes")}>
           {#each CHOICES as choice (choice.value)}
             {@const on = (canPlaceRelative ? where : "last") === choice.value}
             <button
@@ -271,10 +272,10 @@
 
       <section>
         <div class="eyebrow spread">
-          <span>Size</span>
+          <span>{$t("workspace.size")}</span>
           <span class="readout">{readout}</span>
         </div>
-        <div class="pairs" role="radiogroup" aria-label="Page size">
+        <div class="pairs" role="radiogroup" aria-label={$t("library.pageSize")}>
           {#each sizes as size (size.id)}
             <button
               type="button"
@@ -291,7 +292,7 @@
         </div>
       </section>
 
-      <div class="row" role="radiogroup" aria-label="Orientation">
+      <div class="row" role="radiogroup" aria-label={$t("library.orientation")}>
         {#each ORIENTATIONS as choice (choice.value)}
           <button
             type="button"
@@ -311,8 +312,8 @@
       </div>
 
       <section>
-        <div class="eyebrow">Paper</div>
-        <div class="row" role="radiogroup" aria-label="Paper colour">
+        <div class="eyebrow">{$t("workspace.paper")}</div>
+        <div class="row" role="radiogroup" aria-label={$t("library.paperColour")}>
           {#each tones as tone (tone.id)}
             <button
               type="button"
@@ -335,14 +336,14 @@
     <!-- Column B. Filters and the import sit in a fixed band; only the papers scroll. -->
     <div class="library">
       <div class="band">
-        <div class="filters" role="group" aria-label="Paper kind">
+        <div class="filters" role="group" aria-label={$t("workspace.paperKind")}>
           <button
             type="button"
             class="pill"
             class:on={category === "all"}
             aria-pressed={category === "all"}
             onclick={() => (category = "all")}
-          >All<span class="tally">{paperGroups.reduce((total, group) => total + group.sources.length, 0)}</span></button>
+          >{$t("workspace.all")}<span class="tally">{paperGroups.reduce((total, group) => total + group.sources.length, 0)}</span></button>
           {#each paperGroups as group (group.id)}
             <button
               type="button"
@@ -356,7 +357,7 @@
 
         <!-- Pinned above the library rather than filed inside it. Neither the page you are on nor
              a document is a kind of ruling, and both used to sit among the paper shelves. -->
-        <div class="pins" role="group" aria-label="Start from">
+        <div class="pins" role="group" aria-label={$t("workspace.startFrom")}>
         {#each pinned as source (source.id)}
           <button
             type="button"
@@ -376,7 +377,7 @@
             </span>
             <span class="words">
               <span class="title">{source.label}</span>
-              <span class="sub">{source.disabled ? "Needs the desktop app" : (source.detail ?? "")}</span>
+              <span class="sub">{source.disabled ? $t("workspace.needsTheDesktopApp") : (source.detail ?? "")}</span>
             </span>
           </button>
         {/each}
@@ -417,7 +418,7 @@
 
     <!-- Column C. Not a swatch of the paper: the page, at the proportions it will have. -->
     <div class="preview">
-      <div class="eyebrow">Preview</div>
+      <div class="eyebrow">{$t("workspace.preview")}</div>
       <div class="stage">
         <div class="sheet-preview" class:pdf={importing} style:aspect-ratio={previewAspect} style:--ratio={previewAspect}>
           {#if importing}
@@ -445,15 +446,15 @@
           onclick={(event) => commit(event.shiftKey)}
         >{addLabel}</button>
         <span class="note">
-          {added > 0 ? `${added} added — panel still open` : "Hold Shift to add and keep this open"}
+          {added > 0 ? $t("workspace.addedPanelStillOpen", { "added": added }) : $t("workspace.holdShiftToAddAndKeepThis")}
         </span>
       </div>
     </div>
   </div>
 
   <footer>
-    <span>&crarr; add · &#8679;&crarr; add and keep open · esc close</span>
-    <span>{importing ? "PDF import · paper ignored" : `${selected?.label ?? ""} · ${sizes.find((size) => size.id === sizeId)?.name ?? ""}`}</span>
+    <span>{$t("workspace.addAddAndKeepOpenEscClose")}</span>
+    <span>{importing ? $t("workspace.pdfImportPaperIgnored") : `${selected?.label ?? ""} · ${sizes.find((size) => size.id === sizeId)?.name ?? ""}`}</span>
   </footer>
 </div>
 

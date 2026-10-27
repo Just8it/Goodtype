@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { t } from "../i18n";
   import { tick } from "svelte";
   import { cycledTab, type NotebookTab } from "./tabs";
 
@@ -47,7 +48,7 @@
   bind:this={tablist}
   class="notebook-tabs"
   role="tablist"
-  aria-label="Open notebooks"
+  aria-label={$t("workspace.openNotebooks")}
   tabindex="-1"
   onkeydown={keydown}
 >
@@ -73,8 +74,8 @@
       <button
         class="tab-close"
         type="button"
-        aria-label={`Close ${tab.title}`}
-        title={`Close ${tab.title}`}
+        aria-label={$t("workspace.close", { "title": tab.title })}
+        title={$t("workspace.close", { "title": tab.title })}
         disabled={busy}
         onclick={() => void onClose(tab.root)}
       >

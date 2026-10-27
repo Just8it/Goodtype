@@ -1,5 +1,7 @@
 <script lang="ts">
-  import { invoke } from "@tauri-apps/api/core";
+  import { t } from "../i18n";
+  import { errorDetails } from "../ipc/errors";
+  import { searchNotebook } from "../ipc/notebook";
   import type { SearchHit } from "../settings";
 
   let {
@@ -20,21 +22,28 @@
   let failure = $state("");
   let inputElement = $state<HTMLInputElement>();
   let searchTimer: ReturnType<typeof setTimeout> | undefined;
+  let searchGeneration = 0;
 
   $effect(() => {
     inputElement?.focus();
     return () => {
+      searchGeneration += 1;
       if (searchTimer) clearTimeout(searchTimer);
     };
   });
 
   function scheduleSearch() {
+    searchGeneration += 1;
+    hits = [];
     if (searchTimer) clearTimeout(searchTimer);
     searchTimer = setTimeout(run, 200);
   }
 
   async function run() {
+    const generation = ++searchGeneration;
+    const requestedRoot = root;
     const trimmed = query.trim();
+    const current = () => generation === searchGeneration && root === requestedRoot && query.trim() === trimmed;
     if (!trimmed || !tauriAvailable) {
       hits = [];
       searched = false;
@@ -42,11 +51,14 @@
       return;
     }
     try {
-      hits = await invoke<SearchHit[]>("search_notebook", { root, query: trimmed });
+      const result = await searchNotebook(requestedRoot, trimmed);
+      if (!current()) return;
+      hits = result;
       searched = true;
       failure = "";
     } catch (error) {
-      failure = String(error);
+      if (!current()) return;
+      failure = errorDetails(error);
     }
   }
 
@@ -62,30 +74,30 @@
 </script>
 
 <!-- Notebook-scoped Typst source search (Phase 2 §3.7): typed content only, no OCR. -->
-<section class="search" role="search" aria-label="Search typed notebook content">
+<section class="search" role="search" aria-label={$t("workspace.searchTypedNotebookContent")}>
   <div class="field">
     <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-4-4"></path></svg>
     <input
       bind:this={inputElement}
       bind:value={query}
       type="search"
-      placeholder="Search typed content…"
-      aria-label="Search typed notebook content"
+      placeholder={$t("workspace.searchTypedContent2")}
+      aria-label={$t("workspace.searchTypedNotebookContent")}
       oninput={scheduleSearch}
       onkeydown={keydown}
     />
-    <button type="button" aria-label="Close search" onclick={onClose}>×</button>
+    <button type="button" aria-label={$t("workspace.closeSearch")} onclick={onClose}>×</button>
   </div>
   {#if failure}
-    <p class="state">{failure}</p>
+    <p class="state">{$t("errors.operation", { details: failure })}</p>
   {:else if searched && hits.length === 0}
-    <p class="state">No typed content matches.</p>
+    <p class="state">{$t("workspace.noTypedContentMatches")}</p>
   {:else if hits.length > 0}
-    <ol aria-label="Search results">
+    <ol aria-label={$t("workspace.searchResults")}>
       {#each hits as hit (hit.pageId + hit.objectId)}
         <li>
           <button type="button" onclick={() => onNavigate(hit)}>
-            <span class="page">p. {hit.pageNumber}</span>
+            <span class="page">{$t("workspace.p", { "pageNumber": hit.pageNumber })}</span>
             <span class="excerpt">{hit.excerpt}</span>
           </button>
         </li>

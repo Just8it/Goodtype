@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { t } from "../i18n";
   import { focusTrap } from "./focus";
 
   /**
@@ -47,7 +48,7 @@
     <h2 id="confirm-title">{title}</h2>
     <p id="confirm-detail">{detail}</p>
     <div class="actions">
-      <button bind:this={cancelButton} type="button" onclick={onCancel}>Cancel</button>
+      <button bind:this={cancelButton} type="button" onclick={onCancel}>{$t("library.cancel")}</button>
       <button class="danger" type="button" onclick={onConfirm}>{confirmLabel}</button>
     </div>
   </div>

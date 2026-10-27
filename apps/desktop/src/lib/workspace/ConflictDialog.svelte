@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { t } from "../i18n";
   let {
     detail,
     onReload,
@@ -17,15 +18,14 @@
 -->
 <div class="scrim" role="presentation">
   <div class="dialog" role="alertdialog" aria-modal="true" aria-labelledby="conflict-title" aria-describedby="conflict-detail">
-    <h2 id="conflict-title">Notebook changed outside Goodtype</h2>
+    <h2 id="conflict-title">{$t("workspace.notebookChangedOutsideGoodtype")}</h2>
     <p id="conflict-detail">{detail}</p>
     <p>
-      Your latest unsaved change was not written. Reload to continue from the files on disk,
-      or cancel to keep this view open without saving.
+      {$t("workspace.yourLatestUnsavedChangeWasNotWritten")}
     </p>
     <div class="actions">
-      <button class="primary" type="button" onclick={onReload}>Reload notebook</button>
-      <button type="button" onclick={onCancel}>Cancel</button>
+      <button class="primary" type="button" onclick={onReload}>{$t("workspace.reloadNotebook")}</button>
+      <button type="button" onclick={onCancel}>{$t("library.cancel")}</button>
     </div>
   </div>
 </div>

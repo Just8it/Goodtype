@@ -78,6 +78,14 @@ describe("clipboard bundles", () => {
     expect(bundleCenter(bundle({ blocks: [block] }))).toEqual({ x: 100, y: 40 });
   });
 
+  it("centres rotated copies on their visible bounds", () => {
+    const image = { bytes: new Uint8Array(), mime: "image/png", alt: "rotated", x: 50, y: 60,
+      widthPt: 30, heightPt: 10, scale: 1, rotation: 90 };
+    const center = bundleCenter(bundle({ images: [image] }))!;
+    expect(center.x).toBeCloseTo(45);
+    expect(center.y).toBeCloseTo(75);
+  });
+
   it("knows an empty copy and marks a copy for the system clipboard", () => {
     expect(isEmptyBundle(bundle())).toBe(true);
     expect(isEmptyBundle(bundle({ shapes: [shape] }))).toBe(false);

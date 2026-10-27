@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { t } from "../i18n";
   import type { RecoveryCandidate } from "../settings";
 
   let {
@@ -23,37 +24,36 @@
 -->
 <div class="scrim" role="presentation">
   <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="recovery-title">
-    <h2 id="recovery-title">Recovered work found</h2>
+    <h2 id="recovery-title">{$t("workspace.recoveredWorkFound")}</h2>
     <p>
-      An earlier save was interrupted. The confirmed notebook stayed intact, and the
-      interrupted version was kept. Restore it as a new change, or discard it.
+      {$t("workspace.anEarlierSaveWasInterruptedTheConfirmed")}
     </p>
     <ul>
       {#each candidates as candidate (candidate.fileName)}
         <li>
           <div class="summary">
             {#if candidate.error}
-              <strong>Unreadable recovered work</strong>
+              <strong>{$t("workspace.unreadableRecoveredWork")}</strong>
               <span>{candidate.fileName}</span>
               <span>{candidate.error}</span>
             {:else}
-              <strong>Page {candidate.pageId}</strong>
-              <span>interrupted at revision {candidate.candidateRevision}; confirmed revision {candidate.confirmedRevision}</span>
+              <strong>{$t("workspace.page3", { "pageId": candidate.pageId ?? "—" })}</strong>
+              <span>{$t("workspace.interruptedAtRevisionConfirmedRevision", { "candidateRevision": candidate.candidateRevision ?? "—", "confirmedRevision": candidate.confirmedRevision ?? "—" })}</span>
             {/if}
           </div>
           <div class="actions">
             <button class="primary" type="button" disabled={busy || !!candidate.error} onclick={() => onRestore(candidate.fileName)}>
-              Restore
+              {$t("workspace.restore")}
             </button>
             <button type="button" disabled={busy} onclick={() => onDiscard(candidate.fileName)}>
-              Discard
+              {$t("workspace.discard")}
             </button>
           </div>
         </li>
       {/each}
     </ul>
     <div class="footer">
-      <button type="button" onclick={onClose}>Decide later</button>
+      <button type="button" onclick={onClose}>{$t("workspace.decideLater")}</button>
     </div>
   </div>
 </div>

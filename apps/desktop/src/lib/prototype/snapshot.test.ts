@@ -110,7 +110,7 @@ describe("projectSnapshot", () => {
       background: base.page.background,
       inkLayerId: "ink-a",
       inkLayerPath: "ink/a.json",
-      strokes: [stroke("new")],
+      strokes: [stroke("new"), ...base.inkLayers[1].strokes],
       typst: [
         {
           id: "typst-a",
@@ -183,6 +183,46 @@ describe("projectSnapshot", () => {
     expect(projected.inkLayers[1]).toEqual({ ...base.inkLayers[1], schemaVersion: 2 });
     expect(projected.blocks.find(({ path }) => path === "shared.typ")).toEqual(base.blocks[0]);
   });
+
+  it("restamps modifiedAt only on objects whose fields or Typst source changed", () => {
+    const earlier = "2026-01-01T00:00:00Z";
+    const typst: PageObject = { ...fields("typst-a", 0), type: "typst", sourcePath: "blocks/a.typ",
+      layoutWidthPt: 200, measuredWidthPt: 180, measuredHeightPt: 40 };
+    const image: PageObject = { ...fields("image-a", 1), type: "image", sourcePath: "assets/a.png",
+      widthPt: 100, heightPt: 80, altText: "kept" };
+    const base: NotebookSnapshot = {
+      manifest: { schemaVersion: 1, id: "notebook", title: "Notebook",
+        pages: [{ id: "page-a", path: "pages/page-a.json", geometry: { widthPt: 595, heightPt: 842 } }],
+        defaultPage: { geometry: { widthPt: 595, heightPt: 842 }, background: { kind: "plain", color: "#ffffff" } },
+        sharedStylePath: null, createdAt: earlier, modifiedAt: earlier },
+      page: { schemaVersion: 1, id: "page-a", revision: 3, geometry: { widthPt: 595, heightPt: 842 },
+        background: { kind: "plain", color: "#ffffff" }, objects: [typst, image],
+        readingOrder: ["typst-a", "image-a"], inkLayers: [{ id: "ink-a", path: "ink/a.ink" }] },
+      blocks: [{ path: "blocks/a.typ", bytes: Array.from(new TextEncoder().encode("old")) }],
+      assets: [],
+      inkLayers: [{ schemaVersion: 1, id: "ink-a", pageId: "page-a", strokes: [] }],
+    };
+    const project = (source: string, imageX: number) => projectSnapshot({
+      base, manifest: base.manifest, pageId: "page-a", revision: 3,
+      geometry: base.page.geometry, background: base.page.background,
+      inkLayerId: "ink-a", inkLayerPath: "ink/a.ink", strokes: [stroke("new")],
+      typst: [{ id: "typst-a", path: "blocks/a.typ", source, x: 0, y: 0, rotation: 0, layoutWidthPt: 200,
+        scale: 1, measuredWidthPt: 180, measuredHeightPt: 40, zIndex: 4, readingOrder: 0 }],
+      pageTypst: null,
+      images: [{ id: "image-a", path: "assets/a.png", alt: "kept", x: imageX, y: 20, rotation: 1,
+        widthPt: 100, heightPt: 80, scale: 1, zIndex: 5, readingOrder: 1 }],
+      shapes: [], sharedStyle: null, mixedGroup: null, groupedStrokeIds: [], now,
+    }).page.objects;
+    const stamp = (objects: PageObject[], id: string) => objects.find((object) => object.id === id)?.modifiedAt;
+
+    const strokeOnly = project("old", 10);
+    expect(stamp(strokeOnly, "typst-a")).toBe(earlier);
+    expect(stamp(strokeOnly, "image-a")).toBe(earlier);
+
+    const edited = project("new", 30);
+    expect(stamp(edited, "typst-a")).toBe(now);
+    expect(stamp(edited, "image-a")).toBe(now);
+  });
 });
 
 describe("schema version follows content, not the act of saving", () => {
@@ -227,6 +267,16 @@ describe("schema version follows content, not the act of saving", () => {
     expect(projected.manifest.schemaVersion).toBe(1);
     expect(projected.page.schemaVersion).toBe(1);
     expect(projected.inkLayers[0].schemaVersion).toBe(1);
+  });
+
+  it("creates a referenced drawing layer for a valid page that previously had no ink", () => {
+    const base = projectSnapshot(emptyProjection(manifest));
+    base.page.inkLayers = [];
+    base.inkLayers = [];
+    const projected = projectSnapshot({ ...emptyProjection(manifest), base, strokes: [stroke("first-ink")] });
+    expect(projected.page.inkLayers).toHaveLength(1);
+    expect(projected.page.inkLayers[0].id).toBe(projected.inkLayers[0].id);
+    expect(projected.inkLayers[0].strokes[0].id).toBe("first-ink");
   });
 
   it("raises it the moment the page holds a shape", () => {

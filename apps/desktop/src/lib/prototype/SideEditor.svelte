@@ -1,4 +1,6 @@
 <script lang="ts">
+  import type { Snippet } from "svelte";
+  import { t } from "../i18n";
   import TypstEditor from "../editor/TypstEditor.svelte";
   import WritingBar from "../editor/WritingBar.svelte";
   import EditorColorButton from "../editor/EditorColorButton.svelte";
@@ -23,7 +25,7 @@
     diagnostics = [],
     pageText = false,
     pageTextLineWrap = true,
-    styleTitle = "Notebook style",
+    styleTitle = $t("workspace.notebookStyle"),
     presets = [],
     presetBusy = false,
     onChange,
@@ -35,6 +37,7 @@
     onCreateBlock,
     onPresetAction,
     onPageTextLineWrapChange,
+    blockControls,
   }: {
     /** `edit` — the target is on this page; `away` — it is on another page; `none` — no target. */
     mode?: "edit" | "style" | "away" | "none";
@@ -62,6 +65,7 @@
     onCreateBlock?: () => void;
     onPresetAction?: (action: string) => void;
     onPageTextLineWrapChange?: (lineWrap: boolean) => void;
+    blockControls?: Snippet;
   } = $props();
 
   const MIN_WIDTH = 280;
@@ -123,18 +127,18 @@
   class="side-editor"
   class:dock-right={dock === "right"}
   style:width={`${width}px`}
-  aria-label="Typst source"
+  aria-label={$t("editor.typstSource")}
 >
   <!-- Identity strip: what this panel is holding, and how to move or close it. Everything you do
        *to* the text lives in the writing bar below, so this row never grows tool buttons. -->
   <header>
     <span class="identity">
-      <span class="title">{mode === "style" ? styleTitle : pageText ? "Page text" : mode === "edit" || mode === "away" ? blockLabel : "Typst source"}</span>
+      <span class="title">{mode === "style" ? styleTitle : pageText ? $t("workspace.pageText") : mode === "edit" || mode === "away" ? blockLabel : $t("editor.typstSource")}</span>
       <!-- Only when the target is somewhere you cannot see. While you are editing the page in
            view, the status strip already answers "which page", and printing it twice made
            neither one look like the answer. -->
       {#if pageNumber !== null && mode === "away"}
-        <span class="where">Page {pageNumber}</span>
+        <span class="where">{$t("workspace.page2", { "pageNumber": pageNumber })}</span>
       {/if}
     </span>
     {#if mode === "edit" || mode === "style"}
@@ -144,8 +148,8 @@
       <button
         type="button"
         class="icon"
-        aria-label="Explain at caret"
-        title="Explain at caret (F1)"
+        aria-label={$t("workspace.explainAtCaret")}
+        title={$t("workspace.explainAtCaretF")}
         onclick={() => void editor?.showHelp()}
       >
         <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -156,8 +160,8 @@
       <button
         type="button"
         class="icon"
-        aria-label="Format document"
-        title="Format document (Ctrl+Shift+F)"
+        aria-label={$t("workspace.formatDocument")}
+        title={$t("workspace.formatDocumentCtrlShiftF")}
         onclick={() => void editor?.formatDocument()}
       >
         <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -168,8 +172,8 @@
     <button
       type="button"
       class="icon"
-      aria-label={dock === "left" ? "Move panel to the right" : "Move panel to the left"}
-      title={dock === "left" ? "Move panel to the right" : "Move panel to the left"}
+      aria-label={dock === "left" ? $t("workspace.movePanelToTheRight") : $t("workspace.movePanelToTheLeft")}
+      title={dock === "left" ? $t("workspace.movePanelToTheRight") : $t("workspace.movePanelToTheLeft")}
       onclick={() => onDockChange(dock === "left" ? "right" : "left")}
     >
       <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -180,8 +184,8 @@
     <button
       type="button"
       class="icon"
-      aria-label="Close source view"
-      title="Close source view (Ctrl+Shift+E)"
+      aria-label={$t("workspace.closeSourceView")}
+      title={$t("workspace.closeSourceViewCtrlShiftE")}
       onclick={onClose}
     >
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5l14 14M19 5 5 19" /></svg>
@@ -198,6 +202,10 @@
     />
   {/if}
 
+  {#if mode === "edit" && !pageText && blockControls}
+    <div class="block-controls" data-preserve-selection>{@render blockControls()}</div>
+  {/if}
+
   {#if mode === "edit" || mode === "style"}
     <div class="body">
       <TypstEditor
@@ -206,7 +214,7 @@
         {root}
         maxLines={null}
         lineWrap={pageText && pageTextLineWrap}
-        ariaLabel={mode === "style" ? styleTitle : `Source for ${blockLabel}`}
+        ariaLabel={mode === "style" ? styleTitle : $t("workspace.sourceFor", { "blockLabel": blockLabel })}
         onChange={(next) => onChange(next)}
         onExit={onClose}
         onLineWrapToggle={pageText && onPageTextLineWrapChange
@@ -227,34 +235,34 @@
     <!-- The target is still held, just not on the page in view. Editing stays parked rather than
          writing to a page the writer cannot see. -->
     <div class="notice">
-      <p>{blockLabel} is on page {pageNumber}.</p>
+      <p>{$t("workspace.isOnPage", { "blockLabel": blockLabel, "pageNumber": pageNumber ?? "—" })}</p>
       <button type="button" class="action" onclick={() => onGoToBlock?.()}>
-        Go to page {pageNumber}
+        {$t("workspace.goToPage2", { "pageNumber": pageNumber ?? "—" })}
       </button>
-      <p class="quiet">Or double-click a Typst block on this page to edit that one instead.</p>
+      <p class="quiet">{$t("workspace.orDoubleClickATypstBlockOn")}</p>
     </div>
   {:else}
     <div class="notice">
       {#if pageText}
-        <p>This page has no Page text yet.</p>
+        <p>{$t("workspace.thisPageHasNoPageTextYet")}</p>
         <button type="button" class="action" onclick={() => onCreatePageText?.()}>
-          Write Page text
+          {$t("workspace.writePageText")}
         </button>
       {:else}
-        <p>What would you like to write?</p>
+        <p>{$t("workspace.whatWouldYouLikeToWrite")}</p>
         {#if hasAnyBlock}
           <button type="button" class="action" onclick={() => onGoToBlock?.()}>
-            Go to the first block
+            {$t("workspace.goToTheFirstBlock")}
           </button>
         {/if}
         <button type="button" class="action" onclick={() => onCreatePageText?.()}>
-          Write Page text
+          {$t("workspace.writePageText")}
         </button>
         <button type="button" class="action" onclick={() => onCreateBlock?.()}>
-          Add a Typst block
+          {$t("workspace.addATypstBlock")}
         </button>
       {/if}
-      <p class="quiet">Page text fills the writing area; Typst blocks stay movable.</p>
+      <p class="quiet">{$t("workspace.pageTextFillsTheWritingAreaTypst")}</p>
     </div>
   {/if}
 
@@ -266,7 +274,7 @@
   <div
     class="resizer"
     role="separator"
-    aria-label="Resize source view"
+    aria-label={$t("workspace.resizeSourceView")}
     aria-orientation="vertical"
     aria-valuenow={width}
     aria-valuemin={MIN_WIDTH}
@@ -281,6 +289,7 @@
 </aside>
 
 <style>
+  .block-controls { flex: none; padding: 0 8px 6px; background: var(--panel); }
   .side-editor {
     position: relative;
     display: flex;

@@ -1,5 +1,6 @@
 import type { AppSettings } from "../settings";
-import { PALETTE_TOOLS, type PaletteCommand } from "../prototype/palette";
+import { LANGUAGES, translate, formatNumber, type Translator } from "../i18n";
+import { paletteTools, type PaletteCommand } from "../prototype/palette";
 
 /**
  * What Settings holds, described as data rather than markup.
@@ -34,7 +35,7 @@ export type SettingControl =
       locked?: (settings: AppSettings) => boolean;
     }
   | {
-      kind: "choice";
+      kind: "choice" | "select";
       options: { value: string; label: string; hint?: string }[];
       read: (settings: AppSettings) => string;
       write: (settings: AppSettings, value: string) => AppSettings;
@@ -73,19 +74,36 @@ export type SettingGroup = {
   items: SettingItem[];
 };
 
-export const SETTING_GROUPS: SettingGroup[] = [
+export function settingGroups(t: Translator = translate, fonts: string[] = []): SettingGroup[] { return [
+  {
+    id: "appearance",
+    title: t("workspace.appearance"),
+    icon: "M12 3a9 9 0 1 0 0 18h2a2 2 0 0 0 0-4h-1a2 2 0 0 1 0-4h3a5 5 0 0 0 0-10z",
+    items: [{
+      id: "uiLanguage",
+      label: t("language.title"),
+      hint: t("language.hint"),
+      keywords: t("language.search").split(" "),
+      control: {
+        kind: "choice",
+        options: [...LANGUAGES],
+        read: (settings) => settings.uiLanguage,
+        write: (settings, value) => ({ ...settings, uiLanguage: value === "de" ? "de" : "en" }),
+      },
+    }],
+  },
   {
     id: "pen",
-    title: "Pen",
+    title: t("workspace.pen"),
     icon: "M15.5 3.5l5 5-9.5 9.5-5.5 1.5 1.5-5.5 9.5-9.5zM6 20l1.2-3.6",
     blurb:
-      "Nib, width and colour live on the palette, one tap away. What is here is how the pen answers your hand.",
+      t("workspace.nibWidthAndColourLiveOnThe"),
     items: [
       {
         id: "pressureEnabled",
-        label: "Use stylus pressure",
-        hint: "Off gives every pressure-sensitive pen a uniform width",
-        keywords: ["force", "stylus", "tilt"],
+        label: t("workspace.useStylusPressure"),
+        hint: t("workspace.offGivesEveryPressureSensitivePenA"),
+        keywords: [t("settingsSearch.pressureEnabled")],
         control: {
           kind: "toggle",
           read: (settings) => settings.pressureEnabled,
@@ -94,15 +112,15 @@ export const SETTING_GROUPS: SettingGroup[] = [
       },
       {
         id: "curve",
-        label: "Pressure curve",
-        hint: "Below 1 makes a light touch draw heavier; above 1 asks for more force",
-        keywords: ["calibration", "response", "sensitivity"],
+        label: t("workspace.pressureCurve"),
+        hint: t("workspace.belowMakesALightTouchDrawHeavier"),
+        keywords: [t("settingsSearch.curve")],
         control: {
           kind: "slider",
           min: 0.25,
           max: 3,
           step: 0.05,
-          format: (value) => value.toFixed(2),
+          format: (value) => formatNumber(value, { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
           read: (settings) => settings.calibration.curve,
           write: (settings, value) => ({
             ...settings,
@@ -112,15 +130,15 @@ export const SETTING_GROUPS: SettingGroup[] = [
       },
       {
         id: "smoothing",
-        label: "Stroke smoothing",
-        hint: "Steadies a line as it is drawn. High values round off deliberate detail",
-        keywords: ["stabiliser", "stabilizer", "shake", "jitter"],
+        label: t("workspace.strokeSmoothing"),
+        hint: t("workspace.steadiesALineAsItIsDrawn"),
+        keywords: [t("settingsSearch.smoothing")],
         control: {
           kind: "slider",
           min: 0,
           max: 0.8,
           step: 0.05,
-          format: (value) => value.toFixed(2),
+          format: (value) => formatNumber(value, { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
           read: (settings) => settings.calibration.smoothing,
           write: (settings, value) => ({
             ...settings,
@@ -130,9 +148,9 @@ export const SETTING_GROUPS: SettingGroup[] = [
       },
       {
         id: "drawAndHoldShapes",
-        label: "Draw and hold for shapes",
-        hint: "Pause at the end of a deliberate line or form to make it editable",
-        keywords: ["shape", "circle", "rectangle", "straighten", "quick shape"],
+        label: t("workspace.drawAndHoldForShapes"),
+        hint: t("workspace.pauseAtTheEndOfADeliberate"),
+        keywords: [t("settingsSearch.drawAndHoldShapes")],
         control: {
           kind: "toggle",
           read: (settings) => settings.drawAndHoldShapes,
@@ -141,9 +159,9 @@ export const SETTING_GROUPS: SettingGroup[] = [
       },
       {
         id: "drawWithFinger",
-        label: "Draw with finger",
-        hint: "One finger uses the tool in hand; two fingers pan and zoom. Touch is ignored while the pen is near the screen",
-        keywords: ["touch", "stylus only", "palm rejection", "finger"],
+        label: t("workspace.drawWithFinger"),
+        hint: t("workspace.oneFingerUsesTheToolInHand"),
+        keywords: [t("settingsSearch.drawWithFinger")],
         control: {
           kind: "toggle",
           read: (settings) => settings.drawWithFinger,
@@ -152,9 +170,9 @@ export const SETTING_GROUPS: SettingGroup[] = [
       },
       {
         id: "touchHistory",
-        label: "Double-tap with two fingers to undo",
-        hint: "Three fingers redo. Use two quick taps on the canvas; ignored while the pen is near the screen",
-        keywords: ["touch", "gesture", "redo", "history", "fingers", "double tap"],
+        label: t("workspace.doubleTapWithTwoFingersToUndo"),
+        hint: t("workspace.threeFingersRedoUseTwoQuickTaps"),
+        keywords: [t("settingsSearch.touchHistory")],
         control: {
           kind: "toggle",
           read: (settings) => settings.touchHistory,
@@ -163,15 +181,15 @@ export const SETTING_GROUPS: SettingGroup[] = [
       },
       {
         id: "penSideButton",
-        label: "Pen side button",
-        hint: "Hold the button on the barrel while writing. The eraser end always erases",
-        keywords: ["barrel", "stylus button", "right click", "shortcut"],
+        label: t("workspace.penSideButton"),
+        hint: t("workspace.holdTheButtonOnTheBarrelWhile"),
+        keywords: [t("settingsSearch.penSideButton")],
         control: {
           kind: "choice",
           options: [
-            { value: "eraser", label: "Eraser" },
-            { value: "lasso", label: "Lasso", hint: "Circle ink to select it" },
-            { value: "none", label: "Nothing", hint: "The pen keeps writing" },
+            { value: "eraser", label: t("workspace.eraser") },
+            { value: "lasso", label: t("workspace.lasso"), hint: t("workspace.circleInkToSelectIt") },
+            { value: "none", label: t("workspace.nothing"), hint: t("workspace.thePenKeepsWriting") },
           ],
           read: (settings) => settings.penSideButton,
           write: (settings, value) => ({
@@ -184,27 +202,39 @@ export const SETTING_GROUPS: SettingGroup[] = [
   },
   {
     id: "palette",
-    title: "Palette",
+    title: t("workspace.palette"),
     icon: "M4 7h16M4 12h16M4 17h16M9 4v16",
     blurb:
-      "Take tools you never use off the bar. Their keyboard shortcuts keep working, and dividers follow on their own.",
-    items: PALETTE_TOOLS.map((tool) => paletteToggle(tool.id, tool.label)),
+      t("workspace.takeToolsYouNeverUseOffThe"),
+    items: paletteTools(t).map((tool) => paletteToggle(tool.id, tool.label, t)),
   },
   {
     id: "editing",
-    title: "Editing",
+    title: t("workspace.editing"),
     icon: "M4 7h16M4 12h10M4 17h13",
     items: [
       {
+        id: "inlineTextFont",
+        label: t("settings.inlineTextFont"),
+        hint: t("settings.inlineTextFontHint"),
+        keywords: t("settings.inlineTextFontSearch").split(" "),
+        control: {
+          kind: "select",
+          options: [{ value: "", label: t("settings.inheritBlockFont") }, ...fonts.map(font => ({ value: font, label: font }))],
+          read: settings => settings.inlineTextFont,
+          write: (settings, value) => ({ ...settings, inlineTextFont: value }),
+        },
+      },
+      {
         id: "undoScope",
-        label: "Undo reaches",
-        hint: "What Ctrl+Z steps back through",
-        keywords: ["redo", "history", "ctrl z"],
+        label: t("workspace.undoReaches"),
+        hint: t("workspace.whatCtrlZStepsBackThrough"),
+        keywords: [t("settingsSearch.undoScope")],
         control: {
           kind: "choice",
           options: [
-            { value: "page", label: "This page", hint: "Only the page in view" },
-            { value: "notebook", label: "Whole notebook", hint: "The most recent change anywhere" },
+            { value: "page", label: t("editor.thisPage"), hint: t("workspace.onlyThePageInView") },
+            { value: "notebook", label: t("editor.wholeNotebook"), hint: t("workspace.theMostRecentChangeAnywhere") },
           ],
           read: (settings) => settings.undoScope,
           write: (settings, value) => ({
@@ -215,9 +245,9 @@ export const SETTING_GROUPS: SettingGroup[] = [
       },
       {
         id: "pullToAddPage",
-        label: "Pull past the last page to add one",
-        hint: "Keep scrolling at the end of the notebook; when the ring fills, a page in the notebook paper is added",
-        keywords: ["new page", "add page", "overscroll", "scroll", "goodnotes"],
+        label: t("workspace.pullPastTheLastPageToAdd"),
+        hint: t("workspace.keepScrollingAtTheEndOfThe"),
+        keywords: [t("settingsSearch.pullToAddPage")],
         control: {
           kind: "toggle",
           read: (settings) => settings.pullToAddPage,
@@ -226,9 +256,9 @@ export const SETTING_GROUPS: SettingGroup[] = [
       },
       {
         id: "pageTextLineWrap",
-        label: "Wrap long editor lines",
-        hint: "Keeps prose visible without writing line breaks into the Typst source (Alt+Z)",
-        keywords: ["word wrap", "page text", "source"],
+        label: t("workspace.wrapLongEditorLines"),
+        hint: t("workspace.keepsProseVisibleWithoutWritingLineBreaks"),
+        keywords: [t("settingsSearch.pageTextLineWrap")],
         control: {
           kind: "toggle",
           read: (settings) => settings.pageTextLineWrap,
@@ -237,9 +267,9 @@ export const SETTING_GROUPS: SettingGroup[] = [
       },
       {
         id: "pageTextBaselineGrid",
-        label: "Snap blocks to paper rhythm",
-        hint: "Headings and display equations reserve whole paper rows",
-        keywords: ["baseline", "grid", "ruling", "page text"],
+        label: t("workspace.snapBlocksToPaperRhythm"),
+        hint: t("workspace.headingsAndDisplayEquationsReserveWholePaper"),
+        keywords: [t("settingsSearch.pageTextBaselineGrid")],
         control: {
           kind: "toggle",
           read: (settings) => settings.pageTextBaselineGrid,
@@ -255,9 +285,9 @@ export const SETTING_GROUPS: SettingGroup[] = [
     items: [
       {
         id: "remotePackages",
-        label: "Download packages from Typst Universe",
-        hint: "Fetches an imported package the first time you use it, then keeps it on this device. Packages you already have keep working offline either way.",
-        keywords: ["network", "offline", "universe", "import"],
+        label: t("workspace.downloadPackagesFromTypstUniverse"),
+        hint: t("workspace.fetchesAnImportedPackageTheFirstTime"),
+        keywords: [t("settingsSearch.remotePackages")],
         control: {
           kind: "toggle",
           read: (settings) => settings.remotePackages,
@@ -268,14 +298,14 @@ export const SETTING_GROUPS: SettingGroup[] = [
   },
   {
     id: "motion",
-    title: "Motion",
+    title: t("workspace.motion"),
     icon: "M4 12h5l2-5 3 10 2-5h4",
     items: [
       {
         id: "touchGlide",
-        label: "Touch glide",
-        hint: "How far the canvas keeps travelling after a one-finger pan is released",
-        keywords: ["inertia", "scroll", "momentum", "pan"],
+        label: t("workspace.touchGlide"),
+        hint: t("workspace.howFarTheCanvasKeepsTravellingAfter"),
+        keywords: [t("settingsSearch.touchGlide")],
         control: {
           kind: "slider",
           min: 0,
@@ -288,9 +318,9 @@ export const SETTING_GROUPS: SettingGroup[] = [
       },
       {
         id: "reducedMotion",
-        label: "Reduce motion",
-        hint: "Skips smooth scrolling and animated transitions",
-        keywords: ["accessibility", "animation", "vestibular"],
+        label: t("workspace.reduceMotion"),
+        hint: t("workspace.skipsSmoothScrollingAndAnimatedTransitions"),
+        keywords: [t("settingsSearch.reducedMotion")],
         control: {
           kind: "toggle",
           read: (settings) => settings.reducedMotion,
@@ -301,24 +331,24 @@ export const SETTING_GROUPS: SettingGroup[] = [
   },
   {
     id: "diagnostics",
-    title: "Diagnostics",
+    title: t("workspace.diagnostics"),
     icon: "M12 7v5l3.5 2M12 3.5a8.5 8.5 0 1 0 0 17 8.5 8.5 0 0 0 0-17z",
-    blurb: "Local measurements only. Nothing here leaves this device.",
+    blurb: t("workspace.localMeasurementsOnlyNothingHereLeavesThis"),
     items: [
       {
         id: "metrics",
-        label: "Timing evidence",
-        hint: "Stroke latency and compile timings measured on this machine",
-        keywords: ["performance", "latency", "metrics", "profiling"],
+        label: t("workspace.timingEvidence"),
+        hint: t("workspace.strokeLatencyAndCompileTimingsMeasuredOn"),
+        keywords: [t("settingsSearch.metrics")],
         control: {
           kind: "action",
-          buttonLabel: "Open",
+          buttonLabel: t("workspace.open"),
           run: (actions) => actions.openMetrics(),
         },
       },
     ],
   },
-];
+]; }
 
 /** At least one pen stays on the bar; Rust holds the same line for an edited settings file. */
 function lastPenShown(settings: AppSettings, id: PaletteCommand): boolean {
@@ -330,12 +360,12 @@ function lastPenShown(settings: AppSettings, id: PaletteCommand): boolean {
   );
 }
 
-function paletteToggle(id: PaletteCommand, label: string): SettingItem {
+function paletteToggle(id: PaletteCommand, label: string, t: Translator): SettingItem {
   return {
     id: `palette-${id}`,
     label,
-    hint: id === "pen-1" || id === "pen-2" ? "At least one pen stays on the bar" : undefined,
-    keywords: ["toolbar", "bar", "tools", "hide", "show", "customise", "customize"],
+    hint: id === "pen-1" || id === "pen-2" ? t("workspace.atLeastOnePenStaysOnThe") : undefined,
+    keywords: [t("settingsSearch.palette")],
     control: {
       kind: "toggle",
       read: (settings) => !settings.hiddenTools.includes(id),
@@ -360,11 +390,11 @@ export type SettingHit = { group: SettingGroup; item: SettingItem };
  * smoothing and "offline" finds the package switch — the words a writer reaches for are rarely
  * the words on the control.
  */
-export function searchSettings(query: string): SettingHit[] {
+export function searchSettings(query: string, groups = settingGroups()): SettingHit[] {
   const needle = query.trim().toLowerCase();
   if (!needle) return [];
   const words = needle.split(/\s+/);
-  return SETTING_GROUPS.flatMap((group) =>
+  return groups.flatMap((group) =>
     group.items.map((item) => ({ group, item })),
   ).filter(({ group, item }) => {
     const haystack = [group.title, item.label, item.hint ?? "", ...(item.keywords ?? [])]

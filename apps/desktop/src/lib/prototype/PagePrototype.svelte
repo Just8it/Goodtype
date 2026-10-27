@@ -1,4 +1,7 @@
 <script lang="ts">
+  import { patternLabel, shapeMessage, shapeLabel, toolMessage, toolLabel, positionMessage } from "../i18n/labels";
+  import { setLanguage, t, formatNumber, displayLocale, notice, renderMessage, type UiText } from "../i18n";
+  import { errorDetails, notebookFailureCode } from "../ipc/errors";
   import { flushSync, onDestroy, onMount, tick } from "svelte";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import {
@@ -25,7 +28,11 @@
   import { moveLibraryEntries } from "../ipc/library";
   // The local `compileTypst` owns the cache check, the browser fallback and the block's preview
   // state; this is only the round trip it makes when none of those answer.
-  import { compileTypst as requestTypstCompile } from "../ipc/typst";
+  import { compileTypst as requestTypstCompile, compileCacheSource, type TypstCompileRequest } from "../ipc/typst";
+  import { createCompileQueue } from "../editor/compileQueue";
+  import { createTemplateDraft, type TemplateDraft } from "../editor/templateDraft";
+  import { finishInkPreview, inkPreviewBounds, type InkPreview } from "../ink/preview";
+  import { typstCacheEpoch } from "../editor/typstCache";
   import type { HistoryResult, NotebookSnapshot } from "../ipc/types";
   import {
     closeNotebookSession,
@@ -38,7 +45,7 @@
     writeMetrics,
     writeNotebookCover,
   } from "../ipc/workspace";
-  import { clampZoom, dampedVelocity, pannedScroll, type Point } from "../geometry/coordinates";
+  import { clampZoom, dampedVelocity, pageAtViewportCenter, pannedScroll, type Point } from "../geometry/coordinates";
   import { placeFloatingToolbar, type ViewRect } from "../geometry/placement";
   import { dismissable } from "../workspace/dismiss";
   import {
@@ -65,7 +72,6 @@
     installPageTypstPreset,
     listTypstPresets,
     readTypstPreset,
-    saveTypstPreset,
     pickTypstPreset,
     setDefaultTypstPreset,
   } from "../ipc/presets";
@@ -112,17 +118,19 @@
   import AddPageMenu from "../workspace/AddPageMenu.svelte";
   import type { AddPageGroup, AddPageSource, AddPageWhere } from "../workspace/addPage";
   import { templatePreviewSvg } from "../page/template";
-  import { pdfPageGeometries } from "../pdf/document";
-  import { PAPER_TONES, templateGroups } from "../page/templates";
+  import { pdfPageGeometries, releasePdfDocuments } from "../pdf/document";
+  import { PAPER_TONES, paperTones, templateGroups } from "../page/templates";
   import {
     DEFAULT_PAGE_SIZE,
-    PAGE_SIZES,
+    PAGE_SIZES, pageSizes,
     describeGeometry,
     geometryOf,
     type Orientation,
   } from "../page/sizes";
   import SideEditor from "./SideEditor.svelte";
   import SelectionActions from "./SelectionActions.svelte";
+  import TypstSizeControls from "./TypstSizeControls.svelte";
+  import { blockFont, withBlockFont } from "../editor/blockFont";
   import NotebookTabs from "./NotebookTabs.svelte";
   import PaletteTools from "./PaletteTools.svelte";
   import PalettePocket from "./PalettePocket.svelte";
@@ -130,10 +138,11 @@
     AssetUrlCache,
     blockViewsFromSnapshot,
     imageViewsFromSnapshot,
-    mimeForPath,
     pageTypstViewFromSnapshot,
     shapeViewsFromSnapshot,
     strokesFromSnapshot,
+    inkLayersWithStrokes,
+    reuseStrokeObjects,
     type BlockView,
     type ImageView,
     type PageTypstView,
@@ -152,6 +161,7 @@
   import { nativeContextMenuAllowed } from "./contextMenu";
   import { blankNotebookSnapshot } from "./newNotebook";
   import { createInkCommitter, type InkCommitter } from "./inkCommitter";
+  import { createPageLoader, retainedPageIds } from "./pageCache";
   import {
     projectSnapshot,
     type ManagedMixedGroup,
@@ -257,7 +267,6 @@
     lastTime: number;
     velocity: Point;
   };
-  type TypstScaleEdit = { id: string; transform: TypstTransform };
   type NotebookAction =
     | { kind: "page"; pageId: string }
     | { kind: "structure" };
@@ -271,11 +280,11 @@
   const BLOCK_PATH = "blocks/equation.typ";
   const INK_LAYER_ID = "ink-layer-001";
   const TYPST_SAVE_DEBOUNCE_MS = 250;
-  const ERASER_SIZE_OPTIONS = [
-    { id: "small" as const, label: "Small", diameter: 12 },
-    { id: "medium" as const, label: "Medium", diameter: 18 },
-    { id: "large" as const, label: "Large", diameter: 26 },
-  ];
+  const ERASER_SIZE_OPTIONS = $derived([
+    { id: "small" as const, label: $t("workspace.small"), diameter: 12 },
+    { id: "medium" as const, label: $t("workspace.medium"), diameter: 18 },
+    { id: "large" as const, label: $t("workspace.large"), diameter: 26 },
+  ]);
   const collectMetrics = import.meta.env.DEV;
   const tauriAvailable =
     typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -286,14 +295,22 @@
   let openTabs = $state<NotebookTab[]>([]);
   let switchingRoot = $state<string | null>(null);
   let notebookGeneration = 0;
+  let pageSession = 0;
+
+  function editContext() {
+    const requestedRoot = root;
+    const pageId = activePageId;
+    const generation = notebookGeneration;
+    const session = pageSession;
+    return { root: requestedRoot, pageId, current: () => root === requestedRoot &&
+      activePageId === pageId && notebookGeneration === generation && pageSession === session &&
+      notebookChosen && pageOpen && !busy && !switchingRoot && !windowCloseInProgress };
+  }
   let sharedStyleSource = $state("");
   let presets = $state<PresetSummary[]>([]);
   let presetBusy = $state(false);
   let presetRevision = $state(0);
-  /// Each notebook template's text by import path. Pages need it to tell a `preset` template,
-  /// imported as before, from one written as an ordinary Typst header, placed before the page.
-  let templateSources = $state<Record<string, string>>({});
-  let activeSnapshot = $state<NotebookSnapshot | null>(null);
+  let activeSnapshot = $state.raw<NotebookSnapshot | null>(null);
   let activePageId = $state("page-001");
   let activeInkLayerId = $state(INK_LAYER_ID);
   let activeInkLayerPath = $state("ink/page-001-layer-001.ink");
@@ -301,18 +318,26 @@
   let activeBackground = $state<PageBackground>({ kind: "plain", color: "#ffffff" });
   /** The active page's own size. Same reason: committing used to write one fixed geometry back. */
   let activeGeometry = $state<PageGeometry>({ widthPt: PAGE_WIDTH_PT, heightPt: PAGE_HEIGHT_PT });
-  let pageEntries = $state<PageEntry[]>([]);
+  let pageEntries = $state.raw<PageEntry[]>([]);
   let pageOpen = $state(false);
   let busy = $state(true);
-  let status = $state("Opening the notebook…");
+  /** Operations in flight whose reply replaces the active page; see `replacingPage`. */
+  let replacingPageCount = $state(0);
+  const pageInputLocked = $derived(replacingPageCount > 0);
+  /**
+   * Bumped by every local edit, so an operation that awaited Rust can tell whether the writer
+   * changed anything meanwhile. Plain, not reactive: nothing renders from it.
+   */
+  let editVersion = 0;
+  let status = $state<UiText>(notice("workspace.openingTheNotebook"));
   let revision = $state(1);
   let zoom = $state(1);
   let createdAt = $state(new Date().toISOString());
   let tool = $state<InkTool>("pen");
-  let strokes = $state<Stroke[]>([]);
+  let strokes = $state.raw<Stroke[]>([]);
   let selectedStrokeIds = $state<string[]>([]);
   let groupedStrokeIds = $state<string[]>([]);
-  let typstBlocks = $state<TypstState[]>([
+  let typstBlocks = $state.raw<TypstState[]>([
     {
       id: MAIN_TYPST_ID,
       path: BLOCK_PATH,
@@ -324,7 +349,7 @@
     },
   ]);
   let pageTypst = $state<PageTypstState | null>(null);
-  let images = $state<ImageState[]>([]);
+  let images = $state.raw<ImageState[]>([]);
   let shapes = $state.raw<ShapeState[]>([]);
   let selectedImageId = $state<string | null>(null);
   let selectedShapeId = $state<string | null>(null);
@@ -332,26 +357,27 @@
   let mixedGroup = $state<ManagedMixedGroup | null>(null);
   let selectedTypstId = $state<string | null>(null);
   let lassoObjectIds = $state<string[]>([]);
+  let mixedStrokePreview = $state.raw<InkPreview | null>(null);
 
   function lassoItems(): LassoItem[] {
     return [
       ...shapes.map(shapeLassoItem),
       ...images.map(image => ({ id: image.id, kind: "images" as const, closed: true,
-        outline: boxOutline(image.x, image.y, image.widthPt * image.scale, image.heightPt * image.scale) })),
+        outline: boxOutline(image.x, image.y, image.widthPt * image.scale, image.heightPt * image.scale, image.rotation) })),
       ...typstBlocks.map(block => ({ id: block.id, kind: "text" as const, closed: true,
         outline: boxOutline(block.transform.x, block.transform.y,
           (block.result?.widthPt ?? block.transform.layoutWidthPt) * block.transform.scale,
-          (block.result?.heightPt ?? 64) * block.transform.scale) })),
+          (block.result?.heightPt ?? 64) * block.transform.scale, block.transform.rotation) })),
     ];
   }
   const mixedSelectionBounds = $derived(lassoObjectIds.length ? combinedBounds(
-    lassoItems().filter(item => lassoObjectIds.includes(item.id)), selectionBounds(strokes, selectedStrokeIds)) : null);
+    lassoItems().filter(item => lassoObjectIds.includes(item.id)), inkPreviewBounds(strokes, selectedStrokeIds, mixedStrokePreview)) : null);
 
   function lassoSelection(polygon: Point[], inkIds: string[]) {
     selectedTypstId = null; selectedImageId = null; selectedShapeId = null; editingShapeId = null;
     lassoObjectIds = selectLassoObjects(lassoItems(), polygon, settings.lassoTargets ?? DEFAULT_LASSO_TARGETS);
     updateInkSelection(inkIds);
-    status = `Selected ${inkIds.length + lassoObjectIds.length} items`;
+    status = notice("workspace.selectedItems", { "value1": inkIds.length + lassoObjectIds.length });
   }
 
   let mixedTransformBase: { blocks: typeof typstBlocks; images: typeof images; shapes: typeof shapes; strokes: Stroke[] } | null = null;
@@ -359,6 +385,7 @@
   function beginMixedTransform() {
     mixedTransformBase = { blocks: typstBlocks, images, shapes, strokes };
     mixedTransformChanged = false;
+    mixedStrokePreview = null;
   }
   function previewMixedTransform(delta: Point, scale: number, anchor: Point) {
     if (!mixedTransformBase) return;
@@ -371,7 +398,7 @@
       ...transformSelectionPoint(image, delta, scale, anchor), scale: image.scale * scale } : image);
     shapes = base.shapes.map(shape => selected.has(shape.id) ? { ...shape,
       ...transformSelectionPoint(shape, delta, scale, anchor), scale: shape.scale * scale } : shape);
-    strokes = moveSelected(scaleSelected(base.strokes, selectedStrokeIds, anchor, scale), selectedStrokeIds, delta);
+    mixedStrokePreview = { ids: selectedStrokeIds, delta, scale, anchor };
     mixedTransformChanged = delta.x !== 0 || delta.y !== 0 || scale !== 1;
   }
   function endMixedTransform(cancelled: boolean) {
@@ -379,7 +406,11 @@
     mixedTransformBase = null;
     if (!base) return;
     if (cancelled) { typstBlocks = base.blocks; images = base.images; shapes = base.shapes; strokes = base.strokes; }
-    else if (mixedTransformChanged) queueCommit("Transformed selection");
+    else if (mixedTransformChanged) {
+      if (mixedStrokePreview) strokes = finishInkPreview(base.strokes, mixedStrokePreview);
+      queueCommit(notice("workspace.transformedSelection"));
+    }
+    mixedStrokePreview = null;
   }
   let directObjectInput = $state(false);
   /** True while the selection tool is only active because the lasso handed over to it. */
@@ -396,8 +427,10 @@
   let pendingTransactions = $state(0);
   let transactionFailed = $state(false);
   let transactionQueue: Promise<void> = Promise.resolve();
+  const scheduledCompile = createCompileQueue(requestTypstCompile);
+  const compileVersions = new Map<string, object>();
   let typstCommitTimer: ReturnType<typeof setTimeout> | undefined;
-  let inkCommitLabel = "Updated ink";
+  let inkCommitLabel: UiText = notice("workspace.updatedInk");
   // The active page shares its timing with neighbouring pages but not its payload: the snapshot
   // is built when the timer fires, so it picks up whatever else changed in the meantime.
   const inkCommitTimer = createCommitTimer(() => queueCommit(inkCommitLabel));
@@ -411,60 +444,21 @@
   let historyElement = $state<HTMLElement>();
   let pageViewport = $state<HTMLElement>();
   let pageFrame = $state<HTMLElement>();
-  const savePending = $derived(
-    pendingTransactions > 0 ||
-      inkPending ||
-      typstDirty ||
-      pendingNeighborPages.size > 0,
-  );
+
 
   // The page being edited renders through the same surface as its neighbours, so its state is
   // projected into the same view model they use.
   const activeBlockViews: BlockView[] = $derived(
-    typstBlocks.map((block) => ({
-      id: block.id,
-      path: block.path,
-      source: block.source,
-      x: block.transform.x,
-      y: block.transform.y,
-      layoutWidthPt: block.transform.layoutWidthPt,
-      scale: block.transform.scale,
-      zIndex: block.zIndex,
-      readingOrder: block.readingOrder,
-    })),
+    typstBlocks.map(({ transform, result: _result, ...block }) => ({ ...block, ...transform })),
   );
-  const activePageTypstView: PageTypstView | null = $derived(
-    pageTypst
-      ? {
-          id: pageTypst.id,
-          path: pageTypst.path,
-          source: pageTypst.source,
-          zIndex: pageTypst.zIndex,
-          readingOrder: pageTypst.readingOrder,
-        }
-      : null,
-  );
+  const activePageTypstView: PageTypstView | null = $derived(pageTypst);
   const activeResults: Record<string, TypstCompileResult | null> = $derived(
     Object.fromEntries([
       ...typstBlocks.map((block) => [block.id, block.result] as const),
       ...(pageTypst ? [[pageTypst.id, pageTypst.result] as const] : []),
     ]),
   );
-  const activeImageViews: ImageView[] = $derived(
-    images.map((image) => ({
-      id: image.id,
-      path: image.path,
-      url: image.url,
-      alt: image.alt,
-      x: image.x,
-      y: image.y,
-      widthPt: image.widthPt,
-      heightPt: image.heightPt,
-      scale: image.scale,
-      zIndex: image.zIndex,
-      readingOrder: image.readingOrder,
-    })),
-  );
+  const activeImageViews: ImageView[] = $derived(images);
 
   // Full-height source view beside the canvas. It is a sibling of the canvas region rather than
   // an overlay, so the canvas genuinely narrows — and the palette, which is positioned inside
@@ -472,7 +466,16 @@
   let sideEditorOpen = $state(false);
   let sideEditorStyle = $state(false);
   /// A page template open in the side editor (style mode), instead of the shared notebook style.
-  let editingTemplate = $state<{ path: string; name: string; source: string } | null>(null);
+  let editingTemplate = $state<TemplateDraft | null>(null);
+  let templateSaveError = $state("");
+  const saveNeedsAttention = $derived(transactionFailed || templateSaveError !== "");
+  const savePending = $derived(
+    pendingTransactions > 0 ||
+      inkPending ||
+      typstDirty ||
+      pendingNeighborPages.size > 0 ||
+      !!editingTemplate?.dirty,
+  );
   let templateSaveTimer: ReturnType<typeof setTimeout> | undefined;
   const TEMPLATE_SAVE_DEBOUNCE_MS = 500;
   let sideEditorBlockId = $state<string | null>(null);
@@ -499,8 +502,8 @@
       : null,
   );
 
-  function openSideEditor(blockId?: string) {
-    void closeTemplate();
+  async function openSideEditor(blockId?: string) {
+    if (!(await closeTemplate())) return;
     sideEditorStyle = false;
     // An explicit canvas edit still wins. The generic button/shortcut starts with the sustained
     // Page text surface, then falls back to the same movable-block choices as before.
@@ -544,65 +547,74 @@
         zIndex: 0,
         readingOrder: 0,
       };
-      queueCommit("Created page text");
-      status = "Created page text";
+      queueCommit(notice("workspace.createdPageText"));
+      status = notice("workspace.createdPageText");
     }
     openSideEditor(pageTypst.id);
   }
 
   async function changePagePreset(action: string) {
     if (!root || !pageTypst || presetBusy) return;
+    const requestedRoot = root;
+    const generation = notebookGeneration;
+    const current = () => root === requestedRoot && notebookGeneration === generation;
     presetBusy = true;
     try {
       if (action === "none" || action.startsWith("path:")) {
         const path = action === "none" ? null : action.slice(5);
         updateTypstSource(pageTypst.id, withPagePreset(pageTypst.source, path));
       } else if (action === "page:new") {
-        const created = await createTypstPreset(root);
+        const created = await createTypstPreset(requestedRoot);
+        if (!current()) return;
         if (created.importPath) {
           updateTypstSource(pageTypst.id, withPagePreset(pageTypst.source, created.importPath));
           await refreshPresets();
           await openTemplate(created.importPath, created.name);
-          status = `Created ${created.name}; edit it in the side panel`;
+          status = notice("workspace.createdEditItInTheSidePanel", { "name": created.name });
         }
         return;
       } else if (action.startsWith("edit:")) {
         const path = action.slice(5);
-        await openTemplate(path, presets.find((preset) => preset.importPath === path)?.name ?? "Template");
+        await openTemplate(path, presets.find((preset) => preset.importPath === path)?.name ?? $t("workspace.template"));
         return;
       } else if (action === "page:import" || action.startsWith("page:")) {
         const choice = action === "page:import"
           ? await pickTypstPreset()
           : { kind: "builtin", id: action.slice(5) } as PresetChoice;
-        if (choice) {
-          const installed = await installPageTypstPreset(root, choice);
+        if (choice && current()) {
+          const installed = await installPageTypstPreset(requestedRoot, choice);
+          if (!current()) return;
           if (installed?.importPath) {
             updateTypstSource(pageTypst.id, withPagePreset(pageTypst.source, installed.importPath));
             await refreshPresets();
           }
         }
       } else if (action === "default:import" || action.startsWith("default:")) {
+        const expectedSource = presets.some((preset) => preset.kind === "default")
+          ? await readTypstPreset(requestedRoot, DEFAULT_PRESET_PATH)
+          : null;
         const choice = action === "default:import"
           ? await pickTypstPreset()
           : { kind: "builtin", id: action.slice(8) } as PresetChoice;
-        if (choice) {
-          await setDefaultTypstPreset(root, choice);
+        if (choice && current()) {
+          await setDefaultTypstPreset(requestedRoot, choice, expectedSource);
+          if (!current()) return;
           clearTypstCache(DEFAULT_PRESET_PATH);
           presetRevision += 1;
           await refreshPresets();
-          status = "Updated the notebook Typst preset";
+          status = notice("workspace.updatedTheNotebookTypstPreset");
         }
       }
     } catch (error) {
-      status = `Could not change the Typst preset: ${message(error)}`;
+      if (current()) status = notice("workspace.couldNotChangeTheTypstPreset", { "value1": message(error) });
     } finally {
       presetBusy = false;
       void tick().then(() => sideEditor?.focus());
     }
   }
 
-  function closeSideEditor() {
-    void closeTemplate();
+  async function closeSideEditor() {
+    if (!(await closeTemplate())) return;
     sideEditorOpen = false;
   }
 
@@ -614,22 +626,28 @@
    */
   async function openTemplate(path: string, name: string) {
     if (!root) return;
-    await closeTemplate();
+    const requestedRoot = root;
+    const generation = notebookGeneration;
+    if (!(await closeTemplate())) return;
     try {
-      const source = await readTypstPreset(root, path);
-      editingTemplate = { path, name, source };
+      const source = await readTypstPreset(requestedRoot, path);
+      if (root !== requestedRoot || notebookGeneration !== generation) return;
+      editingTemplate = createTemplateDraft(requestedRoot, path, name, source);
+      templateSaveError = "";
       sideEditorStyle = true;
       sideEditorOpen = true;
       void tick().then(() => sideEditor?.focus());
     } catch (error) {
-      status = `Could not open the template: ${message(error)}`;
+      status = notice("workspace.couldNotOpenTheTemplate", { "value1": message(error) });
     }
   }
 
   function updateTemplate(source: string) {
     if (!editingTemplate) return;
     // The `// Name:` line is the template's name; the panel title follows it as it is typed.
-    editingTemplate = { ...editingTemplate, source, name: templateName(source) ?? editingTemplate.name };
+    editingTemplate.source = source;
+    templateSaveError = "";
+    editingTemplate.name = templateName(source) ?? editingTemplate.name;
     if (templateSaveTimer) clearTimeout(templateSaveTimer);
     templateSaveTimer = setTimeout(() => void saveTemplate(), TEMPLATE_SAVE_DEBOUNCE_MS);
   }
@@ -638,26 +656,33 @@
     if (templateSaveTimer) clearTimeout(templateSaveTimer);
     templateSaveTimer = undefined;
     const template = editingTemplate;
-    // An emptied file is not a template; the last saved one stays until something is typed.
-    if (!template || !root || !template.source.trim()) return;
+    if (!template) return true;
     try {
-      await saveTypstPreset(root, template.path, template.source);
-      templateSources = { ...templateSources, [template.path]: template.source };
+      await template.flush();
+      if (editingTemplate !== template || root !== template.root) return true;
+      templateSaveError = "";
       presets = presets.map((preset) =>
         preset.importPath === template.path ? { ...preset, name: template.name } : preset,
       );
       clearTypstCache(template.path);
       presetRevision += 1;
+      return true;
     } catch (error) {
-      status = `The template was not saved: ${message(error)}`;
+      templateSaveError = message(error);
+      status = notice("workspace.theTemplateWasNotSaved", { "value1": message(error) });
+      return false;
     }
   }
 
   async function closeTemplate() {
-    if (!editingTemplate) return;
-    if (templateSaveTimer) await saveTemplate();
+    if (!editingTemplate) return true;
+    const template = editingTemplate;
+    if (!(await saveTemplate())) return false;
+    if (editingTemplate !== template) return false;
     editingTemplate = null;
+    templateSaveError = "";
     sideEditorStyle = false;
+    return true;
   }
 
   function toggleSideEditor() {
@@ -665,12 +690,12 @@
     else openSideEditor();
   }
 
-  function openSharedStyle() {
+  async function openSharedStyle() {
     if (!notebookManifest) return;
-    void closeTemplate();
+    if (!(await closeTemplate())) return;
     if (!notebookManifest.sharedStylePath) {
       notebookManifest = { ...notebookManifest, sharedStylePath: "style.typ" };
-      queueCommit("Created shared Typst style");
+      queueCommit(notice("workspace.createdSharedTypstStyle"));
     }
     sideEditorStyle = true;
     sideEditorOpen = true;
@@ -884,18 +909,17 @@
   const touchPoints = new Map<number, Point>();
   const touchTaps = createTouchTaps();
   let tapScrollOrigin: { left: number; top: number } | null = null;
-  let touchHistoryToast = $state<{ label: "Undo" | "Redo" } | null>(null);
+  let touchHistoryToast = $state<{ label: UiText } | null>(null);
   let touchHistoryToastTimer: ReturnType<typeof setTimeout> | undefined;
   let pinchStart: PinchStart | null = null;
   let touchPanStart: TouchPanStart | null = null;
   let automaticPageFocusLocked = false;
   let touchInertiaFrame: number | undefined;
-  let typstScaleEdit: TypstScaleEdit | null = null;
   // Per-page state for the pages that are rendered but not being edited. It lives here rather
   // than inside the renderer so a page keeps its component instance — and its painted Typst
   // SVGs — when edit focus moves onto it.
-  let neighborStrokes = $state<Record<string, Stroke[]>>({});
-  let neighborResults = $state<
+  let neighborStrokes = $state.raw<Record<string, Stroke[]>>({});
+  let neighborResults = $state.raw<
     Record<string, Record<string, TypstCompileResult | null>>
   >({});
   const neighborUrls = new Map<string, AssetUrlCache>();
@@ -907,6 +931,12 @@
   /// as a hitch at every page boundary. So edit focus waits until the view has settled.
   let lastScrollAt = 0;
   const FOCUS_SETTLE_MS = 300;
+  const loadPage = createPageLoader(openPage);
+  let pageLoadGeneration = 0;
+  const nearPageIds = new Set<string>();
+  const pageNodes = new Map<string, HTMLElement>();
+  const pagePointers = new Map<number, string>();
+  let residencyFrame = 0;
 
   let settings = $state<AppSettings>(structuredClone(DEFAULT_SETTINGS));
 
@@ -929,8 +959,10 @@
       });
   }
   let settingsOpen = $state(false);
+  let settingsReady = $state(false);
   let settingsSaveTimer: ReturnType<typeof setTimeout> | undefined;
   let settingsSaveQueue: Promise<void> = Promise.resolve();
+  let settingsNeedSave = false;
   let settingsVersion = 0;
   let searchOpen = $state(false);
   let conflictDetail = $state<string | null>(null);
@@ -958,6 +990,11 @@
   let selectionToolbarElement = $state<HTMLElement>();
   let selectionToolbarFrame: number | undefined;
   let selectionToolbarPosition = $state({ left: 0, top: 0, ready: false });
+  // Size/reflow/compile updates must not move the controls underneath repeated clicks.
+  const typstToolbarAnchor = $derived.by(() => {
+    const block = typstBlocks.find(candidate => candidate.id === selectedTypstId);
+    return block ? `${block.id}:${block.transform.x}:${block.transform.y}:${block.transform.rotation ?? 0}` : null;
+  });
   let windowCloseInProgress = false;
 
   onMount(() => {
@@ -974,6 +1011,7 @@
           if (windowCloseInProgress) return;
           windowCloseInProgress = true;
           try {
+            if (!(await flushSettings())) return;
             if (!(await persist())) return;
             if (notebookChosen && root) {
               await recordNotebookPage(root, activePageId).catch(() => {});
@@ -982,18 +1020,19 @@
             // re-enter the same save path, so force the already-confirmed close instead.
             await appWindow.destroy();
           } catch (error) {
-            status = `The notebook is safe, but the window could not close: ${message(error)}`;
+            status = notice("workspace.theNotebookIsSafeButTheWindow", { "value1": message(error) });
           } finally {
             windowCloseInProgress = false;
           }
         })
         .then((remove) => (removeCloseListener = remove))
         .catch((error) => {
-          status = `Could not install the window close handler: ${message(error)}`;
+          status = notice("workspace.couldNotInstallTheWindowCloseHandler", { "value1": message(error) });
         });
     }
   });
   onDestroy(() => {
+    if (templateSaveTimer) clearTimeout(templateSaveTimer);
     inkCommitTimer.cancel();
     if (typstCommitTimer) clearTimeout(typstCommitTimer);
     if (focusTimer) clearTimeout(focusTimer);
@@ -1002,6 +1041,7 @@
     if (touchInertiaFrame) cancelAnimationFrame(touchInertiaFrame);
     if (touchHistoryToastTimer) clearTimeout(touchHistoryToastTimer);
     if (pendingZoomFrame) cancelAnimationFrame(pendingZoomFrame);
+    if (residencyFrame) cancelAnimationFrame(residencyFrame);
     removeCloseListener?.();
     window.removeEventListener("keydown", historyShortcut);
     window.removeEventListener("paste", handlePaste);
@@ -1021,9 +1061,13 @@
 
   $effect(() => {
     const selected = selectedObjectId() || lassoObjectIds.length > 0 || selectedStrokeIds.length > 0 || groupedStrokeIds.length > 0;
-    void images;
-    void shapes;
-    void strokes;
+    void typstToolbarAnchor;
+    if (!selectedTypstId) {
+      void images;
+      void shapes;
+      void strokes;
+    }
+    void $t;
     void zoom;
     void activePageId;
     void sideEditorOpen;
@@ -1034,6 +1078,8 @@
 
   async function initialize() {
     settings = await loadSettings(tauriAvailable);
+    setLanguage(settings.uiLanguage);
+    settingsReady = true;
     paletteDock = settings.paletteDock;
     historyCorner = settings.historyCorner;
     if (!tauriAvailable) {
@@ -1043,7 +1089,7 @@
       notebookChosen = true;
       pageOpen = true;
       busy = false;
-      status = "Browser preview ready";
+      status = notice("workspace.browserPreviewReady");
       return;
     }
 
@@ -1066,7 +1112,7 @@
       }
       await recordNotebookSession(openTabs.map((tab) => tab.root), null);
     } catch (error) {
-      status = `The last notebook could not be reopened: ${message(error)}`;
+      status = notice("workspace.theLastNotebookCouldNotBeReopened", { "value1": message(error) });
     }
 
     try {
@@ -1079,11 +1125,23 @@
   }
 
   function titleFromRoot(path: string) {
-    return path.split(/[\\/]/).filter(Boolean).at(-1) ?? "Goodtype notebook";
+    return path.split(/[\\/]/).filter(Boolean).at(-1) ?? $t("workspace.goodtypeNotebook");
   }
 
   function clearNotebookCaches() {
+    if (templateSaveTimer) clearTimeout(templateSaveTimer);
+    templateSaveTimer = undefined;
+    editingTemplate = null;
+    templateSaveError = "";
+    sideEditorStyle = false;
     stopTouchInertia();
+    clearTypstCache();
+    compileVersions.clear();
+    pagePointers.clear();
+    const releasedRoot = root;
+    void tick().then(() => {
+      if (releasedRoot && releasedRoot !== root) void releasePdfDocuments(releasedRoot);
+    });
     for (const urls of neighborUrls.values()) urls.dispose();
     neighborUrls.clear();
     for (const committer of neighborCommitters.values()) committer.dispose();
@@ -1091,7 +1149,6 @@
     neighborStrokes = {};
     neighborResults = {};
     pendingNeighborPages = new Set();
-    visibleRatios.clear();
     sideEditorOpen = false;
     sideEditorBlockId = null;
     sideEditorPageText = false;
@@ -1128,10 +1185,11 @@
         await tick();
         scrollToPage(activePageId, "auto");
       }
-      status = "Notebook ready";
+      status = notice("workspace.notebookReady");
       return true;
     }
     busy = true;
+    replacingPageCount += 1;
     switchingRoot = nextRoot;
     try {
       if (activeSnapshot && root && !options.skipCurrentPersist) {
@@ -1171,7 +1229,7 @@
       conflictDetail = null;
       notebookUndoOrder = [];
       notebookRedoOrder = [];
-      pageEntries = [];
+      resetPageEntries();
       applySnapshot(snapshot);
       if (createdNew) tool = "pen";
       await refreshPresets();
@@ -1181,7 +1239,7 @@
       try {
         await recordNotebookOpened(
           root,
-          snapshot.manifest.title || "Goodtype notebook",
+          snapshot.manifest.title || $t("workspace.goodtypeNotebook"),
           new Date().toISOString(),
         );
         await recordNotebookPage(root, snapshot.page.id);
@@ -1196,16 +1254,17 @@
         scrollToPage(snapshot.page.id, "auto");
       }
       status = sessionRemembered
-        ? "Notebook ready"
-        : "Notebook ready, but its reopening position could not be remembered";
+        ? notice("workspace.notebookReady")
+        : notice("workspace.notebookReadyButItsReopeningPositionCould");
       await refreshRecoveryCandidates();
       void writeCover();
       return true;
     } catch (error) {
-      status = `Could not open the notebook: ${message(error)}`;
+      status = notice("workspace.couldNotOpenTheNotebook", { "value1": message(error) });
       return false;
     } finally {
       busy = false;
+      replacingPageCount -= 1;
       switchingRoot = null;
     }
   }
@@ -1221,13 +1280,7 @@
       // An externally damaged optional style must not prevent the canonical notebook opening.
       presets = [];
     }
-    const requestRoot = root;
-    const paths = presets.flatMap((preset) => (preset.importPath ? [preset.importPath] : []));
-    const loaded = await Promise.all(
-      paths.map(async (path) => [path, await readTypstPreset(requestRoot, path).catch(() => null)] as const),
-    );
-    if (root !== requestRoot) return;
-    templateSources = Object.fromEntries(loaded.filter((entry): entry is readonly [string, string] => entry[1] !== null));
+
   }
 
   async function refreshRecoveryCandidates() {
@@ -1266,19 +1319,26 @@
       inkLayerId: activeInkLayerId,
       inkLayerPath: activeInkLayerPath,
       strokes,
-      typst: typstBlocks.map((block) => ({
-        id: block.id,
-        path: block.path,
-        source: block.source,
-        x: block.transform.x,
-        y: block.transform.y,
-        layoutWidthPt: block.transform.layoutWidthPt,
-        scale: block.transform.scale,
-        measuredWidthPt: block.result?.widthPt ?? block.transform.layoutWidthPt,
-        measuredHeightPt: block.result?.heightPt ?? 48,
-        zIndex: block.zIndex,
-        readingOrder: block.readingOrder,
-      })),
+      typst: typstBlocks.map((block) => {
+        // Without a compile result (not compiled yet, or the source is invalid) keep the last
+        // measured size rather than recording a guess as a measurement.
+        const stored = activeSnapshot?.page.objects.find((object) => object.id === block.id);
+        const measured = stored?.type === "typst" ? stored : null;
+        return {
+          id: block.id,
+          path: block.path,
+          source: block.source,
+          x: block.transform.x,
+          y: block.transform.y,
+          layoutWidthPt: block.transform.layoutWidthPt,
+          scale: block.transform.scale,
+          rotation: block.transform.rotation,
+          measuredWidthPt: block.result?.widthPt ?? measured?.measuredWidthPt ?? block.transform.layoutWidthPt,
+          measuredHeightPt: block.result?.heightPt ?? measured?.measuredHeightPt ?? 48,
+          zIndex: block.zIndex,
+          readingOrder: block.readingOrder,
+        };
+      }),
       pageTypst: pageTypst
         ? {
             id: pageTypst.id,
@@ -1300,6 +1360,9 @@
   }
 
   function applySnapshot(snapshot: NotebookSnapshot) {
+    pageSession += 1;
+    const previousEntry = pageEntries.find(entry => entry.id === snapshot.page.id);
+    const previousStrokes = snapshot.page.id === activePageId ? strokes : previousEntry ? neighborStrokesFor(previousEntry) : [];
     lassoObjectIds = [];
     // Whatever was scheduled describes the page being replaced, so it must not fire against the
     // one arriving.
@@ -1321,7 +1384,7 @@
     activePageId = snapshot.page.id;
     // The active page's state below is now the single source of truth for this page; drop the
     // copy it carried while it was a neighbour so the two can never disagree.
-    delete neighborStrokes[snapshot.page.id];
+    dropNeighborStrokes(snapshot.page.id);
     const activeInk = snapshot.page.inkLayers[0];
     activeInkLayerId = activeInk?.id ?? `${activePageId}-ink-001`;
     activeInkLayerPath = activeInk?.path ?? `ink/${activePageId}-layer-001.ink`;
@@ -1330,64 +1393,28 @@
     // flattened any page that was not A4.
     activeBackground = snapshot.page.background;
     activeGeometry = snapshot.page.geometry;
+    const previousPages = new Map(pageEntries.map((entry) => [entry.id, entry]));
     pageEntries = snapshot.manifest.pages.map((page) => ({
       ...page,
       snapshot:
         page.id === snapshot.page.id
           ? snapshot
-          : pageEntries.find((entry) => entry.id === page.id)?.snapshot ?? null,
+          : previousPages.get(page.id)?.snapshot ?? null,
     }));
     revision = snapshot.page.revision;
     createdAt = snapshot.manifest.createdAt;
-    strokes = snapshot.inkLayers[0]?.strokes ?? [];
+    strokes = reuseStrokeObjects(strokesFromSnapshot(snapshot), previousStrokes);
     lassoObjectIds = [];
     selectedStrokeIds = [];
     shapes = shapeViewsFromSnapshot(snapshot);
     selectedShapeId = null;
     editingShapeId = null;
 
-    typstBlocks = snapshot.page.objects
-      .filter(
-        (object): object is Extract<PageObject, { type: "typst" }> =>
-          object.type === "typst",
-      )
-      .map((object) => {
-        const block = snapshot.blocks.find((file) => file.path === object.sourcePath);
-        return {
-          id: object.id,
-          path: object.sourcePath,
-          source: block
-            ? new TextDecoder().decode(new Uint8Array(block.bytes))
-            : "",
-          transform: {
-            x: object.x,
-            y: object.y,
-            layoutWidthPt: object.layoutWidthPt,
-            scale: object.scale,
-          },
-          result: null,
-          zIndex: object.zIndex,
-          readingOrder: object.readingOrder,
-        };
-      });
-
-    const storedPageTypst = snapshot.page.objects.find(
-      (object): object is Extract<PageObject, { type: "page_typst" }> =>
-        object.type === "page_typst",
-    );
-    if (storedPageTypst) {
-      const block = snapshot.blocks.find((file) => file.path === storedPageTypst.sourcePath);
-      pageTypst = {
-        id: storedPageTypst.id,
-        path: storedPageTypst.sourcePath,
-        source: block ? new TextDecoder().decode(new Uint8Array(block.bytes)) : "",
-        result: null,
-        zIndex: storedPageTypst.zIndex,
-        readingOrder: storedPageTypst.readingOrder,
-      };
-    } else {
-      pageTypst = null;
-    }
+    typstBlocks = blockViewsFromSnapshot(snapshot).map(({ x, y, layoutWidthPt, scale, rotation, ...block }) => ({
+      ...block, transform: { x, y, layoutWidthPt, scale, rotation }, result: null,
+    }));
+    const storedPageTypst = pageTypstViewFromSnapshot(snapshot);
+    pageTypst = storedPageTypst ? { ...storedPageTypst, result: null } : null;
 
     // A movable block stays pinned when the writer scrolls away. Page text is different: it is
     // the current page's writing surface, so an already-open Page text editor follows page focus.
@@ -1429,64 +1456,75 @@
           }
         : null;
     groupedStrokeIds = mixedGroup ? inkGroup!.strokeIds : [];
+    if (mixedGroup && inkGroup) {
+      const layer = snapshot.page.inkLayers.find(layer => layer.id === inkGroup.inkLayerId);
+      if (layer) { activeInkLayerId = layer.id; activeInkLayerPath = layer.path; }
+    }
 
-    images = snapshot.page.objects
-      .filter(
-        (object): object is Extract<PageObject, { type: "image" }> =>
-          object.type === "image",
-      )
-      .flatMap((object) => {
-        const asset = snapshot.assets.find((file) => file.path === object.sourcePath);
-        if (!asset) return [];
-        const blob = new Blob([new Uint8Array(asset.bytes)], {
-          type: mimeForPath(asset.path),
-        });
-        return [{
-          id: object.id,
-          path: asset.path,
-          url: URL.createObjectURL(blob),
-          alt: object.altText,
-          x: object.x,
-          y: object.y,
-          widthPt: object.widthPt,
-          heightPt: object.heightPt,
-          scale: object.scale,
-          zIndex: object.zIndex,
-          readingOrder: object.readingOrder,
-        }];
-      });
+    images = imageViewsFromSnapshot(snapshot, new AssetUrlCache());
     selectedImageId = null;
     selectedTypstId = null;
   }
 
-  async function ensurePageLoaded(pageId: string) {
+  async function ensurePageLoaded(pageId: string, prefetch = false) {
     const entry = pageEntries.find((page) => page.id === pageId);
     if (!entry || entry.snapshot) return entry?.snapshot ?? null;
     const requestRoot = root;
     const requestGeneration = notebookGeneration;
+    const loadGeneration = pageLoadGeneration;
     try {
-      const snapshot = await openPage(requestRoot, pageId);
-      if (requestRoot !== root || requestGeneration !== notebookGeneration) return null;
-      entry.snapshot = snapshot;
-      return snapshot;
+      const snapshot = await loadPage(requestRoot, loadGeneration, pageId);
+      if (requestRoot !== root || requestGeneration !== notebookGeneration || loadGeneration !== pageLoadGeneration) return null;
+      if (prefetch && !pagesToRetain().has(pageId)) return null;
+      const current = pageEntries.find((page) => page.id === pageId);
+      if (!current) return null;
+      if (!current.snapshot) replacePageSnapshot(pageId, snapshot);
+      scheduleResidency();
+      return current.snapshot ?? snapshot;
     } catch (error) {
-      if (requestRoot !== root || requestGeneration !== notebookGeneration) return null;
-      status = `Could not load page: ${message(error)}`;
+      if (requestRoot !== root || requestGeneration !== notebookGeneration || loadGeneration !== pageLoadGeneration) return null;
+      status = notice("workspace.couldNotLoadPage", { "value1": message(error) });
       return null;
     }
   }
 
-  const visibleRatios = new Map<string, number>();
+  function resetPageEntries() {
+    pageLoadGeneration += 1;
+    pageEntries = [];
+  }
+
+  function replacePageSnapshot(pageId: string, snapshot: NotebookSnapshot | null) {
+    pageEntries = pageEntries.map((entry) => entry.id === pageId ? { ...entry, snapshot } : entry);
+  }
+
+  function dropNeighborStrokes(pageId: string) {
+    const next = { ...neighborStrokes };
+    delete next[pageId];
+    neighborStrokes = next;
+  }
+
+  function scheduleResidency() {
+    if (!residencyFrame) residencyFrame = requestAnimationFrame(() => {
+      residencyFrame = 0;
+      void evictDistantPages();
+    });
+  }
 
   function observePage(node: HTMLElement, pageId: string) {
+    pageNodes.set(pageId, node);
     // One loose observer preloads neighbors well before they enter view.
     const preload = new IntersectionObserver(
       (entries) => {
-        if (!entries.some((entry) => entry.isIntersecting)) return;
-        const index = pageEntries.findIndex((page) => page.id === pageId);
-        for (const page of pageEntries.slice(Math.max(0, index - 1), index + 2)) {
-          void ensurePageLoaded(page.id);
+        if (entries.some((entry) => entry.isIntersecting)) {
+          nearPageIds.add(pageId);
+          const index = pageEntries.findIndex((page) => page.id === pageId);
+          for (const page of pageEntries.slice(Math.max(0, index - 1), index + 2)) {
+            void ensurePageLoaded(page.id, true);
+          }
+        } else {
+          nearPageIds.delete(pageId);
         }
+        scheduleResidency();
       },
       { root: pageViewport, rootMargin: "100% 0px" },
     );
@@ -1494,8 +1532,7 @@
     // centered page can take edit focus — this is what makes undo, New Typst, and paste act on
     // the page you are looking at rather than a page pinned at open.
     const focus = new IntersectionObserver(
-      (entries) => {
-        for (const entry of entries) visibleRatios.set(pageId, entry.intersectionRatio);
+      () => {
         scheduleFocus();
       },
       { root: pageViewport, threshold: [0, 0.25, 0.5, 0.75, 1] },
@@ -1506,7 +1543,8 @@
       destroy: () => {
         preload.disconnect();
         focus.disconnect();
-        visibleRatios.delete(pageId);
+        nearPageIds.delete(pageId);
+        if (pageNodes.get(pageId) === node) pageNodes.delete(pageId);
       },
     };
   }
@@ -1516,23 +1554,23 @@
     focusTimer = setTimeout(() => {
       if (automaticPageFocusLocked || pinchStart) return;
       const still = performance.now() - lastScrollAt;
-      if (touchPanStart || touchInertiaFrame || still < FOCUS_SETTLE_MS) {
+      if (panFrom || touchPanStart || touchInertiaFrame || pagePointers.size > 0 || still < FOCUS_SETTLE_MS) {
         scheduleFocus(Math.max(FOCUS_SETTLE_MS - still, 50));
         return;
       }
-      let bestId = activePageId;
-      let bestRatio = 0;
-      for (const [id, ratio] of visibleRatios) {
-        if (ratio > bestRatio) {
-          bestRatio = ratio;
-          bestId = id;
-        }
+      if (!pageViewport) return;
+      const bestId = pageAtViewportCenter(
+        [...pageNodes].filter(([id]) => nearPageIds.has(id)).map(([id, node]) => ({ id, bounds: node.getBoundingClientRect() })),
+        pageViewport.getBoundingClientRect(),
+      );
+      if (bestId && bestId !== activePageId) {
+        if (activating || busy || pendingTransactions > 0) scheduleFocus();
+        else void activatePage(bestId, true);
       }
-      if (bestRatio >= 0.5 && bestId !== activePageId) void activatePage(bestId);
-    }, 150);
+    }, delay);
   }
 
-  async function activatePage(pageId: string) {
+  async function activatePage(pageId: string, automatic = false) {
     if (
       !tauriAvailable ||
       pageId === activePageId ||
@@ -1546,45 +1584,73 @@
     }
     activating = true;
     const outgoing = activePageId;
+    const requestRoot = root;
+    const generation = notebookGeneration;
+    const loadGeneration = pageLoadGeneration;
+    const current = () => requestRoot === root && generation === notebookGeneration && loadGeneration === pageLoadGeneration;
+    let retry = false;
     try {
       // Land every pending edit on the outgoing page, then flush the incoming page's neighbor
       // renderer, so focus_page reads a current revision instead of racing a debounced commit.
       flushInkCommit();
       flushTypstCommit();
+      // Writing continues while Rust reads the pages. Anything edited from here on is not in the
+      // snapshot focus_page returns, and applying that snapshot would discard it, so the switch
+      // backs off and tries again once the edit has saved.
+      const editsAtStart = editVersion;
       await transactionQueue;
-      if (transactionFailed) return;
+      if (transactionFailed || !current()) return;
       await flushNeighbor(pageId);
+      if (transactionFailed || !current()) return;
 
       // Refresh the outgoing page's cached bundle so it renders its just-committed state once it
       // becomes a neighbor rather than the stale bundle it was activated with.
       const outgoingEntry = pageEntries.find((page) => page.id === outgoing);
       if (outgoingEntry) {
         try {
-          outgoingEntry.snapshot = await openPage(root, outgoing);
+          const snapshot = await openPage(requestRoot, outgoing);
+          if (!current()) return;
+          replacePageSnapshot(outgoing, snapshot);
           // It renders as a neighbour from here on, so let it derive from the fresh bundle.
-          delete neighborStrokes[outgoing];
+          dropNeighborStrokes(outgoing);
         } catch {
           // A neighbor that fails to reload simply shows a loading state; it is not fatal.
         }
       }
 
-      const result = await focusPage(root, pageId);
+      const result = await focusPage(requestRoot, pageId);
+      if (!current()) return;
+      if (editVersion !== editsAtStart) {
+        retry = true;
+        return;
+      }
+      // A new contact or scroll may begin while Rust reads the page. Never retarget that gesture.
+      if (pagePointers.size || panFrom || touchPanStart || pinchStart || touchInertiaFrame ||
+        (automatic && (automaticPageFocusLocked || performance.now() - lastScrollAt < FOCUS_SETTLE_MS))) {
+        scheduleFocus();
+        return;
+      }
       applySnapshot(result.snapshot);
       void recordNotebookPage(root, pageId).catch(() => {});
       canUndo = result.canUndo;
       canRedo = result.canRedo;
       await evictDistantPages();
-      status = `Editing page ${activePageNumber()}`;
+      status = notice("workspace.editingPage", { "value1": activePageNumber() });
     } catch (error) {
-      status = `Could not switch to that page: ${message(error)}`;
+      if (current()) status = notice("workspace.couldNotSwitchToThatPage", { "value1": message(error) });
     } finally {
       activating = false;
+      if (retry) {
+        if (automatic) scheduleFocus(FOCUS_SETTLE_MS);
+        else setTimeout(() => {
+          if (generation === notebookGeneration) void activatePage(pageId);
+        }, FOCUS_SETTLE_MS);
+      }
     }
   }
 
   function updateLoadedPage(pageId: string, snapshot: NotebookSnapshot) {
-    const entry = pageEntries.find((page) => page.id === pageId);
-    if (entry) entry.snapshot = snapshot;
+    replacePageSnapshot(pageId, snapshot);
     notebookManifest = snapshot.manifest;
     recordNotebookAction(pageId);
   }
@@ -1609,38 +1675,56 @@
   function neighborCommitter(pageId: string): InkCommitter {
     let committer = neighborCommitters.get(pageId);
     if (committer) return committer;
+    const requestRoot = root;
+    const generation = notebookGeneration;
     committer = createInkCommitter({
       save: async (strokes, label) => {
-        const entry = pageEntries.find((page) => page.id === pageId);
+        if (root !== requestRoot || notebookGeneration !== generation || transactionFailed) return;
+        // A page list reload drops loaded bundles; reload this one instead of dropping the ink.
+        const loaded = pageEntries.find((page) => page.id === pageId)?.snapshot ?? await ensurePageLoaded(pageId);
+        const entry = loaded && root === requestRoot && notebookGeneration === generation
+          ? pageEntries.find((page) => page.id === pageId)
+          : undefined;
         if (!entry?.snapshot) {
           pendingNeighborPages = new Set(
             [...pendingNeighborPages].filter((id) => id !== pageId),
           );
+          if (root === requestRoot && notebookGeneration === generation) {
+            status = notice("workspace.wasNotSavedThatPageIsNo", { "label": label });
+          }
           return;
         }
-        const inkLayers = entry.snapshot.inkLayers.map((layer, index) =>
-          index === 0 ? { ...layer, strokes } : layer,
-        );
+        const drawingLayerId = entry.snapshot.inkLayers[0]?.id ?? `${pageId}-ink-001`;
+        const references = entry.snapshot.page.inkLayers.length ? entry.snapshot.page.inkLayers
+          : [{ id: drawingLayerId, path: `ink/${pageId}-layer-001.ink` }];
+        const originalLayers = entry.snapshot.inkLayers.length ? entry.snapshot.inkLayers
+          : [{ id: drawingLayerId, pageId, schemaVersion: entry.snapshot.page.schemaVersion, strokes: [] }];
+        const inkLayers = inkLayersWithStrokes(originalLayers, strokes, drawingLayerId);
         const number =
           (notebookManifest?.pages.findIndex((page) => page.id === pageId) ?? 0) + 1;
         try {
           // Originals already exist on disk; a commit references them by path.
-          const result = await commitNotebook(root, {
+          const result = await commitNotebook(requestRoot, {
             ...entry.snapshot,
+            page: { ...entry.snapshot.page, inkLayers: references },
             assets: [],
             inkLayers,
-          });
+          }, entry.snapshot);
+          if (root !== requestRoot || notebookGeneration !== generation) return;
           updateLoadedPage(pageId, result.snapshot);
-          neighborStrokes[pageId] = strokesFromSnapshot(result.snapshot);
-          status = `${label} on page ${number}`;
+          if (neighborStrokes[pageId] === strokes) {
+            neighborStrokes = { ...neighborStrokes, [pageId]: strokesFromSnapshot(result.snapshot) };
+          }
+          status = notice("workspace.onPage", { "label": label, "number": number });
         } catch (error) {
-          reportCommitFailure(`${label} on page ${number}`, error);
+          reportCommitFailure(notice("workspace.onPage", { "label": label, "number": number }), error);
         } finally {
-          if (!committer?.pending()) {
+          if (!transactionFailed && !committer?.pending()) {
             pendingNeighborPages = new Set(
               [...pendingNeighborPages].filter((id) => id !== pageId),
             );
           }
+          scheduleResidency();
         }
       },
     });
@@ -1665,8 +1749,9 @@
     }
   }
 
-  function commitNeighborInk(pageId: string, strokes: Stroke[], label: string) {
-    neighborStrokes[pageId] = strokes;
+  function commitNeighborInk(pageId: string, strokes: Stroke[], label: UiText) {
+    editVersion += 1;
+    neighborStrokes = { ...neighborStrokes, [pageId]: strokes };
     const committer = neighborCommitter(pageId);
     pendingNeighborPages = new Set(pendingNeighborPages).add(pageId);
     committer.commit(strokes, label);
@@ -1675,27 +1760,36 @@
   async function compileNeighborTypst(
     pageId: string,
     blockId: string,
-    request: { source: string; sharedStyle?: string | null; widthPt: number; generation: number },
+    request: TypstCompileRequest,
   ) {
     const requestRoot = root;
     const requestGeneration = notebookGeneration;
-    const cacheSource = `${request.sharedStyle ?? ""}\n${request.source}`;
-    const cached = getCachedTypst(cacheSource, request.widthPt);
+    const versionKey = `${requestRoot}\0${pageId}\0${blockId}`;
+    const version = {};
+    compileVersions.set(versionKey, version);
+    const epoch = typstCacheEpoch();
+    const current = () => requestRoot === root && requestGeneration === notebookGeneration &&
+      compileVersions.get(versionKey) === version && epoch === typstCacheEpoch() &&
+      !!pageEntries.find(page => page.id === pageId)?.snapshot;
+    const cacheSource = compileCacheSource(request);
+    const cached = getCachedTypst(cacheSource, request.widthPt, requestRoot);
     if (cached) {
-      neighborResults[pageId] = {
-        ...neighborResults[pageId],
-        [blockId]: { ...cached, generation: request.generation },
+      neighborResults = {
+        ...neighborResults,
+        [pageId]: { ...neighborResults[pageId], [blockId]: { ...cached, generation: request.generation } },
       };
       return;
     }
     if (!tauriAvailable) return;
     try {
-      const result = await requestTypstCompile(requestRoot, request);
-      setCachedTypst(cacheSource, request.widthPt, result);
+      const result = await scheduledCompile(requestRoot, request, current, false, epoch);
+      if (!result || !current()) return;
       if (requestRoot !== root || requestGeneration !== notebookGeneration) return;
-      neighborResults[pageId] = {
-        ...neighborResults[pageId],
-        [blockId]: result,
+      setCachedTypst(cacheSource, request.widthPt, result, requestRoot);
+      if (!pageEntries.find((page) => page.id === pageId)?.snapshot) return;
+      neighborResults = {
+        ...neighborResults,
+        [pageId]: { ...neighborResults[pageId], [blockId]: result },
       };
     } catch {
       // The page stays readable through its ink and images if a background preview fails.
@@ -1709,65 +1803,120 @@
   }
 
   async function releaseNeighbor(pageId: string): Promise<boolean> {
+    const generation = notebookGeneration;
+    const loadGeneration = pageLoadGeneration;
     await flushNeighbor(pageId);
-    if (transactionFailed) return false;
+    if (transactionFailed || generation !== notebookGeneration || loadGeneration !== pageLoadGeneration || pagesToRetain().has(pageId)) return false;
     neighborUrls.get(pageId)?.dispose();
     neighborUrls.delete(pageId);
     neighborCommitters.get(pageId)?.dispose();
     neighborCommitters.delete(pageId);
-    delete neighborStrokes[pageId];
-    delete neighborResults[pageId];
+    dropNeighborStrokes(pageId);
+    const results = { ...neighborResults };
+    delete results[pageId];
+    neighborResults = results;
+    replacePageSnapshot(pageId, null);
     return true;
   }
 
-  /// Keep only the active page's neighbors as full bundles (Phase 2 §7 residency budget).
-  /// Evicted pages fall back to placeholders and reload on demand near the viewport.
+  function pagesToRetain() {
+    const keep = retainedPageIds(pageEntries.map((page) => page.id), nearPageIds, activePageId);
+    for (const id of pagePointers.values()) keep.add(id);
+    for (const id of pendingNeighborPages) keep.add(id);
+    return keep;
+  }
+
+  /// Viewport residency must not wait for edit focus, which is deferred throughout a pan.
   async function evictDistantPages() {
-    const active = pageEntries.findIndex((page) => page.id === activePageId);
-    if (active < 0) return;
-    for (const [index, entry] of pageEntries.entries()) {
-      if (Math.abs(index - active) > 2 && entry.snapshot) {
-        if (await releaseNeighbor(entry.id)) entry.snapshot = null;
+    const generation = notebookGeneration;
+    const loadGeneration = pageLoadGeneration;
+    const keep = pagesToRetain();
+    for (const entry of pageEntries) {
+      if (generation !== notebookGeneration || loadGeneration !== pageLoadGeneration) return;
+      if (!keep.has(entry.id) && entry.snapshot) {
+        await releaseNeighbor(entry.id);
       }
     }
   }
 
   function changeSettings(next: AppSettings) {
     settings = next;
+    setLanguage(next.uiLanguage);
     paletteDock = next.paletteDock;
     historyCorner = next.historyCorner;
     const version = ++settingsVersion;
+    settingsNeedSave = true;
     if (settingsSaveTimer) clearTimeout(settingsSaveTimer);
     settingsSaveTimer = setTimeout(() => {
-      const pending = settings;
-      settingsSaveQueue = settingsSaveQueue.then(async () => {
-        try {
-          const sanitized = await saveSettings(tauriAvailable, pending);
-          if (version === settingsVersion) settings = sanitized;
-        } catch (error) {
-          status = `Settings were not saved: ${message(error)}`;
-        }
-      });
+      settingsSaveTimer = undefined;
+      queueSettingsSave(settings, version);
     }, 400);
+  }
+
+  function changeInlineFont(font: string) {
+    const block = typstBlocks.find(candidate => candidate.id === selectedTypstId);
+    if (block) updateTypstSource(block.id, withBlockFont(block.source, font));
+    changeSettings({ ...settings, inlineTextFont: font });
+  }
+
+  function queueSettingsSave(pending: AppSettings, version: number) {
+    settingsSaveQueue = settingsSaveQueue.then(async () => {
+      try {
+        const sanitized = await saveSettings(tauriAvailable, pending);
+        if (version === settingsVersion) {
+          settings = sanitized;
+          setLanguage(sanitized.uiLanguage);
+          settingsNeedSave = false;
+        }
+      } catch (error) {
+        status = notice("errors.settingsSession", { details: message(error) });
+      }
+    });
+  }
+
+  async function flushSettings(): Promise<boolean> {
+    if (settingsSaveTimer) clearTimeout(settingsSaveTimer);
+    settingsSaveTimer = undefined;
+    if (settingsNeedSave) queueSettingsSave(settings, settingsVersion);
+    await settingsSaveQueue;
+    return !settingsNeedSave;
+  }
+
+  /**
+   * Run an operation whose reply replaces the active page wholesale (structure changes, history,
+   * recovery, reopen). `applySnapshot` discards whatever the page holds locally, so page input is
+   * locked from the save that precedes the operation until its reply has landed: a touch in that
+   * window visibly does nothing instead of drawing ink that silently disappears.
+   */
+  async function replacingPage<T>(work: () => Promise<T>): Promise<T> {
+    replacingPageCount += 1;
+    try {
+      return await work();
+    } finally {
+      replacingPageCount -= 1;
+    }
   }
 
   async function duplicateActivePage() {
     moreOpen = false;
-    if (!tauriAvailable || !(await persist())) return;
-    busy = true;
-    try {
-      const result = await duplicatePage(root, activePageId, new Date().toISOString());
-      pageEntries = [];
-      applySnapshot(result.snapshot);
-      recordStructureAction();
-      await tick();
-      scrollToPage(result.snapshot.page.id);
-      status = `Duplicated into page ${activePageNumber()}`;
-    } catch (error) {
-      status = `Could not duplicate the page: ${message(error)}`;
-    } finally {
-      busy = false;
-    }
+    if (!tauriAvailable) return;
+    await replacingPage(async () => {
+      if (!(await persist())) return;
+      busy = true;
+      try {
+        const result = await duplicatePage(root, activePageId, new Date().toISOString());
+        resetPageEntries();
+        applySnapshot(result.snapshot);
+        recordStructureAction();
+        await tick();
+        scrollToPage(result.snapshot.page.id);
+        status = notice("workspace.duplicatedIntoPage", { "value1": activePageNumber() });
+      } catch (error) {
+        status = notice("workspace.couldNotDuplicateThePage", { "value1": message(error) });
+      } finally {
+        busy = false;
+      }
+    });
   }
 
   /** The page number a pending delete asks about; null while nothing is being asked. */
@@ -1782,20 +1931,25 @@
   async function confirmDeleteActivePage() {
     const deletedNumber = confirmingPageDelete;
     confirmingPageDelete = null;
-    busy = true;
-    try {
-      const result = await deletePage(root, activePageId, new Date().toISOString());
-      pageEntries = [];
-      applySnapshot(result.snapshot);
-      recordStructureAction();
-      await tick();
-      scrollToPage(result.snapshot.page.id);
-      status = `Deleted page ${deletedNumber}`;
-    } catch (error) {
-      status = `Could not delete the page: ${message(error)}`;
-    } finally {
-      busy = false;
-    }
+    await replacingPage(async () => {
+      // Edits made while the question was open belong to the page's history too, so undoing the
+      // delete brings them back.
+      if (!(await persist())) return;
+      busy = true;
+      try {
+        const result = await deletePage(root, activePageId, new Date().toISOString());
+        resetPageEntries();
+        applySnapshot(result.snapshot);
+        recordStructureAction();
+        await tick();
+        scrollToPage(result.snapshot.page.id);
+        status = notice("workspace.deletedPage", { "deletedNumber": deletedNumber });
+      } catch (error) {
+        status = notice("workspace.couldNotDeleteThePage", { "value1": message(error) });
+      } finally {
+        busy = false;
+      }
+    });
   }
 
   /**
@@ -1843,7 +1997,7 @@
     selectedShapeId = null;
     editingShapeId = null;
     mixedGroup = null;
-    queueCommit("Cleared page");
+    queueCommit(notice("workspace.clearedPage"));
   }
 
   /** Jump straight to a page number, one-based as the writer sees it. */
@@ -1869,10 +2023,10 @@
     if (!pageOpen) {
       return [
         {
-          title: "Notebook",
+          title: $t("workspace.notebook"),
           entries: [
-            { kind: "action", id: "reopen", label: "Reopen notebook", icon: "M4 12a8 8 0 1 1 2.3 5.6M4 12V6M4 12h6", onSelect: reopen },
-            { kind: "action", id: "settings", label: "Settings", icon: "M4 8h8M17 8h3M4 16h3M12 16h8M14.5 5.8v4.4M9.5 13.8v4.4", hint: "Ctrl ,", onSelect: () => (settingsOpen = true) },
+            { kind: "action", id: "reopen", label: $t("workspace.reopenNotebook"), icon: "M4 12a8 8 0 1 1 2.3 5.6M4 12V6M4 12h6", onSelect: reopen },
+            { kind: "action", id: "settings", label: $t("library.settings"), icon: "M4 8h8M17 8h3M4 16h3M12 16h8M14.5 5.8v4.4M9.5 13.8v4.4", hint: "Ctrl ,", onSelect: () => (settingsOpen = true) },
           ],
         },
       ];
@@ -1882,16 +2036,16 @@
         ? [
             {
               title: selectedImageId
-                ? "Selected image"
+                ? $t("workspace.selectedImage")
                 : selectedShapeId
-                  ? "Selected shape"
-                  : "Selected Typst",
+                  ? $t("workspace.selectedShape")
+                  : $t("workspace.selectedTypst"),
               entries: [
-                { kind: "action" as const, id: "object-back", label: "Send behind everything", icon: "M4 12l8 4 8-4M4 8l8-4 8 4-8 4z", disabled: !canMoveVisual(-1), onSelect: () => changeVisualOrder("back") },
-                { kind: "action" as const, id: "object-front", label: "Bring in front of everything", icon: "M4 12l8-4 8 4-8 4zM4 16l8 4 8-4", disabled: !canMoveVisual(1), onSelect: () => changeVisualOrder("front") },
-                { kind: "action" as const, id: "read-earlier", label: "Read earlier by screen readers", icon: "M12 19V5m0 0-5 5m5-5 5 5", disabled: !canMoveReading(-1), onSelect: () => changeReadingOrder(-1) },
-                { kind: "action" as const, id: "read-later", label: "Read later by screen readers", icon: "M12 5v14m0 0 5-5m-5 5-5-5", disabled: !canMoveReading(1), onSelect: () => changeReadingOrder(1) },
-                { kind: "action" as const, id: "remove-object", label: "Remove from page", icon: "M6 6l12 12M18 6 6 18", hint: "Delete", onSelect: () => void deleteSelection() },
+                { kind: "action" as const, id: "object-back", label: $t("workspace.sendBehindEverything"), icon: "M4 12l8 4 8-4M4 8l8-4 8 4-8 4z", disabled: !canMoveVisual(-1), onSelect: () => changeVisualOrder("back") },
+                { kind: "action" as const, id: "object-front", label: $t("workspace.bringInFrontOfEverything"), icon: "M4 12l8-4 8 4-8 4zM4 16l8 4 8-4", disabled: !canMoveVisual(1), onSelect: () => changeVisualOrder("front") },
+                { kind: "action" as const, id: "read-earlier", label: $t("workspace.readEarlierByScreenReaders"), icon: "M12 19V5m0 0-5 5m5-5 5 5", disabled: !canMoveReading(-1), onSelect: () => changeReadingOrder(-1) },
+                { kind: "action" as const, id: "read-later", label: $t("workspace.readLaterByScreenReaders"), icon: "M12 5v14m0 0 5-5m-5 5-5-5", disabled: !canMoveReading(1), onSelect: () => changeReadingOrder(1) },
+                { kind: "action" as const, id: "remove-object", label: $t("workspace.removeFromPage"), icon: "M6 6l12 12M18 6 6 18", hint: $t("workspace.delete"), onSelect: () => void deleteSelection() },
               ],
             },
           ]
@@ -1900,29 +2054,29 @@
         entries: [
           // Adding a page is not here: it has its own header button, because choosing where the
           // page goes and what it is made of needs more than one row.
-          { kind: "action", id: "duplicate", label: "Duplicate Page", icon: "M9 9h10v12H9zM5 15V3h10v2", onSelect: duplicateActivePage },
-          { kind: "action", id: "up", label: "Move Page Up", icon: "M12 19V5m0 0-5 5m5-5 5 5", hint: "Ctrl Shift PgUp", disabled: !many || pageNumber === 1, onSelect: () => void moveActivePage(-1) },
-          { kind: "action", id: "down", label: "Move Page Down", icon: "M12 5v14m0 0 5-5m-5 5-5-5", hint: "Ctrl Shift PgDn", disabled: !many || pageNumber === pageCount, onSelect: () => void moveActivePage(1) },
-          { kind: "number", id: "goto", label: "Go to Page", icon: "M5 4.5h14v15H5zM9 9h6M9 13h4", value: pageNumber, min: 1, max: pageCount, hint: `of ${pageCount}`, disabled: !many, onCommit: (number) => void goToPageNumber(number) },
+          { kind: "action", id: "duplicate", label: $t("workspace.duplicatePage"), icon: "M9 9h10v12H9zM5 15V3h10v2", onSelect: duplicateActivePage },
+          { kind: "action", id: "up", label: $t("workspace.movePageUp"), icon: "M12 19V5m0 0-5 5m5-5 5 5", hint: "Ctrl Shift PgUp", disabled: !many || pageNumber === 1, onSelect: () => void moveActivePage(-1) },
+          { kind: "action", id: "down", label: $t("workspace.movePageDown"), icon: "M12 5v14m0 0 5-5m-5 5-5-5", hint: "Ctrl Shift PgDn", disabled: !many || pageNumber === pageCount, onSelect: () => void moveActivePage(1) },
+          { kind: "number", id: "goto", label: $t("workspace.goToPage"), icon: "M5 4.5h14v15H5zM9 9h6M9 13h4", value: pageNumber, min: 1, max: pageCount, hint: $t("workspace.of", { "pageCount": pageCount }), disabled: !many, onCommit: (number) => void goToPageNumber(number) },
         ],
       },
       {
-        title: "Clear or remove page",
+        title: $t("workspace.clearOrRemovePage"),
         entries: [
-          { kind: "action", id: "clear", label: "Clear Page", icon: "M6 6.5h12M9.5 6.5V4h5v2.5M8 10v7M12 10v7M16 10v7M6.5 6.5 7.5 20h9l1-13.5", destructive: true, onSelect: clearActivePage },
+          { kind: "action", id: "clear", label: $t("workspace.clearPage"), icon: "M6 6.5h12M9.5 6.5V4h5v2.5M8 10v7M12 10v7M16 10v7M6.5 6.5 7.5 20h9l1-13.5", destructive: true, onSelect: clearActivePage },
           // Undo covers this: deleting drops the manifest reference and the page's own files stay
           // on disk. That is why there is no trash bin.
-          { kind: "action", id: "delete", label: "Delete Page", icon: "M5 4.5h14v15H5zM9 9l6 6M15 9l-6 6", destructive: true, disabled: !many, onSelect: deleteActivePage },
+          { kind: "action", id: "delete", label: $t("workspace.deletePage"), icon: "M5 4.5h14v15H5zM9 9l6 6M15 9l-6 6", destructive: true, disabled: !many, onSelect: deleteActivePage },
         ],
       },
       {
-        title: "Notebook",
+        title: $t("workspace.notebook"),
         entries: [
-          { kind: "action", id: "search", label: "Search notebook", icon: "M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14zM20 20l-3.6-3.6", hint: "Ctrl F", onSelect: () => (searchOpen = true) },
-          { kind: "action", id: "style", label: "Edit shared Typst style", icon: "M5 4.5h14M12 4.5v15M8 19.5h8", onSelect: openSharedStyle },
-          { kind: "action", id: "settings", label: "Settings", hint: "Ctrl ,", icon: "M4 8h8M17 8h3M4 16h3M12 16h8M14.5 5.8v4.4M9.5 13.8v4.4", onSelect: () => (settingsOpen = true) },
-          { kind: "action", id: "save", label: "Confirm saved", icon: "M5 12.5l4.5 4.5L19 7.5", onSelect: () => void persist() },
-          { kind: "action", id: "close", label: "Close notebook", icon: "M14 5h5v14h-5M13 12H4m0 0 3.5-3.5M4 12l3.5 3.5", onSelect: closePage },
+          { kind: "action", id: "search", label: $t("workspace.searchNotebook"), icon: "M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14zM20 20l-3.6-3.6", hint: "Ctrl F", onSelect: () => (searchOpen = true) },
+          { kind: "action", id: "style", label: $t("workspace.editSharedTypstStyle"), icon: "M5 4.5h14M12 4.5v15M8 19.5h8", onSelect: openSharedStyle },
+          { kind: "action", id: "settings", label: $t("library.settings"), hint: "Ctrl ,", icon: "M4 8h8M17 8h3M4 16h3M12 16h8M14.5 5.8v4.4M9.5 13.8v4.4", onSelect: () => (settingsOpen = true) },
+          { kind: "action", id: "save", label: $t("workspace.confirmSaved"), icon: "M5 12.5l4.5 4.5L19 7.5", onSelect: () => void persist() },
+          { kind: "action", id: "close", label: $t("workspace.closeNotebook"), icon: "M14 5h5v14h-5M13 12H4m0 0 3.5-3.5M4 12l3.5 3.5", onSelect: closePage },
         ],
       },
     ]);
@@ -1938,25 +2092,27 @@
     if (index < 0 || target < 0 || target >= order.length) return;
     [order[index], order[target]] = [order[target], order[index]];
     busy = true;
-    try {
-      if (!(await persist())) return;
-      const result = await reorderPages(
-        root,
-        order,
-        new Date().toISOString(),
-        activePageId,
-      );
-      pageEntries = [];
-      applySnapshot(result.snapshot);
-      recordStructureAction();
-      await tick();
-      scrollToPage(activePageId);
-      status = `Moved page to position ${target + 1}`;
-    } catch (error) {
-      status = `Could not reorder pages: ${message(error)}`;
-    } finally {
-      busy = false;
-    }
+    await replacingPage(async () => {
+      try {
+        if (!(await persist())) return;
+        const result = await reorderPages(
+          root,
+          order,
+          new Date().toISOString(),
+          activePageId,
+        );
+        resetPageEntries();
+        applySnapshot(result.snapshot);
+        recordStructureAction();
+        await tick();
+        scrollToPage(activePageId);
+        status = notice("workspace.movedPageToPosition", { "value1": target + 1 });
+      } catch (error) {
+        status = notice("workspace.couldNotReorderPages", { "value1": message(error) });
+      } finally {
+        busy = false;
+      }
+    });
   }
 
   async function navigateToSearchHit(hit: SearchHit) {
@@ -1973,28 +2129,33 @@
       selectedImageId = null;
       selectedShapeId = null;
       editingShapeId = null;
-      status = `Found on page ${hit.pageNumber}`;
+      status = notice("workspace.foundOnPage", { "pageNumber": hit.pageNumber });
     }
   }
 
   async function restoreRecovery(fileName: string) {
     recoveryBusy = true;
-    try {
-      const result = await restoreRecoveryCandidate(root, fileName);
-      pageEntries = [];
-      applySnapshot(result.snapshot);
-      canUndo = result.canUndo;
-      canRedo = result.canRedo;
-      status = `Restored recovered work on page ${activePageNumber()}`;
-      recoveryCandidates = recoveryCandidates.filter(
-        (candidate) => candidate.fileName !== fileName,
-      );
-      recoveryOpen = recoveryCandidates.length > 0;
-    } catch (error) {
-      status = `Could not restore the recovered work: ${message(error)}`;
-    } finally {
-      recoveryBusy = false;
-    }
+    await replacingPage(async () => {
+      try {
+        // Pending edits land first, so restoring replaces confirmed state that undo can return to.
+        // A save blocked by unresolved recovery is exactly what restoring resolves; skip it then.
+        if (tauriAvailable && activeSnapshot && !transactionFailed && !(await persist())) return;
+        const result = await restoreRecoveryCandidate(root, fileName);
+        resetPageEntries();
+        applySnapshot(result.snapshot);
+        canUndo = result.canUndo;
+        canRedo = result.canRedo;
+        status = notice("workspace.restoredRecoveredWorkOnPage", { "value1": activePageNumber() });
+        recoveryCandidates = recoveryCandidates.filter(
+          (candidate) => candidate.fileName !== fileName,
+        );
+        recoveryOpen = recoveryCandidates.length > 0;
+      } catch (error) {
+        status = notice("workspace.couldNotRestoreTheRecoveredWork", { "value1": message(error) });
+      } finally {
+        recoveryBusy = false;
+      }
+    });
   }
 
   async function discardRecovery(fileName: string) {
@@ -2005,9 +2166,9 @@
         (candidate) => candidate.fileName !== fileName,
       );
       recoveryOpen = recoveryCandidates.length > 0;
-      status = "Discarded the recovered copy";
+      status = notice("workspace.discardedTheRecoveredCopy");
     } catch (error) {
-      status = `Could not discard the recovered copy: ${message(error)}`;
+      status = notice("workspace.couldNotDiscardTheRecoveredCopy", { "value1": message(error) });
     } finally {
       recoveryBusy = false;
     }
@@ -2028,76 +2189,81 @@
     count = 1,
   ) {
     moreOpen = false;
-    if (!(await persist())) return;
-    busy = true;
-    try {
-      let at = position;
-      let last = "";
-      for (let made = 0; made < Math.max(1, count); made += 1) {
-        const result = await createPage(
-          root,
-          new Date().toISOString(),
-          at,
-          background,
-          geometry,
-          activePageId,
-        );
-        pageEntries = [];
-        applySnapshot(result.snapshot);
-        recordStructureAction();
-        last = result.snapshot.page.id;
-        at = { kind: "after", pageId: last };
+    await replacingPage(async () => {
+      if (!(await persist())) return;
+      busy = true;
+      try {
+        let at = position;
+        let last = "";
+        for (let made = 0; made < Math.max(1, count); made += 1) {
+          const result = await createPage(
+            root,
+            new Date().toISOString(),
+            at,
+            background,
+            geometry,
+            activePageId,
+          );
+          resetPageEntries();
+          applySnapshot(result.snapshot);
+          recordStructureAction();
+          last = result.snapshot.page.id;
+          at = { kind: "after", pageId: last };
+        }
+        // Load whatever now sits above the last page so the scroll lands with context above it
+        // rather than against the top of an otherwise empty run.
+        const pages = notebookManifest?.pages ?? [];
+        const index = pages.findIndex((page) => page.id === last);
+        const above = index > 0 ? pages[index - 1] : undefined;
+        if (above) await ensurePageLoaded(above.id);
+        await tick();
+        if (last) scrollToPage(last);
+        status =
+          count > 1 ? notice("workspace.addedPages", { "count": count }) : notice("workspace.addedPage", { "value1": activePageNumber() });
+      } catch (error) {
+        status = notice("workspace.couldNotAddPage", { "value1": message(error) });
+      } finally {
+        busy = false;
       }
-      // Load whatever now sits above the last page so the scroll lands with context above it
-      // rather than against the top of an otherwise empty run.
-      const pages = notebookManifest?.pages ?? [];
-      const index = pages.findIndex((page) => page.id === last);
-      const above = index > 0 ? pages[index - 1] : undefined;
-      if (above) await ensurePageLoaded(above.id);
-      await tick();
-      if (last) scrollToPage(last);
-      status =
-        count > 1 ? `Added ${count} pages` : `Added page ${activePageNumber()}`;
-    } catch (error) {
-      status = `Could not add page: ${message(error)}`;
-    } finally {
-      busy = false;
-    }
+    });
   }
 
   async function importPdf(position: PagePosition) {
     moreOpen = false;
-    if (!tauriAvailable || !(await persist())) return;
-    busy = true;
-    try {
-      const sourcePath = await pickPdfReference(root);
-      if (!sourcePath) return;
-      status = "Reading PDF pages…";
-      const geometries = await pdfPageGeometries(root, sourcePath);
-      const result = await importPdfPages(
-        root,
-        new Date().toISOString(),
-        position,
-        sourcePath,
-        geometries,
-        activePageId,
-      );
-      pageEntries = [];
-      applySnapshot(result.snapshot);
-      recordStructureAction();
-      const index = result.snapshot.manifest.pages.findIndex(
-        (page) => page.id === result.snapshot.page.id,
-      );
-      const above = index > 0 ? result.snapshot.manifest.pages[index - 1] : undefined;
-      if (above) await ensurePageLoaded(above.id);
-      await tick();
-      scrollToPage(result.snapshot.page.id);
-      status = `Imported ${geometries.length} PDF ${geometries.length === 1 ? "page" : "pages"}`;
-    } catch (error) {
-      status = `Could not import PDF: ${message(error)}`;
-    } finally {
-      busy = false;
-    }
+    if (!tauriAvailable) return;
+    await replacingPage(async () => {
+      if (!(await persist())) return;
+      busy = true;
+      try {
+        const sourcePath = await pickPdfReference(root);
+        if (!sourcePath) return;
+        status = notice("workspace.readingPDFPages");
+        const geometries = await pdfPageGeometries(root, sourcePath);
+        const result = await importPdfPages(
+          root,
+          new Date().toISOString(),
+          position,
+          sourcePath,
+          geometries,
+          activePageId,
+        );
+        resetPageEntries();
+        applySnapshot(result.snapshot);
+        recordStructureAction();
+        const index = result.snapshot.manifest.pages.findIndex(
+          (page) => page.id === result.snapshot.page.id,
+        );
+        const above = index > 0 ? result.snapshot.manifest.pages[index - 1] : undefined;
+        if (above) await ensurePageLoaded(above.id);
+        await tick();
+        scrollToPage(result.snapshot.page.id);
+        status = notice("counts.importedPdf", { count: geometries.length });
+      } catch (error) {
+        status = notice("workspace.couldNotImportPDF", { "value1": message(error) });
+      } finally {
+        busy = false;
+      }
+    });
   }
 
   /**
@@ -2129,22 +2295,22 @@
         ? templatePreviewSvg(paper.background.template, paper.geometry)
         : paper.background.kind === "plain"
           ? templatePreviewSvg(
-              { id: "next-plain", name: "Plain", backgroundColor: paper.background.color, elements: [] },
+              { id: "next-plain", name: $t("workspace.plain"), backgroundColor: paper.background.color, elements: [] },
               paper.geometry,
             )
           : undefined;
     const paperName = (paper: PageDefaults) =>
-      paper.background.kind === "template" ? paper.background.template.name : "Plain";
+      paper.background.kind === "template" ? paper.background.template.name : $t("workspace.plain");
     return [
       {
         id: "import",
-        title: "Import",
+        title: $t("library.import"),
         lane: "import",
         sources: [
           {
             id: "pdf",
-            label: "Import PDF",
-            detail: "Brings in every page",
+            label: $t("workspace.importPDF"),
+            detail: $t("workspace.bringsInEveryPage"),
             disabled: !tauriAvailable,
             compact: true,
             preview:
@@ -2155,15 +2321,15 @@
       },
       {
         id: "current",
-        title: "Notebook paper",
+        title: $t("workspace.notebookPaper"),
         lane: "current",
         sources: [
           ...(nextUsable
             ? [
                 {
                   id: "next",
-                  label: "Notebook paper",
-                  detail: `${paperName(nextUsable)}, ${describeGeometry(nextUsable.geometry)}`,
+                  label: $t("workspace.notebookPaper"),
+                  detail: `${paperName(nextUsable)}, ${describeGeometry(nextUsable.geometry, $t)}`,
                   preview: paperPreview(nextUsable),
                   onSelect: (position: PagePosition, count: number) =>
                     void addPage(position, nextUsable.background, nextUsable.geometry, count),
@@ -2172,7 +2338,7 @@
             : []),
         ],
       },
-      ...templateGroups(PAPER_TONES.find((paper) => paper.id === addPageToneId) ?? PAPER_TONES[0]).map((group) => ({
+      ...templateGroups(PAPER_TONES.find((paper) => paper.id === addPageToneId) ?? PAPER_TONES[0], $t).map((group) => ({
         id: group.id,
         title: group.title,
         sources: group.templates.map(template),
@@ -2185,14 +2351,16 @@
     return Math.max(0, index) + 1;
   }
 
-  async function compileTypst(id: string, request: {
-    source: string;
-    sharedStyle?: string | null;
-    widthPt: number;
-    generation: number;
-  }) {
+  async function compileTypst(id: string, request: TypstCompileRequest) {
     const requestRoot = root;
     const requestGeneration = notebookGeneration;
+    const requestPageId = activePageId;
+    const versionKey = `${requestRoot}\0${requestPageId}\0${id}`;
+    const version = {};
+    compileVersions.set(versionKey, version);
+    const epoch = typstCacheEpoch();
+    const current = () => requestRoot === root && requestGeneration === notebookGeneration &&
+      activePageId === requestPageId && compileVersions.get(versionKey) === version && epoch === typstCacheEpoch();
     const startedAt = performance.now();
     let result: TypstCompileResult;
     if (!tauriAvailable) {
@@ -2209,16 +2377,19 @@
       };
       if (collectMetrics) compileMs = performance.now() - startedAt;
     } else {
-      const cacheSource = `${request.sharedStyle ?? ""}\n${request.source}`;
-      const cached = getCachedTypst(cacheSource, request.widthPt);
+      const cacheSource = compileCacheSource(request);
+      const cached = getCachedTypst(cacheSource, request.widthPt, requestRoot);
       if (cached) {
         // Unchanged source: reuse the compiled SVG, stamped with this request's generation so
         // the block's preview state machine accepts it. No recompile, no IPC round trip.
         result = { ...cached, generation: request.generation };
       } else {
         try {
-          result = await requestTypstCompile(requestRoot, request);
-          setCachedTypst(cacheSource, request.widthPt, result);
+          const compiled = await scheduledCompile(requestRoot, request, current, true, epoch);
+          if (!compiled || !current()) return;
+          result = compiled;
+          if (requestRoot !== root || requestGeneration !== notebookGeneration) return;
+          setCachedTypst(cacheSource, request.widthPt, result, requestRoot);
         } catch (error) {
           result = {
             generation: request.generation,
@@ -2267,7 +2438,7 @@
     typstBlocks = typstBlocks.map((block) =>
       block.id === id ? { ...block, transform: next } : block,
     );
-    queueCommit("Updated Typst block");
+    queueCommit(notice("workspace.updatedTypstBlock"));
   }
 
   function updateTypstSource(id: string, source: string) {
@@ -2277,6 +2448,7 @@
         block.id === id ? { ...block, source } : block,
       );
     }
+    editVersion += 1;
     typstDirty = true;
     if (typstCommitTimer) clearTimeout(typstCommitTimer);
     typstCommitTimer = setTimeout(flushTypstCommit, TYPST_SAVE_DEBOUNCE_MS);
@@ -2284,36 +2456,10 @@
 
   function updateSharedStyle(source: string) {
     sharedStyleSource = source;
+    editVersion += 1;
     typstDirty = true;
     if (typstCommitTimer) clearTimeout(typstCommitTimer);
     typstCommitTimer = setTimeout(flushTypstCommit, TYPST_SAVE_DEBOUNCE_MS);
-  }
-
-  function previewTypstScale(event: Event) {
-    if (!selectedTypstId) return;
-    const block = typstBlocks.find((candidate) => candidate.id === selectedTypstId);
-    if (!block) return;
-    if (!typstScaleEdit || typstScaleEdit.id !== block.id) {
-      typstScaleEdit = { id: block.id, transform: { ...block.transform } };
-    }
-    const scale = Number((event.currentTarget as HTMLInputElement).value);
-    typstBlocks = typstBlocks.map((candidate) =>
-      candidate.id === block.id
-        ? { ...candidate, transform: { ...candidate.transform, scale } }
-        : candidate,
-    );
-  }
-
-  function commitTypstScale() {
-    if (!typstScaleEdit) return;
-    const edit = typstScaleEdit;
-    const next = typstBlocks.find((block) => block.id === edit.id)?.transform;
-    typstScaleEdit = null;
-    if (!next) return;
-    typstBlocks = typstBlocks.map((block) =>
-      block.id === edit.id ? { ...block, transform: edit.transform } : block,
-    );
-    updateTypstTransform(edit.id, next);
   }
 
   function addTypstBlock() {
@@ -2325,7 +2471,7 @@
       {
         id,
         path: `blocks/${activePageId}-${id}.typ`,
-        source: "= New block\n\nType here",
+        source: withBlockFont("= New block\n\nType here", settings.inlineTextFont),
         transform: {
           x: 150 + (typstBlocks.length % 4) * 20,
           y: 220 + (typstBlocks.length % 6) * 28,
@@ -2341,8 +2487,8 @@
     selectedImageId = null;
     selectedShapeId = null;
     editingShapeId = null;
-    status = "Created a new Typst block";
-    queueCommit("Created Typst block");
+    status = notice("workspace.createdANewTypstBlock");
+    queueCommit(notice("workspace.createdTypstBlock"));
   }
 
   function nextVisualZIndex(): number {
@@ -2371,14 +2517,22 @@
     typstCommitTimer = undefined;
     if (!typstDirty) return;
     typstDirty = false;
-    queueCommit("Updated Typst source");
+    queueCommit(notice("workspace.updatedTypstSource"));
   }
 
   function groupSelectedInk() {
     if (selectedStrokeIds.length === 0) return;
+    const layers = inkLayersWithStrokes(activeSnapshot?.inkLayers ?? [], strokes, activeInkLayerId)
+      .filter(layer => layer.strokes.some(stroke => selectedStrokeIds.includes(stroke.id)));
+    if (layers.length > 1) {
+      status = notice("workspace.selectInkFromOneLayerBeforeCreating");
+      return;
+    }
+    const drawingLayer = activeSnapshot?.page.inkLayers.find(layer => layer.id === layers[0]?.id);
+    if (drawingLayer) { activeInkLayerId = drawingLayer.id; activeInkLayerPath = drawingLayer.path; }
     const typstId = selectedTypstId;
     if (!typstId) {
-      status = "Select a Typst block before grouping it with ink";
+      status = notice("workspace.selectATypstBlockBeforeGroupingIt");
       return;
     }
     const typstObject = activeSnapshot?.page.objects.find((object) => object.id === typstId);
@@ -2392,7 +2546,7 @@
           stroke.groupId !== mixedGroup?.inkGroupId,
       )
     ) {
-      status = "Ungroup the existing selection before creating another mixed group";
+      status = notice("workspace.ungroupTheExistingSelectionBeforeCreatingAnother");
       return;
     }
     const occupied = new Set(activeSnapshot?.page.objects.map((object) => object.id) ?? []);
@@ -2416,8 +2570,8 @@
       ...stroke,
       groupId: selected.has(stroke.id) ? mixedGroup!.inkGroupId : stroke.groupId,
     }));
-    status = `Grouped ${groupedStrokeIds.length} ink stroke${groupedStrokeIds.length === 1 ? "" : "s"} with the Typst block`;
-    queueCommit("Grouped ink with Typst");
+    status = notice("counts.groupedStrokes", { count: groupedStrokeIds.length });
+    queueCommit(notice("workspace.groupedInkWithTypst"));
   }
 
   /**
@@ -2432,15 +2586,6 @@
     tool = next.tool;
     selectionReturnTo = next.returnTo;
   }
-
-  const TOOL_NAMES: Record<InkTool, string> = {
-    pen: "Pen",
-    highlighter: "Highlighter",
-    shape: "Shape",
-    eraser: "Eraser",
-    lasso: "Lasso",
-    select: "Ink selection",
-  };
 
   /** Where "Eraser goes back to your pen" returns to. Only an eraser picked by hand sets it. */
   let toolBeforeEraser: { tool: InkTool; preset: 1 | 2 } | null = null;
@@ -2478,7 +2623,7 @@
       selectedShapeId = null;
       editingShapeId = null;
     }
-    status = `${next === "pen" ? `Pen ${penPreset}` : TOOL_NAMES[next]} active`;
+    status = notice("workspace.active", { "value1": next === "pen" ? notice("workspace.pen2", { "penPreset": penPreset }) : toolMessage(next) });
   }
 
   // The palette carries inline stroke sizes and colors, contextual to the active tool, so the
@@ -2523,8 +2668,8 @@
       if (patch.patternSpacing !== undefined) style.patternSpacing = patch.patternSpacing;
       return { ...shape, style };
     });
-    queueCommit("Restyled selection");
-    status = `Restyled ${count} selected item${count === 1 ? "" : "s"}`;
+    queueCommit(notice("workspace.restyledSelection"));
+    status = notice("counts.restyled", { count: count });
   }
 
   const activeWidthChips = $derived(
@@ -2657,7 +2802,7 @@
       return;
     }
     if (settings[key].length >= MAX_SWATCHES) {
-      status = `The palette holds at most ${MAX_SWATCHES} colors`;
+      status = notice("workspace.thePaletteHoldsAtMostColors", { "MAX_SWATCHES": MAX_SWATCHES });
       return;
     }
     changeSettings({ ...settings, [key]: [...settings[key], color] } as AppSettings);
@@ -2712,7 +2857,7 @@
   function addWidth(widthPt: number, pattern: StrokePattern = "solid", spacing = 1) {
     const widths = settings[widthKey()];
     const next = addRowWidth(widths, widthPt, MAX_WIDTHS);
-    if (next === widths) status = `The palette holds at most ${MAX_WIDTHS} widths`;
+    if (next === widths) status = notice("workspace.thePaletteHoldsAtMostWidths", { "MAX_WIDTHS": MAX_WIDTHS });
     putWidths(
       next,
       widthPt,
@@ -2742,7 +2887,7 @@
     const widths = settings[widthKey()];
     const remaining = removeRowWidth(widths, index);
     if (remaining === widths) {
-      status = "The palette keeps at least one width";
+      status = notice("workspace.thePaletteKeepsAtLeastOneWidth");
       return;
     }
     putWidths(remaining, nearestChip(remaining, activeWidth));
@@ -2751,7 +2896,7 @@
   function removeSwatch(index: number) {
     const key = tool === "highlighter" ? "highlighterSwatches" : "penSwatches";
     if (settings[key].length <= 1) {
-      status = "The palette keeps at least one color";
+      status = notice("workspace.thePaletteKeepsAtLeastOneColor");
       return;
     }
     changeSettings({
@@ -2766,7 +2911,7 @@
 
   function routeObjectPointer(event: PointerEvent) {
     // Explicit handles own contact, even with a brush or the Shape tool in hand.
-    if (event.target instanceof Element && event.target.closest(".shape-controls .control-hit, .mixed-selection")) {
+    if (event.target instanceof Element && event.target.closest(".shape-controls .control-hit, .mixed-selection, .typst-block .handle")) {
       directObjectInput = true;
       const role = pointerRole(event, tool, pointerMapping);
       if (event.type === "pointerdown" && (role === "erase" || role === "lasso" || role === "ignore" && event.pointerType === "pen")) {
@@ -2789,7 +2934,7 @@
     // the press to the page and deselect the very shape about to be restyled.
     if (
       event.target instanceof Element &&
-      event.target.closest(".selection-actions, .instrument-palette, .palette-editor")
+      event.target.closest(".selection-actions, .instrument-palette, .palette-editor, .editor-dock")
     ) {
       return;
     }
@@ -2829,10 +2974,10 @@
       event.preventDefault();
       event.stopPropagation();
       status = selectedTypstId
-        ? "Typst block selected"
+        ? notice("workspace.typstBlockSelected")
         : selectedImageId
-          ? "Image selected"
-          : "Shape selected";
+          ? notice("workspace.imageSelected")
+          : notice("workspace.shapeSelected");
     }
   }
 
@@ -2847,7 +2992,7 @@
       ((event.pointerType === "pen" || fingerDraws(event)) && !keepsSelection(tool)) ||
       (event.target instanceof Element &&
         event.target.closest(
-          ".mixed-selection, .typst-block, .image-object, .shape-object, .typst-size-control, .selection-actions, .overflow-menu, .instrument-palette, .palette-editor, [data-preserve-selection]",
+          ".mixed-selection, .typst-block, .image-object, .shape-object, .selection-actions, .overflow-menu, .instrument-palette, .palette-editor, [data-preserve-selection]",
         ))
     ) {
       return;
@@ -2938,10 +3083,10 @@
   function applyTouchHistory(action: TouchHistoryAction) {
     if (busy || transactionFailed || !(action === "undo" ? canUndo : canRedo)) return;
     void routeHistory(action === "undo" ? "undo_notebook" : "redo_notebook",
-      action === "undo" ? "Undid change" : "Redid change", true);
+      action === "undo" ? notice("workspace.undidChange") : notice("workspace.redidChange"), true);
   }
 
-  function announceTouchHistory(label: "Undo" | "Redo") {
+  function announceTouchHistory(label: UiText) {
     if (touchHistoryToastTimer) clearTimeout(touchHistoryToastTimer);
     touchHistoryToast = { label };
     touchHistoryToastTimer = setTimeout(() => { touchHistoryToast = null; }, 1000);
@@ -2958,13 +3103,15 @@
 
   function workspacePointerDown(event: PointerEvent) {
     notePen(event);
+    const page = event.target instanceof Element ? event.target.closest<HTMLElement>("[data-page-id]") : null;
+    if (page?.dataset.pageId && (event.button === 0 || event.pointerType === "pen")) pagePointers.set(event.pointerId, page.dataset.pageId);
     stopTouchInertia();
     if (beginPan(event)) return;
     // Fixed controls inside the scroll field own their touch. Without this exception the
     // one-finger canvas pan captures the pointer before a reorder button can receive its click.
     if (
       event.target instanceof Element &&
-      event.target.closest(".selection-actions, .page-number button")
+      event.target.closest(".selection-actions, .page-number button, .editor-dock")
     ) {
       if (event.pointerType === "touch") touchTaps.cancel();
       return;
@@ -3121,6 +3268,7 @@
 
   function workspacePointerEnd(event: PointerEvent) {
     notePen(event);
+    releasePagePointer(event);
     if (longPress?.pointerId === event.pointerId) cancelLongPress();
     if (endPan(event)) return;
     if (event.pointerType !== "touch") return;
@@ -3161,6 +3309,12 @@
       event.preventDefault();
       event.stopPropagation();
     }
+  }
+
+  function releasePagePointer(event: PointerEvent) {
+    if (!pagePointers.delete(event.pointerId)) return;
+    scheduleResidency();
+    scheduleFocus();
   }
 
   function distance(a: Point, b: Point) {
@@ -3224,7 +3378,7 @@
     closeToolCard();
     target.setPointerCapture(event.pointerId);
     paletteDrag = { pointerId: event.pointerId, size };
-    status = "Moving tool palette — release at an edge to dock";
+    status = notice("workspace.movingToolPaletteReleaseAtAnEdge");
     event.preventDefault();
   }
 
@@ -3269,7 +3423,7 @@
     const next = dockUnderPointer(event) ?? paletteDock;
     paletteDrag = null;
     paletteDock = next;
-    status = `Tool palette docked to the ${next} edge`;
+    status = notice("workspace.toolPaletteDockedToTheEdge", { "next": positionMessage(next) });
     if (next !== settings.paletteDock) {
       changeSettings({ ...settings, paletteDock: next });
     }
@@ -3289,7 +3443,7 @@
     carryHistoryTo(event, size);
     (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
     historyDrag = { pointerId: event.pointerId, size };
-    status = "Moving the undo buttons — release in a corner";
+    status = notice("workspace.movingTheUndoButtonsReleaseInA");
     event.preventDefault();
   }
 
@@ -3369,7 +3523,7 @@
   function finishHistoryDrag(event: PointerEvent) {
     if (!historyDrag || event.pointerId !== historyDrag.pointerId) return;
     historyDrag = null;
-    status = `Undo buttons moved to the ${chrome.historyCorner.replace("-", " ")}`;
+    status = notice("workspace.undoButtonsMovedToThe", { "value1": positionMessage(chrome.historyCorner) });
     if (historyCorner !== settings.historyCorner) {
       changeSettings({ ...settings, historyCorner });
     }
@@ -3391,8 +3545,8 @@
     historyCorner = next;
     status =
       next === "auto"
-        ? "Undo buttons follow the palette again"
-        : `Undo buttons moved to the ${next.replace("-", " ")}`;
+        ? notice("workspace.undoButtonsFollowThePaletteAgain")
+        : notice("workspace.undoButtonsMovedToThe", { "value1": positionMessage(next) });
     if (next !== settings.historyCorner) changeSettings({ ...settings, historyCorner: next });
   }
 
@@ -3410,85 +3564,45 @@
     if (!next) return;
     event.preventDefault();
     paletteDock = next;
-    status = `Tool palette docked to the ${next} edge`;
+    status = notice("workspace.toolPaletteDockedToTheEdge", { "next": positionMessage(next) });
     if (next !== settings.paletteDock) changeSettings({ ...settings, paletteDock: next });
   }
 
   /// Delete the selected object or ink as one undoable committed action. Original asset
   /// files are never removed; deleting an image only drops the page's reference.
-  function deleteSelection(): boolean {
-    if (lassoObjectIds.length > 0) {
-      const ids = new Set(lassoObjectIds);
-      const inkIds = new Set(selectedStrokeIds);
-      if (activeSnapshot?.page.objects.some(object => ids.has(object.id) && object.groupId && object.groupId !== mixedGroup?.groupId) ||
-        strokes.some(stroke => inkIds.has(stroke.id) && stroke.groupId && stroke.groupId !== mixedGroup?.inkGroupId)) {
-        status = "Ungroup this selection before deleting it";
-        return false;
-      }
-      if (mixedGroup?.active && ids.has(mixedGroup.typstId)) {
-        mixedGroup = { ...mixedGroup, active: false };
-        strokes = strokes.map(stroke => groupedStrokeIds.includes(stroke.id) ? { ...stroke, groupId: null } : stroke);
-        groupedStrokeIds = [];
-      }
-      typstBlocks = typstBlocks.filter(block => !ids.has(block.id));
-      for (const image of images) if (ids.has(image.id) && image.url.startsWith("blob:")) URL.revokeObjectURL(image.url);
-      images = images.filter(image => !ids.has(image.id));
-      shapes = shapes.filter(shape => !ids.has(shape.id));
-      strokes = strokes.filter(stroke => !inkIds.has(stroke.id));
-      lassoObjectIds = [];
-      updateInkSelection([]);
-      queueCommit("Deleted selection");
-      status = "Deleted selected items; original files are kept";
-      return true;
+  function selectedItems() {
+    return { objects: [...new Set([...lassoObjectIds, selectedTypstId, selectedImageId, selectedShapeId]
+      .filter((id): id is string => id !== null))], strokes: [...selectedStrokeIds] };
+  }
+
+  function deleteSelection(selection = selectedItems()): boolean {
+    const ids = new Set(selection.objects);
+    const inkIds = new Set(selection.strokes);
+    if (!ids.size && !inkIds.size) return false;
+    if (activeSnapshot?.page.objects.some(object => ids.has(object.id) && object.groupId && object.groupId !== mixedGroup?.groupId) ||
+      strokes.some(stroke => inkIds.has(stroke.id) && stroke.groupId && stroke.groupId !== mixedGroup?.inkGroupId)) {
+      status = notice("workspace.ungroupThisSelectionBeforeDeletingIt");
+      return false;
     }
-    if (selectedTypstId) {
-      const id = selectedTypstId;
-      const object = activeSnapshot?.page.objects.find((candidate) => candidate.id === id);
-      if (object?.groupId && object.groupId !== mixedGroup?.groupId) {
-        status = "Ungroup this object before deleting it";
-        return false;
-      }
-      if (id === mixedGroup?.typstId && mixedGroup.active) ungroupInk();
-      typstBlocks = typstBlocks.filter((block) => block.id !== id);
-      selectedTypstId = null;
-      queueCommit("Deleted Typst block");
-      status = "Deleted the Typst block";
-      return true;
+    if (mixedGroup?.active && ids.has(mixedGroup.typstId)) {
+      mixedGroup = { ...mixedGroup, active: false };
+      strokes = strokes.map(stroke => groupedStrokeIds.includes(stroke.id) ? { ...stroke, groupId: null } : stroke);
+      groupedStrokeIds = [];
     }
-    if (selectedImageId) {
-      const object = activeSnapshot?.page.objects.find(
-        (candidate) => candidate.id === selectedImageId,
-      );
-      if (object?.groupId) {
-        status = "Ungroup this object before deleting it";
-        return false;
-      }
-      const removed = images.find((image) => image.id === selectedImageId);
-      if (removed?.url.startsWith("blob:")) URL.revokeObjectURL(removed.url);
-      images = images.filter((image) => image.id !== selectedImageId);
-      selectedImageId = null;
-      queueCommit("Deleted image");
-      status = "Removed the image from this page; the original file is kept";
-      return true;
-    }
-    if (selectedShapeId) {
-      shapes = shapes.filter((shape) => shape.id !== selectedShapeId);
-      selectedShapeId = null;
-      editingShapeId = null;
-      queueCommit("Deleted shape");
-      status = "Deleted the shape";
-      return true;
-    }
-    if (selectedStrokeIds.length > 0) {
-      const removed = new Set(selectedStrokeIds);
-      updateInkSelection([]);
-      changeStrokes(
-        strokes.filter((stroke) => !removed.has(stroke.id)),
-        "Deleted ink selection",
-      );
-      return true;
-    }
-    return false;
+    typstBlocks = typstBlocks.filter(block => !ids.has(block.id));
+    for (const image of images) if (ids.has(image.id) && image.url.startsWith("blob:")) URL.revokeObjectURL(image.url);
+    images = images.filter(image => !ids.has(image.id));
+    shapes = shapes.filter(shape => !ids.has(shape.id));
+    strokes = strokes.filter(stroke => !inkIds.has(stroke.id));
+    groupedStrokeIds = groupedStrokeIds.filter(id => !inkIds.has(id));
+    lassoObjectIds = lassoObjectIds.filter(id => !ids.has(id));
+    if (selectedTypstId && ids.has(selectedTypstId)) selectedTypstId = null;
+    if (selectedImageId && ids.has(selectedImageId)) selectedImageId = null;
+    if (selectedShapeId && ids.has(selectedShapeId)) { selectedShapeId = null; editingShapeId = null; }
+    updateInkSelection(selectedStrokeIds.filter(id => !inkIds.has(id)));
+    queueCommit(notice("workspace.deletedSelection"));
+    status = notice("workspace.deletedSelectedItemsOriginalFilesAreKept");
+    return true;
   }
 
   /// Arrow-key movement for the current selection; batched through the ink debounce so
@@ -3497,7 +3611,7 @@
     if (lassoObjectIds.length) {
       beginMixedTransform(); previewMixedTransform({ x: dx, y: dy }, 1, { x: 0, y: 0 });
       mixedTransformBase = null;
-      scheduleInkCommit("Moved selection");
+      scheduleInkCommit(notice("workspace.movedSelection"));
       return true;
     }
     if (selectedTypstId) {
@@ -3513,7 +3627,7 @@
             }
           : block,
       );
-      scheduleInkCommit("Moved Typst block");
+      scheduleInkCommit(notice("workspace.movedTypstBlock"));
       return true;
     }
     if (selectedImageId) {
@@ -3522,7 +3636,7 @@
           ? { ...image, x: image.x + dx, y: image.y + dy }
           : image,
       );
-      scheduleInkCommit("Moved image");
+      scheduleInkCommit(notice("workspace.movedImage"));
       return true;
     }
     if (selectedShapeId) {
@@ -3531,12 +3645,12 @@
           ? { ...shape, x: shape.x + dx, y: shape.y + dy }
           : shape,
       );
-      scheduleInkCommit("Moved shape");
+      scheduleInkCommit(notice("workspace.movedShape"));
       return true;
     }
     if (selectedStrokeIds.length > 0) {
       strokes = moveSelected(strokes, selectedStrokeIds, { x: dx, y: dy });
-      scheduleInkCommit("Moved ink selection");
+      scheduleInkCommit(notice("workspace.movedInkSelection"));
       return true;
     }
     return false;
@@ -3551,8 +3665,8 @@
     );
     groupedStrokeIds = [];
     if (mixedGroup) mixedGroup = { ...mixedGroup, active: false };
-    status = "Removed the Typst and ink group";
-    queueCommit("Ungrouped ink and Typst");
+    status = notice("workspace.removedTheTypstAndInkGroup");
+    queueCommit(notice("workspace.ungroupedInkAndTypst"));
   }
 
   /**
@@ -3584,63 +3698,61 @@
     }
   }
 
-  async function bundleSelection(): Promise<ClipboardBundle | null> {
-    const ids = new Set(selectedStrokeIds);
-    const objectIds = new Set([...lassoObjectIds, selectedTypstId, selectedImageId, selectedShapeId]);
+  async function bundleSelection(selection = selectedItems()): Promise<ClipboardBundle | null> {
+    const context = editContext();
+    const ids = new Set(selection.strokes);
+    const objectIds = new Set(selection.objects);
     const selectedImages = images.filter(image => objectIds.has(image.id));
-    const imageData = await Promise.all(selectedImages.map(image => imageBytes(image.url)));
-    if (imageData.some(data => !data)) { status = "An image could not be copied; the selection is unchanged"; return null; }
+    // Capture every value before fetching bytes; selection and page state may change meanwhile.
     const bundle: ClipboardBundle = {
       token: crypto.randomUUID(),
-      pageId: activePageId,
-      strokes: strokes.filter((stroke) => ids.has(stroke.id)),
+      pageId: context.pageId,
+      strokes: strokes.filter(stroke => ids.has(stroke.id)),
       shapes: shapes.filter(shape => objectIds.has(shape.id)),
       blocks: typstBlocks.filter(block => objectIds.has(block.id)).map(block => ({
-            source: block.source,
-            x: block.transform.x,
-            y: block.transform.y,
-            layoutWidthPt: block.transform.layoutWidthPt,
-            heightPt:
-              workspace?.querySelector<HTMLElement>(`.active-page [data-object-id="${CSS.escape(block.id)}"]`)
-                ?.offsetHeight ?? 0,
-            scale: block.transform.scale,
-          })),
-      images: selectedImages.map((image, index) => ({
-              ...imageData[index]!,
-              alt: image.alt,
-              x: image.x,
-              y: image.y,
-              widthPt: image.widthPt,
-              heightPt: image.heightPt,
-              scale: image.scale,
-            })),
+        source: block.source, ...block.transform,
+        heightPt: workspace?.querySelector<HTMLElement>(`.active-page [data-object-id="${CSS.escape(block.id)}"]`)?.offsetHeight ?? 0,
+      })),
+      images: [],
     };
+    const imageData = await Promise.all(selectedImages.map(image => imageBytes(image.url)));
+    if (!context.current()) return null;
+    if (imageData.some(data => !data)) {
+      status = notice("workspace.anImageCouldNotBeCopiedThe");
+      return null;
+    }
+    bundle.images = selectedImages.map((image, index) => ({
+      ...imageData[index]!, alt: image.alt, x: image.x, y: image.y,
+      widthPt: image.widthPt, heightPt: image.heightPt, scale: image.scale, rotation: image.rotation,
+    }));
     return isEmptyBundle(bundle) ? null : bundle;
   }
 
   async function copySelection(cut = false) {
-    const bundle = await bundleSelection();
-    if (!bundle) {
-      status = "Nothing to copy";
-      return;
-    }
+    const context = editContext();
+    const selection = selectedItems();
+    const selectedIds = new Set([...selection.objects, ...selection.strokes]);
+    const captured = [...typstBlocks, ...images, ...shapes, ...strokes].filter(item => selectedIds.has(item.id));
+    const bundle = await bundleSelection(selection);
+    if (!context.current()) return;
+    if (!bundle) return;
     clipboard = bundle;
     pasteCount = 0;
-    // Not awaited: without window focus the write can stay pending forever, and the copy itself
-    // is already done. The marker only guards a later paste against stale content.
     void navigator.clipboard?.writeText(clipboardMarker(bundle)).catch(() => {});
     if (cut) {
-      deleteSelection();
-      status = "Cut to the clipboard";
-    } else {
-      status = "Copied";
-    }
+      const current = new Set([...typstBlocks, ...images, ...shapes, ...strokes]);
+      if (captured.some(item => !current.has(item))) {
+        status = notice("workspace.copiedCutWasCanceledBecauseTheCopied");
+        return;
+      }
+      if (deleteSelection(selection)) status = notice("workspace.cutToTheClipboard");
+    } else status = notice("workspace.copied");
   }
 
-  /// `at` centres the copy on a page point (the spot the context bar was opened at).
   async function duplicateSelection(at: Point | null = null) {
+    const context = editContext();
     const bundle = await bundleSelection();
-    if (!bundle) return;
+    if (!bundle || !context.current()) return;
     clipboard = bundle;
     pasteCount = 0;
     await pasteBundle(bundle, at);
@@ -3661,6 +3773,21 @@
   /// `at` is a page point to centre the paste on (from the context menu); without it a paste
   /// steps away from its original on the same page and keeps its place on any other.
   async function pasteBundle(bundle: ClipboardBundle, at: Point | null = null) {
+    const context = editContext();
+    const paths: string[] = [];
+    try {
+      for (const image of bundle.images) {
+        const filename = `pasted-${crypto.randomUUID()}.${extensionForMime(image.mime)}`;
+        paths.push(tauriAvailable && context.root
+          ? await storePastedImage(context.root, filename, image.bytes)
+          : `assets/${filename}`);
+        if (!context.current()) return;
+      }
+    } catch (error) {
+      if (context.current()) status = notice("workspace.theSelectionCouldNotBePasted", { "value1": message(error) });
+      return;
+    }
+    if (!context.current()) return;
     const oldObjects = new Set([...typstBlocks, ...images, ...shapes].map(object => object.id));
     pasteCount += 1;
     const shift = at ? shiftTo(bundle, at) : pasteOffset(bundle, activePageId, pasteCount);
@@ -3689,6 +3816,7 @@
             x: block.x + shift.dx,
             y: block.y + shift.dy,
             layoutWidthPt: block.layoutWidthPt,
+            rotation: block.rotation ?? 0,
             scale: block.scale,
           },
           result: null,
@@ -3699,17 +3827,8 @@
       lastObject = { kind: "typst", id };
     }
 
-    for (const image of bundle.images) {
-      const filename = `pasted-${Date.now()}.${extensionForMime(image.mime)}`;
-      let path = `assets/${filename}`;
-      if (tauriAvailable && root) {
-        try {
-          path = await storePastedImage(root, filename, image.bytes);
-        } catch (error) {
-          status = `The image could not be pasted: ${message(error)}`;
-          continue;
-        }
-      }
+    for (const [index, image] of bundle.images.entries()) {
+      const path = paths[index];
       const id = freshObjectId("image");
       images = [
         ...images,
@@ -3722,6 +3841,7 @@
           y: image.y + shift.dy,
           widthPt: image.widthPt,
           heightPt: image.heightPt,
+          rotation: image.rotation ?? 0,
           scale: image.scale,
           zIndex: zIndex++,
           readingOrder: readingOrder++,
@@ -3730,8 +3850,8 @@
       lastObject = { kind: "image", id };
     }
 
-    if (newStrokes.length > 0) changeStrokes([...strokes, ...newStrokes], "Pasted ink");
-    if (lastObject) queueCommit("Pasted");
+    if (newStrokes.length > 0) changeStrokes([...strokes, ...newStrokes], notice("workspace.pastedInk"));
+    if (lastObject) queueCommit(notice("workspace.pasted"));
 
     // The paste stays selected, ready to be dragged into place.
     lassoObjectIds = [...typstBlocks, ...images, ...shapes].filter(object => !oldObjects.has(object.id)).map(object => object.id);
@@ -3742,7 +3862,7 @@
     updateInkSelection(newStrokes.map((stroke) => stroke.id));
     const count =
       newStrokes.length + newShapes.length + bundle.blocks.length + bundle.images.length;
-    status = `Pasted ${count} item${count === 1 ? "" : "s"}`;
+    status = notice("counts.pasted", { count: count });
   }
 
   /**
@@ -3819,6 +3939,7 @@
   }
 
   async function handlePaste(event: ClipboardEvent) {
+    if (pageInputLocked) return;
     // Text fields and editors paste their own way.
     if (
       event.target instanceof Element &&
@@ -3847,25 +3968,28 @@
     if (!file) return;
     event.preventDefault();
     if (file.size > 20 * 1024 * 1024) {
-      status = "That image is larger than the 20 MiB prototype limit";
+      status = notice("workspace.thatImageIsLargerThanTheMiB");
       return;
     }
+    const context = editContext();
     const url = URL.createObjectURL(file);
     const dimensions = await imageDimensions(url);
-    const filename = `pasted-${Date.now()}.${extensionForMime(file.type)}`;
+    const filename = `pasted-${crypto.randomUUID()}.${extensionForMime(file.type)}`;
 
     // Store the original once, here. Commits then reference the asset by path instead of
     // carrying its bytes, so ordinary pen strokes never marshal an image across IPC.
     let path = `assets/${filename}`;
     if (tauriAvailable && root) {
       try {
-        path = await storePastedImage(root, filename, new Uint8Array(await file.arrayBuffer()));
+        path = await storePastedImage(context.root, filename, new Uint8Array(await file.arrayBuffer()));
       } catch (error) {
         URL.revokeObjectURL(url);
-        status = `The image could not be stored: ${message(error)}`;
+        status = notice("workspace.theImageCouldNotBeStored", { "value1": message(error) });
         return;
       }
     }
+
+    if (!context.current()) { URL.revokeObjectURL(url); return; }
 
     const fit = Math.min(1, 220 / dimensions.width, 160 / dimensions.height);
     const existingIds = new Set([
@@ -3881,7 +4005,7 @@
       id,
       path,
       url,
-      alt: file.name || "Pasted image",
+      alt: file.name || $t("workspace.pastedImage"),
       x: 300,
       y: 380,
       widthPt: Math.max(1, dimensions.width * fit),
@@ -3894,11 +4018,12 @@
     selectedTypstId = null;
     selectedShapeId = null;
     editingShapeId = null;
-    status = "Pasted one original image";
-    queueCommit("Pasted image");
+    status = notice("workspace.pastedOneOriginalImage");
+    queueCommit(notice("workspace.pastedImage"));
   }
 
-  function scheduleInkCommit(label: string) {
+  function scheduleInkCommit(label: UiText) {
+    editVersion += 1;
     inkCommitLabel = label;
     inkPending = true;
     inkCommitTimer.arm();
@@ -3908,30 +4033,34 @@
     inkCommitTimer.flush();
   }
 
-  function queueCommit(label: string) {
+  function queueCommit(label: UiText) {
     // Any commit builds a snapshot from current state, so it already carries pending ink.
+    editVersion += 1;
     inkCommitTimer.cancel();
     inkPending = false;
     if (!tauriAvailable || !root || transactionFailed) return;
     enqueueSnapshot(label, buildSnapshot());
   }
 
-  function enqueueSnapshot(label: string, snapshot: NotebookSnapshot) {
+  function enqueueSnapshot(label: UiText, snapshot: NotebookSnapshot) {
+    const requestRoot = root;
+    const generation = notebookGeneration;
     pendingTransactions += 1;
     transactionQueue = transactionQueue
       .then(async () => {
+        if (root !== requestRoot || notebookGeneration !== generation || transactionFailed) return;
         snapshot.page.revision = revision;
         try {
-          const result = await commitNotebook(root, snapshot);
+          const result = await commitNotebook(requestRoot, snapshot, activeSnapshot);
+          if (root !== requestRoot || notebookGeneration !== generation) return;
           activeSnapshot = result.snapshot;
           notebookManifest = result.snapshot.manifest;
-          const entry = pageEntries.find((page) => page.id === result.snapshot.page.id);
-          if (entry) entry.snapshot = result.snapshot;
+          replacePageSnapshot(result.snapshot.page.id, result.snapshot);
           revision = result.snapshot.page.revision;
           canUndo = result.canUndo;
           canRedo = result.canRedo;
           recordNotebookAction(snapshot.page.id);
-          status = `${label}; saved revision ${revision}`;
+          status = notice("workspace.savedRevision", { "label": label, "revision": revision });
         } catch (error) {
           reportCommitFailure(label, error);
         }
@@ -3943,17 +4072,18 @@
 
   /// A refused commit is either an external change/conflict — the user chooses reload or
   /// cancel — or an ordinary failure that blocks saving until reopen. Never a silent latch.
-  function reportCommitFailure(label: string, error: unknown) {
+  function reportCommitFailure(label: UiText, error: unknown) {
     transactionFailed = true;
     const detail = message(error);
-    if (detail.includes("external change") || detail.includes("revision conflict")) {
+    const code = notebookFailureCode(error);
+    if (code === "external_change" || code === "revision_conflict") {
       conflictDetail = detail;
-      status = `${label} was not saved: the notebook changed outside this window.`;
-    } else if (detail.includes("recovery contains")) {
-      status = `${label} was not saved: unresolved recovered work must be handled first.`;
+      status = notice("workspace.wasNotSavedTheNotebookChangedOutside", { "label": label });
+    } else if (code === "recovery_limit") {
+      status = notice("workspace.wasNotSavedUnresolvedRecoveredWorkMust", { "label": label });
       void refreshRecoveryCandidates();
     } else {
-      status = `${label} could not be saved: ${detail}. Reopen to restore the last confirmed state.`;
+      status = notice("workspace.couldNotBeSavedReopenToRestore", { "label": label, "detail": detail });
     }
   }
 
@@ -3976,7 +4106,12 @@
     if (tauriAvailable && root) void recordNotebookPage(root, activePageId).catch(() => {});
   }
 
-  function changeStrokes(next: Stroke[], label: string) {
+  /**
+   * `replaced` comes from the precise eraser: each cut stroke and the fragments now standing for
+   * it. A fragment keeps its stroke's group, so it takes the stroke's place in the group too.
+   */
+  function changeStrokes(next: Stroke[], label: UiText, replaced?: ReadonlyMap<string, string[]>) {
+    if (replaced) groupedStrokeIds = groupedStrokeIds.flatMap((id) => replaced.get(id) ?? [id]);
     const nextIds = new Set(next.map((stroke) => stroke.id));
     const protectedGrouped = strokes.filter(
       (stroke) =>
@@ -3992,7 +4127,7 @@
   }
 
   function addStroke(stroke: Stroke) {
-    changeStrokes([...strokes, stroke], `Added ${stroke.tool} stroke`);
+    changeStrokes([...strokes, stroke], notice("workspace.addedStroke", { "tool": stroke.tool }));
     // Annotating the page must not cost the writer their place in the source: the canvas takes
     // focus to receive the pen, so the side view takes it back once the stroke has landed.
     if (sideEditorOpen) sideEditor?.focus();
@@ -4031,8 +4166,8 @@
   function addShape(draft: ShapeDraft) {
     const added = shapeView(draft);
     shapes = [...shapes, added];
-    status = `Added ${draft.geometry.kind}; shape tool stays active`;
-    queueCommit(`Added ${draft.geometry.kind}`);
+    status = notice("workspace.addedShapeToolStaysActive", { "kind": shapeMessage(draft.geometry.kind) });
+    queueCommit(notice("workspace.added", { "kind": shapeMessage(draft.geometry.kind) }));
   }
 
   /**
@@ -4054,17 +4189,17 @@
     ];
     const shapeSnapshot = buildSnapshot();
     if (tauriAvailable && root && !transactionFailed) {
-      enqueueSnapshot(`Added ${stroke.tool} stroke`, rawSnapshot);
-      enqueueSnapshot(`Converted held ink to ${draft.geometry.kind}`, shapeSnapshot);
+      enqueueSnapshot(notice("workspace.addedStroke", { "tool": stroke.tool }), rawSnapshot);
+      enqueueSnapshot(notice("workspace.convertedHeldInkTo", { "kind": shapeMessage(draft.geometry.kind) }), shapeSnapshot);
     }
-    status = `Converted held ink to ${draft.geometry.kind}; Undo restores the original stroke`;
+    status = notice("workspace.convertedHeldInkToUndoRestoresThe", { "kind": shapeMessage(draft.geometry.kind) });
   }
 
   function convertSelectedInkToShape() {
     if (selectedStrokeIds.length !== 1) return;
     const stroke = strokes.find((candidate) => candidate.id === selectedStrokeIds[0]);
     if (!stroke || stroke.groupId) {
-      status = "Ungroup this ink before converting it to a shape";
+      status = notice("workspace.ungroupThisInkBeforeConvertingItTo");
       return;
     }
     const style: ShapeStyle = {
@@ -4081,7 +4216,7 @@
       { snapDegrees: settings.shapeConstrain ? 15 : 0 },
     )?.draft;
     if (!draft) {
-      status = "That stroke is not close enough to a line, rectangle, ellipse, or simple curve";
+      status = notice("workspace.thatStrokeIsNotCloseEnoughTo");
       return;
     }
     strokes = strokes.filter((candidate) => candidate.id !== stroke.id);
@@ -4093,8 +4228,8 @@
       }),
     ];
     updateInkSelection([]);
-    queueCommit(`Converted ink to ${draft.geometry.kind}`);
-    status = `Converted ink to ${draft.geometry.kind}`;
+    queueCommit(notice("workspace.convertedInkTo", { "kind": shapeMessage(draft.geometry.kind) }));
+    status = notice("workspace.convertedInkTo", { "kind": shapeMessage(draft.geometry.kind) });
   }
 
   /// A finished drag is one decision and is written straight away. A held arrow or bracket key
@@ -4108,21 +4243,34 @@
       selectedShapeId = null;
       editingShapeId = null;
     }
-    scheduleInkCommit("Erased shape");
-    status = "Erased the shape";
+    scheduleInkCommit(notice("workspace.erasedShape"));
+    status = notice("workspace.erasedTheShape");
+  }
+
+  /**
+   * The precise eraser's shape pieces, landing on pen-up. They go through the same ink commit as
+   * the cut strokes from the same gesture, so the whole erase is one undo step.
+   */
+  function replaceErasedShapes(replaced: ReadonlyMap<string, ShapeView[]>) {
+    shapes = shapes.flatMap((shape) => replaced.get(shape.id) ?? [shape]);
+    if (selectedShapeId && !shapes.some((shape) => shape.id === selectedShapeId)) {
+      selectedShapeId = null;
+      editingShapeId = null;
+    }
+    scheduleInkCommit(notice("workspace.erasedInk"));
   }
 
   function changeShape(next: ShapeView, commit: ShapeEditCommit = "now") {
     if (!shapes.some((shape) => shape.id === next.id)) return;
     shapes = shapes.map((shape) => (shape.id === next.id ? next : shape));
-    if (commit === "settled") scheduleInkCommit("Updated shape");
-    else queueCommit("Updated shape");
+    if (commit === "settled") scheduleInkCommit(notice("workspace.updatedShape"));
+    else queueCommit(notice("workspace.updatedShape"));
   }
 
   function changeImage(id: string, next: Partial<Pick<ImageState, "x" | "y" | "scale">>) {
     if (!images.some((image) => image.id === id)) return;
     images = images.map((image) => (image.id === id ? { ...image, ...next } : image));
-    queueCommit("Updated image");
+    queueCommit(notice("workspace.updatedImage"));
   }
 
   function selectedObjectId(): string | null {
@@ -4178,8 +4326,8 @@
     );
     if (!next) return;
     strokes = next.strokes;
-    applyObjectOrder(next.page, "Changed visual order");
-    status = direction < 0 ? "Moved selected ink back" : "Moved selected ink forward";
+    applyObjectOrder(next.page, notice("workspace.changedVisualOrder"));
+    status = direction < 0 ? notice("workspace.movedSelectedInkBack") : notice("workspace.movedSelectedInkForward");
   }
 
   function scheduleSelectionToolbar(attempt = 0) {
@@ -4237,7 +4385,7 @@
     return true;
   }
 
-  function applyObjectOrder(page: NonNullable<typeof activeSnapshot>["page"], label: string) {
+  function applyObjectOrder(page: NonNullable<typeof activeSnapshot>["page"], label: UiText) {
     if (!activeSnapshot) return;
     activeSnapshot = { ...activeSnapshot, page };
     const fields = new Map(page.objects.map((object) => [object.id, object]));
@@ -4268,7 +4416,7 @@
     const next = moveVisualItems(activeSnapshot.page, strokes, [id], [], move);
     if (!next) return;
     strokes = next.strokes;
-    applyObjectOrder(next.page, "Changed visual order");
+    applyObjectOrder(next.page, notice("workspace.changedVisualOrder"));
   }
 
   function changeReadingOrder(direction: -1 | 1) {
@@ -4276,25 +4424,25 @@
     if (!id || !activeSnapshot) return;
     const next = moveReadingObject(activeSnapshot.page, id, direction);
     if (next === activeSnapshot.page) {
-      status = "That object cannot move further in reading order";
+      status = notice("workspace.thatObjectCannotMoveFurtherInReading");
       return;
     }
-    applyObjectOrder(next, "Changed reading order");
+    applyObjectOrder(next, notice("workspace.changedReadingOrder"));
   }
 
   function undo() {
-    void routeHistory("undo_notebook", "Undid change");
+    void routeHistory("undo_notebook", notice("workspace.undidChange"));
   }
 
   function redo() {
-    void routeHistory("redo_notebook", "Redid change");
+    void routeHistory("redo_notebook", notice("workspace.redidChange"));
   }
 
   /// Page scope targets the page in view. Notebook scope replays the session's commit order:
   /// undo jumps to the page that changed most recently, wherever it is.
   async function routeHistory(
     command: "undo_notebook" | "redo_notebook",
-    label: string,
+    label: UiText,
     announce = false,
   ) {
     if (!(await persist())) return;
@@ -4333,11 +4481,13 @@
     return -1;
   }
 
-  function queueHistory(command: "undo_notebook" | "redo_notebook", label: string, announce = false) {
+  function queueHistory(command: "undo_notebook" | "redo_notebook", label: UiText, announce = false) {
     if (!tauriAvailable || transactionFailed) return;
     flushInkCommit();
     flushTypstCommit();
     pendingTransactions += 1;
+    // The reply replaces the page, so input waits for it rather than being discarded by it.
+    replacingPageCount += 1;
     transactionQueue = transactionQueue
       .then(async () => {
         try {
@@ -4355,27 +4505,35 @@
           applySnapshot(result.snapshot);
           canUndo = result.canUndo || notebookUndoOrder.length > 0;
           canRedo = result.canRedo || notebookRedoOrder.length > 0;
-          status = `${label}; saved revision ${revision}`;
-          if (announce) announceTouchHistory(command === "undo_notebook" ? "Undo" : "Redo");
+          status = notice("workspace.savedRevision", { "label": label, "revision": revision });
+          if (announce) announceTouchHistory(command === "undo_notebook" ? notice("workspace.undo") : notice("workspace.redo"));
         } catch (error) {
           reportCommitFailure(label, error);
         }
       })
       .finally(() => {
         pendingTransactions -= 1;
+        replacingPageCount -= 1;
       });
   }
 
   function queueStructureHistory(
     command: "undo_page_structure" | "redo_page_structure",
-    label: string,
+    label: UiText,
     announce = false,
   ) {
     if (!tauriAvailable || transactionFailed) return;
+    flushInkCommit();
+    flushTypstCommit();
     pendingTransactions += 1;
+    replacingPageCount += 1;
     transactionQueue = transactionQueue
       .then(async () => {
         try {
+          // A page-list change invalidates every page's save baseline in Rust, so neighbor saves
+          // must land before it rather than be refused after it.
+          await Promise.all([...neighborCommitters.values()].map((committer) => committer.flush()));
+          if (transactionFailed) return;
           const result = await runStructureHistory(
             root,
             command,
@@ -4390,21 +4548,22 @@
             if (index >= 0) notebookRedoOrder.splice(index, 1);
             notebookUndoOrder.push({ kind: "structure" });
           }
-          pageEntries = [];
+          resetPageEntries();
           applySnapshot(result.snapshot);
           void recordNotebookPage(root, result.snapshot.page.id).catch(() => {});
           canUndo = result.canUndo || notebookUndoOrder.length > 0;
           canRedo = result.canRedo || notebookRedoOrder.length > 0;
           await tick();
           scrollToPage(result.snapshot.page.id);
-          status = `${label} page-list change`;
-          if (announce) announceTouchHistory(command === "undo_page_structure" ? "Undo" : "Redo");
+          status = notice("workspace.pageListChange", { "label": label });
+          if (announce) announceTouchHistory(command === "undo_page_structure" ? notice("workspace.undo") : notice("workspace.redo"));
         } catch (error) {
           reportCommitFailure(label, error);
         }
       })
       .finally(() => {
         pendingTransactions -= 1;
+        replacingPageCount -= 1;
       });
   }
 
@@ -4420,6 +4579,8 @@
 
   function historyShortcut(event: KeyboardEvent) {
     if (event.defaultPrevented) return;
+    // Every shortcut below edits, navigates or replaces the page; none may race a replacing reply.
+    if (pageInputLocked) return;
     if (event.ctrlKey || event.metaKey) {
       if (event.key === "Tab") {
         const next = cycledTab(openTabs, root, event.shiftKey ? -1 : 1);
@@ -4510,7 +4671,7 @@
       if (event.key === "Enter" && selectedShapeId) {
         event.preventDefault();
         editingShapeId = editingShapeId === selectedShapeId ? null : selectedShapeId;
-        status = editingShapeId ? "Editing shape anchor points" : "Shape selected";
+        status = editingShapeId ? notice("workspace.editingShapeAnchorPoints") : notice("workspace.shapeSelected");
         return;
       }
       if (event.key === "Delete" || event.key === "Backspace") {
@@ -4560,17 +4721,18 @@
 
   async function persist(): Promise<boolean> {
     if (!tauriAvailable) {
-      status = "Browser preview cannot write files; launch the Tauri desktop app to save";
+      status = notice("workspace.browserPreviewCannotWriteFilesLaunchThe");
       return false;
     }
     const startedAt = performance.now();
+    if (!(await saveTemplate())) return false;
     flushInkCommit();
     flushTypstCommit();
     await transactionQueue;
     await Promise.all([...neighborCommitters.values()].map((committer) => committer.flush()));
     if (collectMetrics) saveMs = performance.now() - startedAt;
     if (transactionFailed) return false;
-    status = `All changes saved at revision ${revision}`;
+    status = notice("workspace.allChangesSavedAtRevision", { "revision": revision });
     return true;
   }
 
@@ -4587,9 +4749,9 @@
         settings.pageTextBaselineGrid,
       );
       if (collectMetrics) exportMs = performance.now() - startedAt;
-      status = `Exported PDF to ${path}`;
+      status = notice("workspace.exportedPDFTo", { "path": path });
     } catch (error) {
-      status = `PDF export failed: ${message(error)}`;
+      status = notice("workspace.pdfExportFailed", { "value1": message(error) });
     } finally {
       busy = false;
     }
@@ -4605,7 +4767,7 @@
     moreOpen = false;
     addPageOpen = false;
     notebookChosen = false;
-    status = "Choose a notebook, or return to an open tab";
+    status = notice("workspace.chooseANotebookOrReturnToAn");
   }
 
   /**
@@ -4617,7 +4779,7 @@
     destination: string,
   ): Promise<string | null> {
     if (activeSnapshot && !(await persist())) {
-      throw new Error("The open notebook could not be saved, so nothing was moved");
+      throw new Error($t("workspace.theOpenNotebookCouldNotBeSaved"));
     }
     if (root) await recordNotebookPage(root, activePageId).catch(() => {});
 
@@ -4634,10 +4796,16 @@
 
     const nextRoot = relocated.get(previousRoot);
     if (nextRoot) {
+      const history = { undo: notebookUndoOrder, redo: notebookRedoOrder, canUndo, canRedo };
       const reopened = await openNotebookAt(nextRoot, {
         skipCurrentPersist: true,
         stayInLibrary: true,
       });
+      // Relocation keeps Rust's history; reloading the same notebook must keep its routing too.
+      notebookUndoOrder = history.undo;
+      notebookRedoOrder = history.redo;
+      canUndo = history.canUndo;
+      canRedo = history.canRedo;
       if (!reopened) {
         // The canonical data was confirmed before the move and remains the same directory at a
         // new root. Keep that in-memory snapshot usable even if a fresh read hit a transient
@@ -4649,10 +4817,10 @@
         }));
         notebookChosen = false;
         await rememberNotebookSession();
-        return "Verschoben; der aktive Tab konnte am neuen Ort nicht neu geladen werden";
+        return $t("workspace.movedButTheOpenNotebookCouldNot");
       }
     } else if (!(await rememberNotebookSession())) {
-      return "Verschoben; die neue Tab-Position konnte nicht gespeichert werden";
+      return $t("workspace.movedButTheUpdatedTabListCould");
     }
 
     return result.warning;
@@ -4669,8 +4837,8 @@
     if (tabRoot !== root) {
       openTabs = closed.tabs;
       status = (await rememberNotebookSession())
-        ? "Closed notebook tab"
-        : "Closed notebook tab, but the restored tab list could not be updated";
+        ? notice("workspace.closedNotebookTab")
+        : notice("workspace.closedNotebookTabButTheRestoredTab");
       return;
     }
     if (tauriAvailable && !(await persist())) return;
@@ -4694,7 +4862,7 @@
         await closeNotebookSession(root);
       } catch (error) {
         openTabs = previousTabs;
-        status = `The notebook was saved but could not be closed: ${message(error)}`;
+        status = notice("workspace.theNotebookWasSavedButCouldNot", { "value1": message(error) });
         return;
       }
     }
@@ -4704,19 +4872,20 @@
     root = "";
     notebookManifest = null;
     activeSnapshot = null;
-    pageEntries = [];
+    resetPageEntries();
     pageOpen = false;
     notebookChosen = false;
-    status = "Notebook closed; the confirmed local files are safe";
+    status = notice("workspace.notebookClosedTheConfirmedLocalFilesAre");
   }
 
   async function reopen() {
     if (!tauriAvailable) {
       pageOpen = true;
-      status = "Browser preview reopened its in-memory page";
+      status = notice("workspace.browserPreviewReopenedItsInMemoryPage");
       return;
     }
     busy = true;
+    replacingPageCount += 1;
     const startedAt = performance.now();
     try {
       await transactionQueue;
@@ -4729,12 +4898,13 @@
       transactionFailed = false;
       if (collectMetrics) reopenMs = performance.now() - startedAt;
       pageOpen = true;
-      status = `Reopened saved revision ${revision}`;
+      status = notice("workspace.reopenedSavedRevision", { "revision": revision });
       void writeCover();
     } catch (error) {
-      status = `Reopen failed: ${message(error)}`;
+      status = notice("workspace.reopenFailed", { "value1": message(error) });
     } finally {
       busy = false;
+      replacingPageCount -= 1;
     }
   }
 
@@ -4884,25 +5054,25 @@
   }
 
   function currentToolLabel() {
-    if (tool === "pen") return `Pen ${penPreset}`;
-    if (tool === "select") return "Ink selection";
-    return tool[0].toUpperCase() + tool.slice(1);
+    if (tool === "pen") return $t("workspace.pen2", { "penPreset": penPreset });
+    if (tool === "select") return $t("workspace.inkSelection");
+    return toolLabel(tool, $t);
   }
 
   /// Read from the live preset, never written by hand. These used to be three fixed strings, so
   /// the strip kept claiming "0.35 mm · graphite" after the writer had changed both, and the
   /// widths it named did not match the defaults either.
   function nibDetail(preset: PenPreset) {
-    const pattern = preset.pattern && preset.pattern !== "solid" ? ` · ${preset.pattern}` : "";
-    return `${(preset.widthPt * MM_PER_PT).toFixed(2)} mm · ${colorName(preset.color).toLowerCase()}${pattern}`;
+    const pattern = preset.pattern && preset.pattern !== "solid" ? ` · ${patternLabel(preset.pattern, $t)}` : "";
+    return $t("workspace.mm", { "value1": formatNumber(preset.widthPt * MM_PER_PT, { minimumFractionDigits: 2, maximumFractionDigits: 2 }, $displayLocale), "value2": colorName(preset.color, $t).toLowerCase(), "pattern": pattern });
   }
 
   function currentToolDetail() {
     if (tool === "pen") return nibDetail(settings.penPresets[penPreset - 1]);
     if (tool === "highlighter") return nibDetail(settings.highlighter);
-    if (tool === "eraser") return "whole strokes";
-    if (tool === "shape") return settings.shapeKind.replace("ellipse", "circle · ellipse");
-    if (tool === "lasso" || tool === "select") return `${selectedStrokeIds.length + lassoObjectIds.length} selected`;
+    if (tool === "eraser") return $t(settings.eraserMode === "precise" ? "workspace.preciseErasing" : "workspace.wholeStrokes");
+    if (tool === "shape") return settings.shapeKind === "ellipse" ? $t("workspace.circleEllipse") : shapeLabel(settings.shapeKind, $t);
+    if (tool === "lasso" || tool === "select") return $t("workspace.selected", { "value1": selectedStrokeIds.length + lassoObjectIds.length });
     return "";
   }
 
@@ -4964,12 +5134,12 @@
   ): string {
     const summary = summarizeMetric(strokeMetrics, key);
     return summary
-      ? `${summary.median.toFixed(1)} / ${summary.p95.toFixed(1)} / ${summary.worst.toFixed(1)} ms`
-      : "not measured";
+      ? $t("workspace.ms", { "value1": summary.median.toFixed(1), "value2": summary.p95.toFixed(1), "value3": summary.worst.toFixed(1) })
+      : $t("workspace.notMeasured");
   }
 
   function milliseconds(value: number | null): string {
-    return value === null ? "not measured" : `${value.toFixed(1)} ms`;
+    return value === null ? $t("workspace.notMeasured") : $t("workspace.ms2", { "value1": value.toFixed(1) });
   }
 
   function metricsPayload() {
@@ -4998,7 +5168,7 @@
       const candidate = new Image();
       candidate.onload = () =>
         resolve({ width: candidate.naturalWidth, height: candidate.naturalHeight });
-      candidate.onerror = () => reject(new Error("The pasted image could not be decoded"));
+      candidate.onerror = () => reject(new Error($t("workspace.thePastedImageCouldNotBeDecoded")));
       candidate.src = url;
     });
   }
@@ -5011,7 +5181,7 @@
   }
 
   function message(error: unknown) {
-    return error instanceof Error ? error.message : String(error);
+    return errorDetails(error);
   }
 
   function previewSvg(source: string, widthPt: number) {
@@ -5023,11 +5193,25 @@
   }
 </script>
 
+{#snippet typstSizeControls()}
+  {#if sideEditorBlockId}
+    {@const block = typstBlocks.find(candidate => candidate.id === sideEditorBlockId)}
+    {#if block}
+      {#key block.id}
+        <TypstSizeControls scale={block.transform.scale} layoutWidthPt={block.transform.layoutWidthPt}
+          onChange={change => updateTypstTransform(block.id, { ...block.transform, ...change })} />
+      {/key}
+    {/if}
+  {/if}
+{/snippet}
+
 <main class="workspace-app" onpointerdowncapture={closeObjectSelection} onwheel={wheelZoom}>
+  {#if settingsReady}
   {#if !notebookChosen}
     <div class="start-slot">
       <LibrarySurface
         {tauriAvailable}
+        onSettings={() => (settingsOpen = true)}
         {coverRevision}
         showNotebookSetup={showInitialSetup}
         location={shelfLocation}
@@ -5049,8 +5233,8 @@
       <button
         class="home-button"
         type="button"
-        aria-label="Open the notebook library"
-        title="Notebook library"
+        aria-label={$t("workspace.openTheNotebookLibrary")}
+        title={$t("workspace.notebookLibrary")}
         disabled={busy}
         onclick={() => void showLibrary()}
       >
@@ -5065,15 +5249,15 @@
         {switchingRoot}
         {busy}
         saving={savePending}
-        warning={transactionFailed}
+        warning={saveNeedsAttention}
         onSelect={openNotebookAt}
         onClose={closeNotebookTab}
       />
       <button
         class="new-tab-button"
         type="button"
-        aria-label="Open another notebook"
-        title="Open another notebook"
+        aria-label={$t("workspace.openAnotherNotebook")}
+        title={$t("workspace.openAnotherNotebook")}
         disabled={busy}
         onclick={() => void showLibrary()}
       >
@@ -5082,26 +5266,26 @@
     </div>
     <div class="command-actions">
       {#if pageOpen}
-        <button class="icon-button" type="button" aria-label="Export PDF" title="Export PDF" onclick={exportPdf} disabled={busy}>
+        <button class="icon-button" type="button" aria-label={$t("workspace.exportPDF")} title={$t("workspace.exportPDF")} onclick={exportPdf} disabled={busy}>
           <!-- Arrow up and out of the tray: the page leaves Goodtype. Down read as "download",
                which is the one thing this button never does. -->
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15V4m0 0-4 4m4-4 4 4M5 17v2a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-2" /></svg>
         </button>
       {:else}
-        <button class="text-action" type="button" onclick={reopen} disabled={busy}>Reopen notebook</button>
+        <button class="text-action" type="button" onclick={reopen} disabled={busy}>{$t("workspace.reopenNotebook")}</button>
       {/if}
       {#if pageOpen}
         <div class="add-page-anchor">
-          <button class="icon-button" class:active={addPageOpen} type="button" aria-label="Add page" aria-expanded={addPageOpen} title="Add page" disabled={busy} onclick={() => (addPageOpen = !addPageOpen)}>
+          <button class="icon-button" class:active={addPageOpen} type="button" aria-label={$t("workspace.addPage")} aria-expanded={addPageOpen} title={$t("workspace.addPage")} disabled={busy} onclick={() => (addPageOpen = !addPageOpen)}>
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M13 3.5H7a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h6"></path><path d="M18 9.5v9"></path><path d="M13.5 14h9"></path></svg>
           </button>
           {#if addPageOpen}
             <AddPageMenu
               where={addPageWhere}
               groups={addPageGroups()}
-              tones={PAPER_TONES}
+              tones={paperTones($t)}
               toneId={addPageToneId}
-              sizes={PAGE_SIZES}
+              sizes={pageSizes($t)}
               sizeId={addPageSizeId}
               orientation={addPageOrientation}
               previewAspect={addPageGeometry.widthPt / addPageGeometry.heightPt}
@@ -5119,13 +5303,13 @@
           {/if}
         </div>
       {/if}
-      <button class="icon-button" class:active={searchOpen} type="button" aria-label="Search typed content" title="Search (Ctrl+F)" onclick={() => (searchOpen = !searchOpen)}>
+      <button class="icon-button" class:active={searchOpen} type="button" aria-label={$t("workspace.searchTypedContent")} title={$t("workspace.searchCtrlF")} onclick={() => (searchOpen = !searchOpen)}>
         <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.6-3.6"></path></svg>
       </button>
-      <button class="icon-button" class:active={sideEditorOpen} type="button" aria-label="Page text and Typst source view" aria-pressed={sideEditorOpen} title="Editor view (Ctrl+Shift+E)" onclick={toggleSideEditor}>
+      <button class="icon-button" class:active={sideEditorOpen} type="button" aria-label={$t("workspace.pageTextAndTypstSourceView")} aria-pressed={sideEditorOpen} title={$t("workspace.editorViewCtrlShiftE")} onclick={toggleSideEditor}>
         <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="4.5" width="17" height="15" rx="2"></rect><path d="M10 4.5v15"></path></svg>
       </button>
-      <button class="icon-button" class:active={moreOpen} type="button" aria-label="More notebook actions" aria-expanded={moreOpen} data-preserve-selection onclick={() => (moreOpen = !moreOpen)}>
+      <button class="icon-button" class:active={moreOpen} type="button" aria-label={$t("workspace.moreNotebookActions")} aria-expanded={moreOpen} data-preserve-selection onclick={() => (moreOpen = !moreOpen)}>
         <svg class="solid-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.7"></circle><circle cx="12" cy="12" r="1.7"></circle><circle cx="19" cy="12" r="1.7"></circle></svg>
       </button>
     </div>
@@ -5133,25 +5317,25 @@
 
   {#if moreOpen}
     <OverflowMenu
-      title={pageOpen ? `Page ${pageNumber} of ${pageCount}` : "Notebook"}
-      subtitle={root || "Opening..."}
+      title={pageOpen ? $t("workspace.pageOf2", { "pageNumber": pageNumber, "pageCount": pageCount }) : $t("workspace.notebook")}
+      subtitle={root || $t("workspace.opening")}
       sections={menuSections()}
       onClose={() => (moreOpen = false)}
     />
   {/if}
 
   {#if pageOpen}
-    <div class="workspace-split" class:panel-right={settings.sideEditorDock === "right"}>
+    <div class="workspace-split" class:panel-right={settings.sideEditorDock === "right"} inert={pageInputLocked}>
     {#if sideEditorOpen}
       <SideEditor
         bind:this={sideEditor}
         mode={sideEditorMode}
         source={editingTemplate ? editingTemplate.source : sideEditorStyle ? sharedStyleSource : (sideEditorBlock?.source ?? "")}
-        styleTitle={editingTemplate ? `Template · ${editingTemplate.name}` : "Notebook style"}
+        styleTitle={editingTemplate ? $t("workspace.template2", { "name": editingTemplate.name }) : $t("workspace.notebookStyle")}
         blockLabel={sideEditorPageText
-          ? "Page text"
+          ? $t("workspace.pageText")
           : sideEditorBlockId
-            ? `Typst block ${sideEditorBlockId}`
+            ? $t("workspace.typstBlock", { "sideEditorBlockId": sideEditorBlockId })
             : ""}
         pageNumber={sideEditorPageNumber}
         hasAnyBlock={Boolean(pageTypst) || typstBlocks.length > 0}
@@ -5163,6 +5347,7 @@
         pageTextLineWrap={settings.pageTextLineWrap}
         {presets}
         {presetBusy}
+        blockControls={typstSizeControls}
         onChange={(next) =>
           editingTemplate
             ? updateTemplate(next)
@@ -5192,16 +5377,18 @@
     <section
       class="workspace-surround"
       bind:this={workspace}
-      aria-label="Fixed page workspace"
+      aria-label={$t("workspace.fixedPageWorkspace")}
       onpointerdowncapture={workspacePointerDown}
       oncontextmenu={canvasContextMenu}
       onpointermovecapture={workspacePointerMove}
       onpointerupcapture={workspacePointerEnd}
       onpointercancelcapture={workspacePointerEnd}
+      onlostpointercapture={releasePagePointer}
     >
-      <div class="page-scroll-content" bind:this={pageViewport} onscroll={() => { lastScrollAt = performance.now(); scheduleSelectionToolbar(); }}>
+      <div class="page-scroll-content" bind:this={pageViewport} onscroll={() => { lastScrollAt = performance.now(); scheduleSelectionToolbar(); scheduleFocus(FOCUS_SETTLE_MS); }}>
         <div
           class="page-pan-field"
+          style:--page-zoom={zoom}
           class:pulling={pull !== null}
           style:transform={pullShift > 0 ? `translateY(${-pullShift}px)` : undefined}
         >
@@ -5215,7 +5402,7 @@
             class:active-page={active}
             class="page-stack-item"
             data-page-id={entry.id}
-            aria-label={`Page ${index + 1}`}
+            aria-label={$t("workspace.page4", { "value1": index + 1 })}
             aria-current={active ? "page" : undefined}
             use:observePage={entry.id}
           >
@@ -5225,26 +5412,26 @@
                  arrived. Two inert buttons cost less than that, and only the page you are on can
                  be moved, so elsewhere they are disabled rather than absent. -->
             <div class="page-number" class:idle={!active}>
-              <span>Page {index + 1}</span>
+              <span>{$t("workspace.page", { "value2": index + 1 })}</span>
               {#if pageCount > 1}
                 <button
                   type="button"
-                  aria-label={`Move page ${index + 1} up`}
-                  title={active ? "Move page up (Ctrl+Shift+Page Up)" : "Scroll to this page to move it"}
+                  aria-label={$t("workspace.movePageUp2", { "value1": index + 1 })}
+                  title={active ? $t("workspace.movePageUpCtrlShiftPageUp") : $t("workspace.scrollToThisPageToMoveIt")}
                   disabled={!active || index === 0 || busy}
                   onclick={() => void moveActivePage(-1)}
                 >&uarr;</button>
                 <button
                   type="button"
-                  aria-label={`Move page ${index + 1} down`}
-                  title={active ? "Move page down (Ctrl+Shift+Page Down)" : "Scroll to this page to move it"}
+                  aria-label={$t("workspace.movePageDown2", { "value1": index + 1 })}
+                  title={active ? $t("workspace.movePageDownCtrlShiftPageDown") : $t("workspace.scrollToThisPageToMoveIt")}
                   disabled={!active || index === pageCount - 1 || busy}
                   onclick={() => void moveActivePage(1)}
                 >&darr;</button>
               {/if}
             </div>
-            <div class="page-frame" use:trackActiveFrame={active} style:width={`${box.widthPt * zoom}px`} style:height={`${box.heightPt * zoom}px`}>
-              <div class="page" style:width={`${box.widthPt}px`} style:height={`${box.heightPt}px`} style:transform={`scale(${zoom})`}>
+            <div class="page-frame" use:trackActiveFrame={active} style:--page-width={`${box.widthPt}px`} style:--page-height={`${box.heightPt}px`} style:width="calc(var(--page-width) * var(--page-zoom))" style:height="calc(var(--page-height) * var(--page-zoom))">
+              <div class="page" style:width={`${box.widthPt}px`} style:height={`${box.heightPt}px`} style:transform="scale(var(--page-zoom))">
                 {#if active || entry.snapshot}
                   <PageSurface
                     blocks={active ? activeBlockViews : blockViewsFromSnapshot(entry.snapshot!)}
@@ -5262,6 +5449,7 @@
                       tool === "highlighter" && settings.highlighterBehindInk,
                     )}
                     selectedStrokeIds={active ? selectedStrokeIds : []}
+                    strokePreview={active ? mixedStrokePreview : null}
                     lassoTargets={settings.lassoTargets ?? DEFAULT_LASSO_TARGETS}
                     onLassoSelect={active ? lassoSelection : undefined}
                     showSelectionBounds={!active || lassoObjectIds.length === 0}
@@ -5274,7 +5462,6 @@
                     sharedStyle={sharedStyleSource}
                     pageTextBaselineGrid={settings.pageTextBaselineGrid}
                     {presetRevision}
-                    {templateSources}
                     inlineEditing={!sideEditorOpen}
                     onRequestEdit={(id) => openSideEditor(id)}
                     {tool}
@@ -5294,6 +5481,8 @@
                     heldLineMinimumPt={settings.heldLineMinimumPt}
                     eraseRadiusPt={ERASER_RADIUS_PT[settings.eraserSize]}
                     eraserReach={settings.eraserReach}
+                    eraserMode={settings.eraserMode}
+                    erasable={(stroke) => !stroke.groupId || (active && stroke.groupId === mixedGroup?.inkGroupId)}
                     calibration={settings.calibration}
                     {pointerMapping}
                     onEraseEnd={returnFromEraser}
@@ -5335,19 +5524,21 @@
                     onEditShape={(id, editing) => {
                       selectedShapeId = id;
                       editingShapeId = editing ? id : null;
-                      status = editing ? "Editing shape anchor points" : "Shape selected";
+                      status = editing ? $t("workspace.editingShapeAnchorPoints") : $t("workspace.shapeSelected");
                     }}
                     onStrokeFinalized={(stroke) =>
                       active
                         ? addStroke(stroke)
-                        : commitNeighborInk(entry.id, [...neighborStrokesFor(entry), stroke], "Added ink")}
+                        : commitNeighborInk(entry.id, [...neighborStrokesFor(entry), stroke], $t("workspace.addedInk"))}
                     onEraseShape={active ? eraseShape : undefined}
+                    onShapesErased={active ? replaceErasedShapes : undefined}
                     onShapeFinalized={active ? addShape : undefined}
                     onInkShapeRecognized={active ? promoteHeldInk : undefined}
-                    onStrokesChange={(next) =>
-                      active
-                        ? changeStrokes(next, "Updated ink")
-                        : commitNeighborInk(entry.id, next, "Updated ink")}
+                    onStrokesChange={(next, replaced) => {
+                      const label = notice(replaced ? "workspace.erasedInk" : "workspace.updatedInk");
+                      if (active) changeStrokes(next, label, replaced);
+                      else commitNeighborInk(entry.id, next, label);
+                    }}
                     onSelectionChange={(next) => {
                       if (active) updateInkSelection(next);
                     }}
@@ -5362,7 +5553,7 @@
                       onStart={beginMixedTransform} onPreview={previewMixedTransform} onEnd={endMixedTransform} />
                   {/if}
                 {:else}
-                  <span class="page-loading">Loading page…</span>
+                  <span class="page-loading">{$t("workspace.loadingPage")}</span>
                 {/if}
               </div>
             </div>
@@ -5375,7 +5566,7 @@
         {#key touchHistoryToast}
           <div class="touch-history-toast" class:below-palette={paletteDock === "top"}
             class:reduced-motion={settings.reducedMotion} role="status" aria-live="polite">
-            {touchHistoryToast.label}
+            {renderMessage(touchHistoryToast.label, $t)}
           </div>
         {/key}
       {/if}
@@ -5409,8 +5600,8 @@
           </svg>
           <span>
             {pullFill >= 1
-              ? `Release to add · ${pullPaper ? (pullPaper.background.kind === "template" ? pullPaper.background.template.name : "Plain") : "new page"}`
-              : "Pull to add a page"}
+              ? $t("workspace.releaseToAdd", { "value1": pullPaper ? (pullPaper.background.kind === "template" ? pullPaper.background.template.name : $t("workspace.plain")) : $t("workspace.newPage") })
+              : $t("workspace.pullToAddAPage")}
           </span>
         </div>
       {/if}
@@ -5432,21 +5623,21 @@
         style:align-self={historyDrag ? null : chrome.history.align}
         role="toolbar"
         tabindex="0"
-        aria-label="Page history — drag between the buttons to move, or use the arrow keys"
+        aria-label={$t("workspace.pageHistoryDragBetweenTheButtonsTo")}
         onpointerdown={beginHistoryDrag}
         onpointermove={moveHistory}
         onpointerup={finishHistoryDrag}
         onpointercancel={finishHistoryDrag}
         onkeydown={moveHistoryWithKeyboard}
       >
-        <button type="button" aria-label="Undo" title="Undo (Ctrl+Z)" onclick={undo} disabled={busy || pendingTransactions > 0 || !canUndo}>
+        <button type="button" aria-label={$t("workspace.undo")} title={$t("workspace.undoCtrlZ")} onclick={undo} disabled={busy || pendingTransactions > 0 || !canUndo}>
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 7-5 5 5 5M4 12h10a6 6 0 0 1 0 12" /></svg>
         </button>
         <span class="grip" aria-hidden="true"></span>
         <span class="transport" aria-hidden="true">
           <svg viewBox="0 0 24 24"><path d="m9 7-5 5 5 5M4 12h10a6 6 0 0 1 0 12" /></svg>
         </span>
-        <button type="button" aria-label="Redo" title="Redo (Ctrl+Y)" onclick={redo} disabled={busy || pendingTransactions > 0 || !canRedo}>
+        <button type="button" aria-label={$t("workspace.redo")} title={$t("workspace.redoCtrlY")} onclick={redo} disabled={busy || pendingTransactions > 0 || !canRedo}>
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 7 5 5-5 5M20 12H10a6 6 0 0 0 0 12" /></svg>
         </button>
       </div>
@@ -5468,25 +5659,27 @@
         style:align-self={paletteDrag ? null : chrome.palette.align}
         style:left={paletteDrag ? `${paletteX}px` : null}
         style:top={paletteDrag ? `${paletteY}px` : null}
-        aria-label="Canvas tools"
+        aria-label={$t("workspace.canvasTools")}
       >
         {#if eraserEditor}
-          <PaletteEditor title="Eraser" anchor={eraserEditor} dock={paletteDock}
+          <PaletteEditor title={$t("workspace.eraser")} anchor={eraserEditor} dock={paletteDock}
             onClose={closeEraserEditor} onDismiss={closeToolCard}>
-            <EraserPanel highlightsOnly={settings.eraserReach === "highlighter"} returns={settings.eraserReturns}
+            <EraserPanel precise={settings.eraserMode === "precise"}
+              onPreciseChange={(enabled) => changeSettings({ ...settings, eraserMode: enabled ? "precise" : "stroke" })}
+              highlightsOnly={settings.eraserReach === "highlighter"} returns={settings.eraserReturns}
               onHighlightsChange={(enabled) => changeSettings({ ...settings, eraserReach: enabled ? "highlighter" : "everything" })}
               onReturnsChange={(eraserReturns) => changeSettings({ ...settings, eraserReturns })} />
           </PaletteEditor>
         {/if}
         {#if lassoEditor}
-          <PaletteEditor title="Lasso" anchor={lassoEditor} dock={paletteDock} onClose={closeLassoEditor} onDismiss={closeToolCard}>
+          <PaletteEditor title={$t("workspace.lasso")} anchor={lassoEditor} dock={paletteDock} onClose={closeLassoEditor} onDismiss={closeToolCard}>
             <LassoPanel targets={settings.lassoTargets ?? DEFAULT_LASSO_TARGETS}
               onChange={lassoTargets => changeSettings({ ...settings, lassoTargets })} />
           </PaletteEditor>
         {/if}
         {#if paletteEditor}
           {#key paletteEditor.anchor}
-            <PaletteEditor title={paletteEditor.kind === "width" ? (paletteEditor.adding ? "Add stroke" : "Stroke") : paletteEditor.adding ? "Add colour" : "Colour"}
+            <PaletteEditor title={paletteEditor.kind === "width" ? (paletteEditor.adding ? $t("workspace.addStroke") : $t("workspace.stroke")) : paletteEditor.adding ? $t("workspace.addColour") : $t("workspace.colour")}
               anchor={paletteEditor.anchor} dock={paletteDock} onClose={closePaletteEditor} onDismiss={closeToolCard}>
               {#if paletteEditor.kind === "width"}
                 {@const penLike = tool === "pen" || restyling}
@@ -5548,7 +5741,7 @@
             <ToolCard
               dock={paletteDock}
               tool={toolCard.kind}
-              label={toolCard.kind === "highlighter" ? "Highlighter" : `Pen ${toolCard.slot}`}
+              label={toolCard.kind === "highlighter" ? $t("workspace.highlighter") : $t("workspace.pen5", { "slot": toolCard.slot })}
               preset={toolCardPreset}
               smoothing={settings.calibration.smoothing}
               opacity={settings.highlighterOpacity}
@@ -5572,9 +5765,9 @@
         <button
           class="palette-grip"
           type="button"
-          aria-label="Move tool palette"
+          aria-label={$t("workspace.moveToolPalette")}
           aria-keyshortcuts="ArrowUp ArrowRight ArrowDown ArrowLeft"
-          title="Drag to move · Arrow keys dock"
+          title={$t("workspace.dragToMoveArrowKeysDock")}
           onpointerdown={beginPaletteDrag}
           onpointermove={movePalette}
           onpointerup={finishPaletteDrag}
@@ -5614,7 +5807,7 @@
               eraserSize={settings.eraserSize}
               pattern={restyling ? selectionStyle.pattern : inkPattern()}
               patternOf={tool === "pen" || restyling ? (width) => patternForWidth(settings.penWidthPatterns, width) : undefined}
-              tag={restyling ? "Selection" : undefined}
+              tag={restyling ? $t("workspace.selection") : undefined}
               matchPattern={restyling}
               expandedEditor={paletteEditor?.adding ? null : paletteEditor?.kind ?? null}
               addingColor={paletteEditor?.kind === "color" && paletteEditor.adding}
@@ -5651,7 +5844,7 @@
               onPaste={fromContext((at) => clipboard && pasteBundle(clipboard, at))}
               pasteDisabled={!clipboard}
               onDuplicate={fromContext(duplicateSelection)}
-              onDelete={fromContext(deleteSelection)}
+              onDelete={fromContext(() => deleteSelection())}
             />
           {:else if selectedImageId || selectedTypstId || selectedShapeId}
             <SelectionActions
@@ -5668,7 +5861,7 @@
               onPaste={fromContext((at) => clipboard && pasteBundle(clipboard, at))}
               pasteDisabled={!clipboard}
               onDuplicate={fromContext(duplicateSelection)}
-              onDelete={fromContext(deleteSelection)}
+              onDelete={fromContext(() => deleteSelection())}
             />
           {:else}
             <SelectionActions
@@ -5724,43 +5917,24 @@
     </div>
   {:else}
     <section class="closed-state">
-      <span class="closed-mark" aria-hidden="true"></span><h1>Notebook closed</h1>
-      <p>The confirmed local files are still safe.</p>
-      <button type="button" onclick={reopen} disabled={busy}>Reopen notebook</button>
+      <span class="closed-mark" aria-hidden="true"></span><h1>{$t("workspace.notebookClosed")}</h1>
+      <p>{$t("workspace.theConfirmedLocalFilesAreStillSafe")}</p>
+      <button type="button" onclick={reopen} disabled={busy}>{$t("workspace.reopenNotebook")}</button>
     </section>
   {/if}
 
   <footer class="status-strip">
     <div class="tool-status"><span class="blue-dot"></span><strong>{currentToolLabel()}</strong><span>{currentToolDetail()}</span></div>
-    {#if selectedTypstId}
-      {@const selectedBlock = typstBlocks.find((block) => block.id === selectedTypstId)}
-      {#if selectedBlock}
-        <label class="typst-size-control">
-          <span>Content size</span>
-          <input
-            type="range"
-            min="0.5"
-            max="2"
-            step="0.05"
-            value={selectedBlock.transform.scale}
-            aria-label="Selected Typst content size"
-            oninput={previewTypstScale}
-            onchange={commitTypstScale}
-          />
-          <output>{Math.round(selectedBlock.transform.scale * 100)}%</output>
-        </label>
-      {/if}
-    {/if}
-    <div class:failure={transactionFailed} class="operation-status" title={status}>{status}</div>
-    <span class="page-count">Page {activePageNumber()} of {notebookManifest?.pages.length ?? 1}</span><span class="footer-divider"></span>
+    <div class:failure={transactionFailed} class="operation-status" title={renderMessage(status, $t)}>{renderMessage(status, $t)}</div>
+    <span class="page-count">{$t("workspace.pageOf", { "value2": activePageNumber(), "value4": notebookManifest?.pages.length ?? 1 })}</span><span class="footer-divider"></span>
     <!-- Zoom reads and is changed in one place. It used to be a floating pill over the canvas
          *and* a number down here, so neither looked like the answer. -->
     <span class="zoom-group">
-      <button type="button" aria-label="Zoom out" onclick={() => changeZoom(zoom / ZOOM_STEP)}>−</button>
-      <button type="button" class="zoom-value" aria-label="Reset zoom to 100%" title="Reset zoom" onclick={() => changeZoom(1)}>{Math.round(zoom * 100)}%</button>
-      <button type="button" aria-label="Zoom in" onclick={() => changeZoom(zoom * ZOOM_STEP)}>+</button>
+      <button type="button" aria-label={$t("workspace.zoomOut")} onclick={() => changeZoom(zoom / ZOOM_STEP)}>−</button>
+      <button type="button" class="zoom-value" aria-label={$t("workspace.resetZoomTo")} title={$t("workspace.resetZoom")} onclick={() => changeZoom(1)}>{Math.round(zoom * 100)}%</button>
+      <button type="button" aria-label={$t("workspace.zoomIn")} onclick={() => changeZoom(zoom * ZOOM_STEP)}>+</button>
     </span>
-    <span class="footer-divider"></span><span class:failure={transactionFailed} class="local-state">{transactionFailed ? "Needs attention" : savePending ? "Local · saving" : "Local · saved"}</span>
+    <span class="footer-divider"></span><span class:failure={saveNeedsAttention} class="local-state">{saveNeedsAttention ? $t("workspace.needsAttention") : savePending ? $t("workspace.localSaving") : $t("workspace.localSaved")}</span>
   </footer>
 
   {#if searchOpen}
@@ -5769,15 +5943,6 @@
       {tauriAvailable}
       onNavigate={(hit) => void navigateToSearchHit(hit)}
       onClose={() => (searchOpen = false)}
-    />
-  {/if}
-
-  {#if settingsOpen}
-    <SettingsPanel
-      {settings}
-      actions={{ openMetrics: () => (metricsOpen = true) }}
-      onChange={changeSettings}
-      onClose={() => (settingsOpen = false)}
     />
   {/if}
 
@@ -5793,9 +5958,9 @@
   {/if}
   {#if confirmingPageDelete !== null}
     <ConfirmDialog
-      title={`Delete page ${confirmingPageDelete}?`}
-      detail="Its files are kept for recovery, but it leaves this notebook."
-      confirmLabel="Delete page"
+      title={$t("workspace.deletePage3", { "confirmingPageDelete": confirmingPageDelete })}
+      detail={$t("workspace.itsFilesAreKeptForRecoveryBut")}
+      confirmLabel={$t("workspace.deletePage2")}
       onConfirm={() => void confirmDeleteActivePage()}
       onCancel={() => (confirmingPageDelete = null)}
     />
@@ -5812,27 +5977,39 @@
   {/if}
   {/if}
 
+  {#if settingsOpen}
+    <SettingsPanel
+      selectedBlockFont={selectedTypstId ? blockFont(typstBlocks.find(block => block.id === selectedTypstId)?.source ?? "") : null}
+      onFontChange={changeInlineFont}
+      {settings}
+      actions={{ openMetrics: () => (metricsOpen = true) }}
+      onChange={changeSettings}
+      onClose={() => (settingsOpen = false)}
+    />
+  {/if}
+
   {#if collectMetrics && metricsOpen}
     <div class="panel-scrim" role="presentation">
-      <aside class="diagnostics-panel" aria-label="Timing evidence">
+      <aside class="diagnostics-panel" aria-label={$t("workspace.timingEvidence")}>
         <div class="panel-heading">
-          <div><span>Local diagnostics</span><h2>Timing evidence</h2></div>
-          <button class="icon-button" type="button" aria-label="Close timing evidence" onclick={() => (metricsOpen = false)}>×</button>
+          <div><span>{$t("workspace.localDiagnostics")}</span><h2>{$t("workspace.timingEvidence")}</h2></div>
+          <button class="icon-button" type="button" aria-label={$t("workspace.closeTimingEvidence")} onclick={() => (metricsOpen = false)}>×</button>
         </div>
         <p class="diagnostic-path">{root}\.goodtype\phase0-metrics.json</p>
         <dl>
-          <dt>Recorded strokes</dt><dd>{strokeMetrics.length}</dd>
-          <dt>Active feedback median / p95 / worst</dt><dd>{timingSummary("activeFeedbackMs")}</dd>
-          <dt>Maximum sample gap median / p95 / worst</dt><dd>{timingSummary("maxSampleGapMs")}</dd>
-          <dt>Stroke commit median / p95 / worst</dt><dd>{timingSummary("commitMs")}</dd>
-          <dt>Latest Typst compile</dt><dd>{milliseconds(compileMs)} + {TYPST_IDLE_DEBOUNCE_MS} ms debounce</dd>
-          <dt>Latest zoom frame</dt><dd>{milliseconds(zoomFrameMs)}</dd>
-          <dt>Save / reopen / export</dt><dd>{milliseconds(saveMs)} / {milliseconds(reopenMs)} / {milliseconds(exportMs)}</dd>
+          <dt>{$t("workspace.recordedStrokes")}</dt><dd>{strokeMetrics.length}</dd>
+          <dt>{$t("workspace.activeFeedbackMedianPWorst")}</dt><dd>{timingSummary("activeFeedbackMs")}</dd>
+          <dt>{$t("workspace.maximumSampleGapMedianPWorst")}</dt><dd>{timingSummary("maxSampleGapMs")}</dd>
+          <dt>{$t("workspace.strokeCommitMedianPWorst")}</dt><dd>{timingSummary("commitMs")}</dd>
+          <dt>{$t("workspace.latestTypstCompile")}</dt><dd>{$t("workspace.msDebounce", { "value1": milliseconds(compileMs), "TYPST_IDLE_DEBOUNCE_MS": TYPST_IDLE_DEBOUNCE_MS })}</dd>
+          <dt>{$t("workspace.latestZoomFrame")}</dt><dd>{milliseconds(zoomFrameMs)}</dd>
+          <dt>{$t("workspace.saveReopenExport")}</dt><dd>{milliseconds(saveMs)} / {milliseconds(reopenMs)} / {milliseconds(exportMs)}</dd>
         </dl>
       </aside>
     </div>
   {/if}
-  <p class="screen-reader-status" aria-live="polite">{status}</p>
+  <p class="screen-reader-status" aria-live="polite">{renderMessage(status, $t)}</p>
+  {/if}
 </main>
 
 <style>
@@ -6574,23 +6751,9 @@
     font-size: var(--text-sm);
   }
 
+  .workspace-app:has(:global(.typst-block.editing)) :global(.selection-actions) { visibility: hidden; pointer-events: none; }
   .tool-status { flex: none; gap: 6px; }
   .tool-status strong { color: var(--text); font-weight: 500; }
-  .typst-size-control {
-    display: flex;
-    flex: none;
-    align-items: center;
-    gap: 7px;
-    color: var(--text);
-    white-space: nowrap;
-  }
-  .typst-size-control input { width: 108px; accent-color: var(--blueprint); }
-  .typst-size-control output {
-    min-width: 31px;
-    color: var(--muted);
-    font-family: "Cascadia Mono", Consolas, monospace;
-    text-align: right;
-  }
   .operation-status { overflow: hidden; flex: 1; color: var(--quiet); text-align: center; text-overflow: ellipsis; white-space: nowrap; }
   .operation-status.failure, .local-state.failure { color: var(--oxide); }
   .footer-divider { width: 1px; height: 15px; flex: none; background: var(--edge); }
