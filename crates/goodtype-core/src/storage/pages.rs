@@ -168,8 +168,8 @@ impl ManifestGuard {
             MAX_JSON_BYTES,
         )?;
         if current != self.bytes {
-            return Err(invalid_error(&format!(
-                "external change detected; reopen the notebook before {operation}"
+            return Err(StorageError::ExternalChange(format!(
+                "reopen the notebook before {operation}"
             )));
         }
         Ok(())
@@ -727,8 +727,8 @@ fn restore_structure(
     {
         history.undo.clear();
         history.redo.clear();
-        return Err(invalid_error(
-            "external change detected; reopen the notebook before changing page history",
+        return Err(StorageError::ExternalChange(
+            "reopen the notebook before changing page history".into(),
         ));
     }
     let source = if undo { &history.undo } else { &history.redo };

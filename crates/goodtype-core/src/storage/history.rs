@@ -139,11 +139,20 @@ fn observe_snapshot(
 pub fn commit_notebook(
     selected_root: &Path,
     history: &mut NotebookHistory,
-    mut snapshot: NotebookSnapshot,
+    snapshot: NotebookSnapshot,
 ) -> Result<HistoryResult, StorageError> {
     let root = canonical_root(selected_root)?;
     let current = open_page(selected_root, &snapshot.page.id)?;
     ensure_current(&root, history, &current, snapshot.page.revision)?;
+    commit_current(&root, history, current, snapshot)
+}
+
+pub(super) fn commit_current(
+    root: &Path,
+    history: &mut NotebookHistory,
+    current: NotebookSnapshot,
+    mut snapshot: NotebookSnapshot,
+) -> Result<HistoryResult, StorageError> {
     validate_page_bundle_versions(&snapshot)?;
     // A preloaded neighbouring page may carry a timestamp from before another page saved.
     // Keep the current manifest and only advance its bookkeeping time.
@@ -158,7 +167,7 @@ pub fn commit_notebook(
     // layers move with it, so a partially upgraded notebook is not representable.
     raise_schema_version(&mut snapshot);
     snapshot.page.revision = current.page.revision + 1;
-    let (saved, fingerprint) = save_and_return(&root, &current, &snapshot)?;
+    let (saved, fingerprint) = save_and_return(root, &current, snapshot)?;
     history.advance(current, &saved, fingerprint);
     Ok(history_result(saved, history))
 }
@@ -205,7 +214,7 @@ fn restore_notebook(
     // have advanced since the entry was retained and must never be resurrected from old history.
     target.manifest = current.manifest.clone();
     target.page.revision = current.page.revision + 1;
-    let (restored, fingerprint) = save_and_return(&root, &current, &target)?;
+    let (restored, fingerprint) = save_and_return(&root, &current, target)?;
 
     if undo {
         history.undo_bytes -= history.undo.pop().expect("checked undo entry").bytes;
@@ -226,7 +235,7 @@ fn restore_notebook(
     Ok(history_result(restored, history))
 }
 
-fn ensure_current(
+pub(super) fn ensure_current(
     root: &Path,
     history: &mut NotebookHistory,
     current: &NotebookSnapshot,
@@ -243,8 +252,8 @@ fn ensure_current(
             Some(observed) if observed == fingerprint => return Ok(()),
             Some(_) => {
                 history.forget();
-                return Err(StorageError::InvalidNotebook(
-                    "external change detected; reopen the notebook before saving".into(),
+                return Err(StorageError::ExternalChange(
+                    "reopen the notebook before saving".into(),
                 ));
             }
             None => {
@@ -255,10 +264,10 @@ fn ensure_current(
         }
     }
     history.forget();
-    Err(StorageError::InvalidNotebook(format!(
-        "revision conflict: expected {expected}, found {}",
-        current.page.revision
-    )))
+    Err(StorageError::RevisionConflict {
+        expected,
+        found: current.page.revision,
+    })
 }
 
 fn push_history(stack: &mut Vec<HistoryEntry>, total: &mut usize, snapshot: NotebookSnapshot) {
@@ -388,10 +397,7 @@ mod tests {
         .unwrap();
 
         let error = commit_notebook(&notebook_root, &mut history, changed).unwrap_err();
-        assert!(matches!(
-            error,
-            StorageError::InvalidNotebook(message) if message.contains("external change")
-        ));
+        assert!(matches!(error, StorageError::ExternalChange(_)));
         assert_eq!(
             fs::read(notebook_root.join("blocks").join("equation.typ")).unwrap(),
             external_source
@@ -527,10 +533,7 @@ mod tests {
         .unwrap();
 
         let error = commit_notebook(&notebook_root, &mut history, changed).unwrap_err();
-        assert!(matches!(
-            error,
-            StorageError::InvalidNotebook(message) if message.contains("external change")
-        ));
+        assert!(matches!(error, StorageError::ExternalChange(_)));
         assert_eq!(
             open_notebook(&notebook_root).unwrap().manifest.title,
             "Changed outside Goodtype"
