@@ -114,3 +114,17 @@ than 1, and omit `patternSpacing` on strokes whose spacing is 1. All other layer
 written as codec 1, byte for byte as before. Readers that support codec 2 accept both
 versions; codec-1 metadata containing `patternSpacing` is invalid. Readers that only
 know codec 1 reject codec 2 visibly, as required above.
+
+## Codec version 3
+
+Codec 3 (ADR 0037) is codec 2 with one addition: a stroke's metadata may carry `trim`,
+an object `{ "startPt": a, "endPt": b }` of two finite numbers from 0 to 1,000,000. It
+marks a fragment left by the precise eraser: `a` and `b` are the arc length of the
+original stroke before and after the fragment, in the stroke's own points. The taper ramp
+is measured from the original ends and dash/dot phase continues from `a`. Without `trim`
+a stroke is whole. The header, layout, sample payload, limits, and every other rule are
+unchanged, and the version field is `3`; codec-3 metadata may also carry `patternSpacing`.
+
+Writers emit codec 3 only for a layer in which at least one stroke carries `trim`; all
+other layers keep their codec 1 or 2 bytes. Codec-1 or codec-2 metadata containing `trim`
+is invalid. Readers that only know codecs 1 and 2 reject codec 3 visibly.

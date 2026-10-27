@@ -1,3 +1,4 @@
+import { translate, type Translator } from "../i18n";
 import type { PageBackground, PageGeometry } from "../model";
 
 export type PresetChoice =
@@ -55,21 +56,11 @@ export function pagePresetOptions(presets: PresetSummary[]): PresetSummary[] {
 export function pagePresetState(source: string): PagePresetState {
   const managed = MANAGED_HEADER.exec(source);
   if (managed) return { kind: "managed", path: managed[1] };
-  const imported = new RegExp(PRESET_IMPORT_LINE, "m").exec(source);
-  const shown = new RegExp(PRESET_SHOW_LINE, "m").test(source);
+  const imported = new RegExp(PRESET_IMPORT_LINE, "m").exec(presetDirectives(source).join(""));
+  const shown = new RegExp(PRESET_SHOW_LINE, "m").test(presetDirectives(source).join(""));
   return imported || shown
     ? { kind: "custom", path: imported?.[1] ?? null }
     : { kind: "none", path: null };
-}
-
-/**
- * A template either defines Goodtype's `preset(body, rhythm:)` function, or is an ordinary Typst
- * header — imports, `#let` definitions, `set`/`show` rules — that is meant to apply to the page
- * the way a preamble applies to a document. Typst does not carry an imported file's set and
- * show rules into the importer, so the second kind is placed in front of the page text instead.
- */
-export function isPresetTemplate(source: string): boolean {
-  return /^[\t ]*#let[\t ]+preset[\t ]*\(/m.test(source);
 }
 
 /**
@@ -84,16 +75,38 @@ export function templateName(source: string): string | null {
   return null;
 }
 
-/** A preamble template, then the page handed back to Goodtype (`goodtype_page`, set in Rust). */
-export function templatePreamble(source: string): string {
-  return `${source}\n#set page(..goodtype_page)`;
+/** `preset` is Goodtype's reserved page-template binding; other imports and show rules stay. */
+// Only the leading, single-line import header is owned by this picker. Stop before body syntax,
+// including raw blocks, strings, nested code and block comments.
+function presetDirectives(source: string): string[] {
+  const directives: string[] = [];
+  for (const line of source.match(/[^\n]*(?:\n|$)/g) ?? []) {
+    if (new RegExp(PRESET_IMPORT_LINE).test(line) || new RegExp(PRESET_SHOW_LINE).test(line)) directives.push(line);
+    else if (!/^[\t ]*(?:\r?\n|$|\/\/[^\r\n]*(?:\r?\n|$)|#import[\t ]+"[^"\\\r\n]+"(?:[\t ]*:[\t A-Za-z0-9_,*]+)?[\t ]*(?:\/\/[^\r\n]*)?(?:\r?\n|$))$/.test(line)) break;
+  }
+  return directives;
 }
 
-/** `preset` is Goodtype's reserved page-template binding; other imports and show rules stay. */
 export function withPagePreset(source: string, path: string | null): string {
-  const body = source
-    .replace(new RegExp(PRESET_IMPORT_LINE, "gm"), "")
-    .replace(new RegExp(PRESET_SHOW_LINE, "gm"), "")
-    .replace(/^(?:[\t ]*\r?\n)+/, "");
+  const directives = presetDirectives(source);
+  const owned = new Set(directives);
+  let remaining = directives.length;
+  const body = owned.size ? (source.match(/[^\n]*(?:\n|$)/g) ?? [])
+    .filter(line => { if (remaining && owned.has(line)) { remaining -= 1; return false; } return true; }).join("").replace(/^(?:[\t ]*\r?\n)+/, "") : source;
   return path ? `${presetHeader(path)}${body}` : body;
+}
+
+/** Localize only application-owned presentation; names read from user style files stay intact. */
+export function presetPresentation(preset: PresetSummary, t: Translator = translate): PresetSummary {
+  if (preset.kind === "builtin") {
+    const keys = {
+      "clean-notes": ["presets.cleanNotes", "presets.cleanNotesHint"],
+      "compact-stem": ["presets.compactStem", "presets.compactStemHint"],
+      "formal-report": ["presets.formalReport", "presets.formalReportHint"],
+    } as const;
+    const pair = keys[preset.id as keyof typeof keys];
+    if (pair) return { ...preset, name: t(pair[0]), description: t(pair[1]) };
+  }
+  return { ...preset, description: preset.kind === "default"
+    ? t("editor.notebookDefault") : t("presets.notebookPreset") };
 }

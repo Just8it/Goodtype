@@ -1,6 +1,6 @@
 import type { Point } from "../geometry/coordinates";
 import type { ShapeGeometry, ShapePoint } from "../model";
-import type { ShapeView } from "../prototype/pageView";
+import type { ShapeView } from "../notebook/pageView";
 import { MIN_CLOSED_SPLINE_NODES, MIN_SHAPE_SIZE_PT, shapeBounds } from "./geometry";
 
 /// Shift-rotation lands on the same twelfth-turn grid a constrained line snaps to.

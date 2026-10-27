@@ -139,9 +139,8 @@ pub(crate) fn canonical_fingerprint(
 pub(crate) fn save_and_return(
     root: &Path,
     previous: &NotebookSnapshot,
-    candidate: &NotebookSnapshot,
+    mut candidate: NotebookSnapshot,
 ) -> Result<(NotebookSnapshot, u64), StorageError> {
-    let mut candidate = candidate.clone();
     let missing_blocks = referenced_paths(&candidate.manifest, &candidate.page, SourceRole::Block)
         .into_iter()
         .filter(|path| !candidate.blocks.iter().any(|file| file.path == *path))
@@ -322,12 +321,49 @@ pub fn read_pdf_reference(selected_root: &Path, relative: &str) -> Result<Vec<u8
 
 const MAX_TYPST_STYLE_BYTES: usize = 1024 * 1024;
 
+/// Update an observed template; the caller serializes notebook writes as for page commits.
+pub fn update_typst_style(
+    selected_root: &Path,
+    filename: &str,
+    source: &str,
+    expected_source: &str,
+) -> Result<String, StorageError> {
+    validate_safe_filename(filename)?;
+    let root = canonical_root(selected_root)?;
+    let relative = format!("styles/{filename}");
+    let current = read_limited(resolve_existing(&root, &relative)?, MAX_TYPST_STYLE_BYTES)?;
+    if current != expected_source.as_bytes() {
+        return Err(StorageError::ExternalChange(
+            "the template was not overwritten. Reopen it after preserving your unsaved text".into(),
+        ));
+    }
+    write_typst_style(&root, filename, source)
+}
+
 /// Write one ordinary UTF-8 Typst source below `styles/`. The caller owns language-level
 /// validation; storage owns the filename, containment, symlink, size, and atomic-write rules.
 pub fn write_typst_style(
     selected_root: &Path,
     filename: &str,
     source: &str,
+) -> Result<String, StorageError> {
+    persist_typst_style(selected_root, filename, source, true)
+}
+
+/// Install a preset without replacing an edited file. Identical bytes may be reused.
+pub fn install_typst_style(
+    selected_root: &Path,
+    filename: &str,
+    source: &str,
+) -> Result<String, StorageError> {
+    persist_typst_style(selected_root, filename, source, false)
+}
+
+fn persist_typst_style(
+    selected_root: &Path,
+    filename: &str,
+    source: &str,
+    replace: bool,
 ) -> Result<String, StorageError> {
     validate_safe_filename(filename)?;
     if !filename.to_ascii_lowercase().ends_with(".typ") {
@@ -341,7 +377,11 @@ pub fn write_typst_style(
     }
     let root = canonical_root(selected_root)?;
     let relative = format!("styles/{filename}");
-    write_atomic(&root, &relative, source.as_bytes())?;
+    if replace {
+        write_atomic(&root, &relative, source.as_bytes())?;
+    } else {
+        write_once(&root, &relative, source.as_bytes())?;
+    }
     Ok(relative)
 }
 
@@ -484,6 +524,46 @@ fn save_to_root_inner(
 mod tests {
     use crate::storage::{fixtures::*, *};
     use std::fs;
+
+    #[test]
+    fn preset_installation_reuses_identical_bytes_but_never_replaces_edits() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path();
+        install_typst_style(root, "clean-notes.typ", "original").unwrap();
+        install_typst_style(root, "clean-notes.typ", "original").unwrap();
+        update_typst_style(root, "clean-notes.typ", "edited", "original").unwrap();
+        assert!(matches!(
+            install_typst_style(root, "clean-notes.typ", "original"),
+            Err(StorageError::AlreadyExists(_))
+        ));
+        assert_eq!(
+            fs::read_to_string(root.join("styles/clean-notes.typ")).unwrap(),
+            "edited"
+        );
+    }
+
+    #[test]
+    fn edited_templates_refuse_stale_sources_and_keep_the_confirmed_file() {
+        let temporary = tempfile::tempdir().unwrap();
+        write_typst_style(temporary.path(), "a.typ", "original").unwrap();
+        update_typst_style(temporary.path(), "a.typ", "first", "original").unwrap();
+        assert!(update_typst_style(temporary.path(), "a.typ", "stale", "original").is_err());
+        assert_eq!(
+            fs::read_to_string(temporary.path().join("styles/a.typ")).unwrap(),
+            "first"
+        );
+        fs::write(temporary.path().join("styles/a.typ"), "external").unwrap();
+        assert!(update_typst_style(temporary.path(), "a.typ", "second", "first").is_err());
+        assert_eq!(
+            fs::read_to_string(temporary.path().join("styles/a.typ")).unwrap(),
+            "external"
+        );
+        assert!(update_typst_style(temporary.path(), "a.typ", "", "external").is_err());
+        assert_eq!(
+            fs::read_to_string(temporary.path().join("styles/a.typ")).unwrap(),
+            "external"
+        );
+    }
 
     #[test]
     fn pasted_image_preserves_bytes_and_never_overwrites() {

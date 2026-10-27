@@ -291,9 +291,9 @@ fn read_intent(
 
 pub(crate) fn ensure_recovery_capacity(root: &Path) -> Result<(), StorageError> {
     if candidate_names(root)?.len() >= RECOVERY_CANDIDATE_LIMIT {
-        return Err(StorageError::InvalidNotebook(format!(
-            "recovery contains {RECOVERY_CANDIDATE_LIMIT} unresolved candidates"
-        )));
+        return Err(StorageError::RecoveryLimit {
+            maximum: RECOVERY_CANDIDATE_LIMIT,
+        });
     }
     Ok(())
 }
@@ -464,7 +464,7 @@ pub fn restore_recovery_candidate(
         .checked_add(1)
         .ok_or_else(|| invalid_error("recovery restore revision overflow"))?;
 
-    let (restored, fingerprint) = save_and_return(&root, &current, &candidate)?;
+    let (restored, fingerprint) = save_and_return(&root, &current, candidate)?;
     history.advance(current, &restored, fingerprint);
     discard_recovery_candidate(&root, file_name)?;
     Ok(history_result(restored, history))

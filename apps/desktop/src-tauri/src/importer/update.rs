@@ -5,17 +5,10 @@ use ed25519_dalek::{Signature, VerifyingKey};
 use serde::Deserialize;
 
 use super::{
-    MAX_PACKAGE_BYTES, PINNED, PROTOCOL_VERSION, PinnedRelease, ReleaseView, SCHEMA_VERSION,
-    TARGET, github_asset,
+    MAX_PACKAGE_BYTES, PROTOCOL_VERSION, PinnedRelease, ReleaseView, SCHEMA_VERSION, TARGET, Tool,
+    github_asset,
 };
 
-pub(super) const LATEST_DESCRIPTOR: &str = "https://github.com/Just8it/Goodtype-Goodnodes-importer/releases/latest/download/importer-update.json";
-const REPOSITORY: &str = "https://github.com/Just8it/Goodtype-Goodnodes-importer/releases/download";
-// Matches the importer's release-public-key.pem. Private key lives only in the publisher secret.
-const PUBLIC_KEY: [u8; 32] = [
-    0x42, 0x8c, 0xc6, 0x8f, 0x6d, 0x0b, 0x38, 0xea, 0xe7, 0x4d, 0xcb, 0x21, 0x1e, 0x48, 0x77, 0xc6,
-    0xeb, 0x51, 0x54, 0x8d, 0xaa, 0xbf, 0x24, 0xde, 0x64, 0xa1, 0x85, 0x88, 0x5c, 0x82, 0x5b, 0x3c,
-];
 const MAX_DESCRIPTOR: u64 = 64 * 1024;
 
 #[derive(Clone, Debug)]
@@ -99,7 +92,14 @@ fn is_hash(value: &str, length: usize) -> bool {
     value.len() == length && value.bytes().all(|c| c.is_ascii_hexdigit())
 }
 
-fn verify(bytes: &[u8], signature: &[u8], key: &[u8; 32]) -> Result<VerifiedUpdate, String> {
+/// Authenticates `bytes` with `key` and checks they describe a compatible, clean, stable release
+/// of `tool` from its own repository.
+fn verify(
+    tool: &Tool,
+    bytes: &[u8],
+    signature: &[u8],
+    key: &[u8; 32],
+) -> Result<VerifiedUpdate, String> {
     if bytes.len() as u64 > MAX_DESCRIPTOR {
         return Err("importer update metadata is too large".into());
     }
@@ -126,12 +126,10 @@ fn verify(bytes: &[u8], signature: &[u8], key: &[u8; 32]) -> Result<VerifiedUpda
     {
         return Err("the newest importer requires a different Goodtype version; the installed version was kept".into());
     }
-    let name = format!(
-        "goodtype-goodnotes-importer-{}-windows-x64.zip",
-        descriptor.version
-    );
+    let name = format!("{}-{}-windows-x64.zip", tool.package, descriptor.version);
     if descriptor.archive.file_name != name
-        || descriptor.archive.url != format!("{REPOSITORY}/v{}/{name}", descriptor.version)
+        || descriptor.archive.url
+            != format!("{}/v{}/{name}", tool.release_url(), descriptor.version)
         || descriptor.archive.size_bytes == 0
         || descriptor.archive.size_bytes > MAX_PACKAGE_BYTES
     {
@@ -146,9 +144,9 @@ fn verify(bytes: &[u8], signature: &[u8], key: &[u8; 32]) -> Result<VerifiedUpda
     })
 }
 
-fn fetch(url: &str, limit: u64) -> Result<Vec<u8>, String> {
+fn fetch(tool: &Tool, url: &str, limit: u64) -> Result<Vec<u8>, String> {
     let mut bytes = Vec::new();
-    github_asset(url, true)?
+    github_asset(tool, url, true)?
         .into_reader()
         .take(limit + 1)
         .read_to_end(&mut bytes)
@@ -159,21 +157,26 @@ fn fetch(url: &str, limit: u64) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
-pub(super) fn check(installed: Option<&str>) -> Result<Option<VerifiedUpdate>, String> {
-    let bytes = fetch(LATEST_DESCRIPTOR, MAX_DESCRIPTOR)?;
+pub(super) fn check(
+    tool: &Tool,
+    installed: Option<&str>,
+) -> Result<Option<VerifiedUpdate>, String> {
+    let bytes = fetch(tool, &tool.latest_descriptor(), MAX_DESCRIPTOR)?;
     // This untrusted version is used only to form a fixed-repository signature URL.
     let untrusted: Descriptor =
         serde_json::from_slice(&bytes).map_err(|_| "malformed importer release descriptor")?;
     stable_version(&untrusted.version)?;
     let signature = fetch(
+        tool,
         &format!(
-            "{REPOSITORY}/v{}/importer-update.json.sig",
+            "{}/v{}/importer-update.json.sig",
+            tool.release_url(),
             untrusted.version
         ),
         64,
     )?;
-    let verified = verify(&bytes, &signature, &PUBLIC_KEY)?;
-    if let Some(version) = installed.or_else(|| PINNED.as_ref().map(|pin| pin.version)) {
+    let verified = verify(tool, &bytes, &signature, &tool.public_key)?;
+    if let Some(version) = installed.or_else(|| tool.pinned.as_ref().map(|pin| pin.version)) {
         let ordering = stable_version(&verified.version)?.cmp(&stable_version(version)?);
         if !ordering.is_gt() {
             return Ok(None);
@@ -184,53 +187,74 @@ pub(super) fn check(installed: Option<&str>) -> Result<Option<VerifiedUpdate>, S
 
 #[cfg(test)]
 mod tests {
+    use super::super::{GOODNOTES, ONENOTE};
     use super::*;
     use ed25519_dalek::{Signer, SigningKey};
     use serde_json::json;
 
-    fn descriptor() -> serde_json::Value {
+    fn descriptor(tool: &Tool) -> serde_json::Value {
+        let name = format!("{}-0.1.1-windows-x64.zip", tool.package);
         json!({"version":"0.1.1", "protocolVersion":1, "notebookSchemaVersion":SCHEMA_VERSION,
             "target":TARGET, "sourceDirty":false, "sourceCommit":"1".repeat(40), "decoderCommit":"2".repeat(40),
-            "archive":{"fileName":"goodtype-goodnotes-importer-0.1.1-windows-x64.zip", "sizeBytes":1234,
-                "sha256":"3".repeat(64), "url":format!("{REPOSITORY}/v0.1.1/goodtype-goodnotes-importer-0.1.1-windows-x64.zip")}})
+            "archive":{"fileName":name, "sizeBytes":1234,
+                "sha256":"3".repeat(64), "url":format!("{}/v0.1.1/{name}", tool.release_url())}})
     }
 
     #[test]
     fn authenticated_update_rejects_tampering_and_wrong_keys() {
         let key = SigningKey::from_bytes(&[42; 32]);
-        let bytes = serde_json::to_vec(&descriptor()).unwrap();
-        let signature = key.sign(&bytes).to_bytes();
-        let verified = verify(&bytes, &signature, key.verifying_key().as_bytes()).unwrap();
-        assert_eq!(verified.pin().version, "0.1.1");
-        let mut changed = bytes.clone();
-        changed.push(b' ');
-        assert!(verify(&changed, &signature, key.verifying_key().as_bytes()).is_err());
-        assert!(verify(&bytes, &signature, &PUBLIC_KEY).is_err());
-        assert!(verify(&bytes, &[0; 63], key.verifying_key().as_bytes()).is_err());
+        for tool in [&GOODNOTES, &ONENOTE] {
+            let bytes = serde_json::to_vec(&descriptor(tool)).unwrap();
+            let signature = key.sign(&bytes).to_bytes();
+            let ours = key.verifying_key();
+            let verified = verify(tool, &bytes, &signature, ours.as_bytes()).unwrap();
+            assert_eq!(verified.pin().version, "0.1.1");
+            let mut changed = bytes.clone();
+            changed.push(b' ');
+            assert!(verify(tool, &changed, &signature, ours.as_bytes()).is_err());
+            assert!(verify(tool, &bytes, &signature, &tool.public_key).is_err());
+            assert!(verify(tool, &bytes, &[0; 63], ours.as_bytes()).is_err());
+        }
+    }
+
+    #[test]
+    fn one_importers_release_never_authorizes_the_other() {
+        assert_ne!(GOODNOTES.public_key, ONENOTE.public_key);
+        let key = SigningKey::from_bytes(&[42; 32]);
+        for (named, used) in [(&GOODNOTES, &ONENOTE), (&ONENOTE, &GOODNOTES)] {
+            // Even correctly signed, a descriptor for one importer's package and repository is
+            // refused when checked as the other's.
+            let bytes = serde_json::to_vec(&descriptor(named)).unwrap();
+            let signature = key.sign(&bytes).to_bytes();
+            assert!(verify(used, &bytes, &signature, key.verifying_key().as_bytes()).is_err());
+        }
     }
 
     #[test]
     fn signed_metadata_still_needs_compatible_clean_bounded_assets() {
         let key = SigningKey::from_bytes(&[42; 32]);
-        for (pointer, value) in [
-            ("/protocolVersion", json!(2)),
-            ("/notebookSchemaVersion", json!(999)),
-            ("/target", json!("wrong-target")),
-            ("/sourceDirty", json!(true)),
-            ("/sourceCommit", json!("bad")),
-            ("/version", json!("0.1.2-rc.1")),
-            ("/archive/url", json!("https://evil.invalid/tool.zip")),
-            ("/archive/sha256", json!("bad")),
-            ("/archive/sizeBytes", json!(MAX_PACKAGE_BYTES + 1)),
-        ] {
-            let mut data = descriptor();
-            *data.pointer_mut(pointer).unwrap() = value;
-            let bytes = serde_json::to_vec(&data).unwrap();
-            let signature = key.sign(&bytes).to_bytes();
-            assert!(
-                verify(&bytes, &signature, key.verifying_key().as_bytes()).is_err(),
-                "{pointer}"
-            );
+        for tool in [&GOODNOTES, &ONENOTE] {
+            for (pointer, value) in [
+                ("/protocolVersion", json!(2)),
+                ("/notebookSchemaVersion", json!(999)),
+                ("/target", json!("wrong-target")),
+                ("/sourceDirty", json!(true)),
+                ("/sourceCommit", json!("bad")),
+                ("/version", json!("0.1.2-rc.1")),
+                ("/archive/url", json!("https://evil.invalid/tool.zip")),
+                ("/archive/sha256", json!("bad")),
+                ("/archive/sizeBytes", json!(MAX_PACKAGE_BYTES + 1)),
+            ] {
+                let mut data = descriptor(tool);
+                *data.pointer_mut(pointer).unwrap() = value;
+                let bytes = serde_json::to_vec(&data).unwrap();
+                let signature = key.sign(&bytes).to_bytes();
+                assert!(
+                    verify(tool, &bytes, &signature, key.verifying_key().as_bytes()).is_err(),
+                    "{} {pointer}",
+                    tool.id
+                );
+            }
         }
     }
 
@@ -252,44 +276,61 @@ mod tests {
         }
     }
 
+    fn tool_from_env() -> &'static Tool {
+        match std::env::var("IMPORTER_TOOL").as_deref() {
+            Ok("onenote") => &ONENOTE,
+            _ => &GOODNOTES,
+        }
+    }
+
+    /// `IMPORTER_TOOL=onenote|goodnotes cargo test live_update -- --ignored --nocapture`
     #[test]
     #[ignore = "explicit live GitHub update discovery check"]
     fn live_update_check_authenticates_the_published_stable_release() {
-        let release = check(Some("0.0.0"))
+        let tool = tool_from_env();
+        let release = check(tool, Some("0.0.0"))
             .unwrap()
             .expect("a signed stable release");
         require_newer(&release.version, "0.0.0").unwrap();
-        assert!(release.url.starts_with(REPOSITORY));
+        assert!(release.url.starts_with(&tool.release_url()));
         println!(
-            "Live update discovery authenticated importer {} ({} bytes).",
-            release.version, release.size
+            "Live update discovery authenticated {} importer {} ({} bytes).",
+            tool.id, release.version, release.size
         );
     }
 
+    /// `IMPORTER_TOOL=onenote|goodnotes IMPORTER_UPDATE_FIXTURE=<downloaded release assets>`
     #[test]
-    #[ignore = "needs a real signed release bundle in GOODNOTES_UPDATE_FIXTURE"]
+    #[ignore = "needs a real signed release bundle in IMPORTER_UPDATE_FIXTURE"]
     fn real_signed_release_installs_with_the_production_key() {
-        use super::super::{InstallDir, install_archive, probe_tool, read_bounded, verify_package};
-        let root = std::path::PathBuf::from(std::env::var_os("GOODNOTES_UPDATE_FIXTURE").unwrap());
-        let bytes = read_bounded(&root.join("importer-update.json"), MAX_DESCRIPTOR).unwrap();
+        use super::super::{InstallDir, install_archive, probe_tool, verify_package};
+        use crate::store::read_bounded;
+        let tool = tool_from_env();
+        let root = std::path::PathBuf::from(std::env::var_os("IMPORTER_UPDATE_FIXTURE").unwrap());
+        let bytes =
+            read_bounded(&root.join("importer-update.json"), MAX_DESCRIPTOR as usize).unwrap();
         let signature = read_bounded(&root.join("importer-update.json.sig"), 64).unwrap();
-        let release = verify(&bytes, &signature, &PUBLIC_KEY).unwrap();
+        let release = verify(tool, &bytes, &signature, &tool.public_key).unwrap();
         let archive = root.join(format!(
-            "goodtype-goodnotes-importer-{}-windows-x64.zip",
-            release.version
+            "{}-{}-windows-x64.zip",
+            tool.package, release.version
         ));
         let temporary = tempfile::tempdir().unwrap();
-        let dir = InstallDir(temporary.path().to_path_buf());
-        let previous = temporary.path().join("versions/0.1.0");
+        let dir = InstallDir(temporary.path().to_path_buf(), tool);
+        let previous = temporary.path().join("versions/0.0.9");
         std::fs::create_dir_all(&previous).unwrap();
         std::fs::write(previous.join("placeholder"), b"retired importer fixture").unwrap();
-        let installed = install_archive(&dir, &archive, &release.pin(), &probe_tool).unwrap();
+        let installed = install_archive(&dir, &archive, &release.pin(), &|path| {
+            probe_tool(tool, path)
+        })
+        .unwrap();
         assert_eq!(installed, release.version);
         assert!(!previous.exists());
         let (_, active) = dir.active().unwrap();
-        verify_package(&active).unwrap();
+        verify_package(tool, &active).unwrap();
         println!(
-            "Verified signature, installed {installed}, passed runtime self-check and removed inactive version."
+            "Verified the {} signature, installed {installed}, passed its self-check and removed the inactive version.",
+            tool.id
         );
     }
 }

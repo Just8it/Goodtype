@@ -1,5 +1,6 @@
 <script lang="ts">
-  import ColorPanel from "../prototype/ColorPanel.svelte";
+  import { t } from "../i18n";
+  import ColorPanel from "../notebook/ColorPanel.svelte";
   import { dismissable } from "../workspace/dismiss";
   import { withRecentColor } from "../settings";
   import type { WritingCommand } from "./writingCommands";
@@ -41,7 +42,7 @@
 
 <div class="color-control" use:dismissable={() => close(false)}>
   <button bind:this={button} type="button" class="color-button" class:active={open}
-    aria-label="Typst colour" title="Typst colour" aria-haspopup="dialog" aria-expanded={open}
+    aria-label={$t("editor.typstColour")} title={$t("editor.typstColour")} aria-haspopup="dialog" aria-expanded={open}
     onclick={() => { if (open) close(); else open = true; }}>
     <svg viewBox="0 0 24 24" aria-hidden="true">
       <path d="m6 16 6-12 6 12M8.5 11h7" />
@@ -49,16 +50,16 @@
     </svg>
   </button>
   {#if open}
-    <div class="color-popout" use:place role="dialog" tabindex="-1" aria-label="Typst colour"
+    <div class="color-popout" use:place role="dialog" tabindex="-1" aria-label={$t("editor.typstColour")}
       onkeydown={(event) => { if (event.key === "Escape") { event.stopPropagation(); close(); } }}>
       <div class="purpose">
-        <label for="typst-colour-use">Insert as</label>
+        <label for="typst-colour-use">{$t("editor.insertAs")}</label>
         <select id="typst-colour-use" bind:value={use}>
-          <option value="text-color">Text colour</option>
-          <option value="color-value">Colour value · rgb(…)</option>
+          <option value="text-color">{$t("editor.textColour")}</option>
+          <option value="color-value">{$t("editor.colourValueRgb")}</option>
         </select>
       </div>
-      <p>{use === "text-color" ? "Colour selected text or math, or add content at the caret." : "Insert an rgb(…) value for a fill, stroke, or variable."}</p>
+      <p>{use === "text-color" ? $t("editor.colourSelectedTextOrMathOrAdd") : $t("editor.insertAnRgbValueForAFill")}</p>
       <ColorPanel embedded value={color} {recent} onPick={pick} onClose={() => close()} />
     </div>
   {/if}

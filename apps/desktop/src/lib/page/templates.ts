@@ -1,3 +1,4 @@
+import { translate, type Translator } from "../i18n";
 // The templates Goodtype ships with, grouped the way the picker shows them.
 //
 // They live here rather than in Rust on purpose. Choosing a template copies its definition onto
@@ -58,10 +59,10 @@ export type PaperTone = {
   accent: string;
 };
 
-export const PAPER_TONES: PaperTone[] = [
+export function paperTones(t: Translator = translate): PaperTone[] { return [
   {
     id: "white",
-    name: "White",
+    name: t("page.white"),
     backgroundColor: "#FCFCFA",
     rule: "#D4DAE0",
     ruleStrong: "#BFC7D0",
@@ -71,7 +72,7 @@ export const PAPER_TONES: PaperTone[] = [
   },
   {
     id: "cream",
-    name: "Cream",
+    name: t("page.cream"),
     backgroundColor: "#F7F2E7",
     rule: "#DED5C2",
     ruleStrong: "#C8BCA3",
@@ -80,7 +81,7 @@ export const PAPER_TONES: PaperTone[] = [
   },
   {
     id: "black",
-    name: "Black",
+    name: t("page.black"),
     backgroundColor: "#14181C",
     // Lighter than the paper, not lighter than the ink: on a dark page the ruling has to be
     // findable without competing with what gets written on it.
@@ -89,7 +90,8 @@ export const PAPER_TONES: PaperTone[] = [
     dot: "#333B45",
     accent: "#8C4B45",
   },
-];
+]; }
+export const PAPER_TONES = paperTones();
 
 export type TemplateGroup = {
   id: string;
@@ -102,7 +104,7 @@ export type TemplateGroup = {
  * stored: a page carries the paper it was made on, not a reference to a palette that might not
  * exist wherever the notebook is opened next.
  */
-export function templateGroups(tone: PaperTone): TemplateGroup[] {
+export function templateGroups(tone: PaperTone, t: Translator = translate): TemplateGroup[] {
   const page = inset(MARGIN_PT);
   // Kept distinct per tone so a "recent templates" list can tell white ruled from black ruled.
   const at = (id: string) => `${id}-${tone.id}`;
@@ -126,32 +128,32 @@ export function templateGroups(tone: PaperTone): TemplateGroup[] {
   return [
     {
       id: "plain",
-      title: "Plain",
+      title: t("workspace.plain"),
       templates: [
         // Cream used to be a template of its own. It is a paper colour, and every template can
         // have it now, so it does not need to be a separate sheet.
-        { id: at("blank"), name: "Blank", backgroundColor: tone.backgroundColor, elements: [] },
+        { id: at("blank"), name: t("page.blank"), backgroundColor: tone.backgroundColor, elements: [] },
       ],
     },
     {
       id: "lines",
-      title: "Lines",
+      title: t("page.lines"),
       templates: [
         {
           id: at("ruled-wide"),
-          name: "Ruled",
+          name: t("page.ruled"),
           backgroundColor: tone.backgroundColor,
           elements: [ruled(page, RULED_PT)],
         },
         {
           id: at("ruled-narrow"),
-          name: "Ruled narrow",
+          name: t("page.ruledNarrow"),
           backgroundColor: tone.backgroundColor,
           elements: [ruled(page, 6 * MM)],
         },
         {
           id: at("legal"),
-          name: "Legal pad",
+          name: t("page.legalPad"),
           backgroundColor: tone.backgroundColor,
           elements: [
             {
@@ -210,7 +212,7 @@ export function templateGroups(tone: PaperTone): TemplateGroup[] {
         },
         {
           id: at("columns-two"),
-          name: "Two columns",
+          name: t("page.twoColumns"),
           backgroundColor: tone.backgroundColor,
           elements: [
             {
@@ -229,23 +231,23 @@ export function templateGroups(tone: PaperTone): TemplateGroup[] {
     },
     {
       id: "squares",
-      title: "Squares",
+      title: t("page.squares"),
       templates: [
         {
           id: at("squared-5mm"),
-          name: "Squared",
+          name: t("page.squared"),
           backgroundColor: tone.backgroundColor,
           elements: [grid(5 * MM, 0.4, null)],
         },
         {
           id: at("squared-10mm"),
-          name: "Squared wide",
+          name: t("page.squaredWide"),
           backgroundColor: tone.backgroundColor,
           elements: [grid(10 * MM, 0.4, null)],
         },
         {
           id: at("graph-5mm"),
-          name: "Graph",
+          name: t("page.graph"),
           backgroundColor: tone.backgroundColor,
           // Every fifth line heavier, which is what makes a graph grid countable rather than
           // just dense. As one grid rather than two, the heavy lines are the same lines — they
@@ -256,17 +258,17 @@ export function templateGroups(tone: PaperTone): TemplateGroup[] {
     },
     {
       id: "dots",
-      title: "Dots",
+      title: t("page.dots"),
       templates: [
         {
           id: at("dotted-5mm"),
-          name: "Dotted",
+          name: t("workspace.dotted"),
           backgroundColor: tone.backgroundColor,
           elements: [{ kind: "dots", area: page, spacingPt: 5 * MM, color: tone.dot, radiusPt: 0.6 }],
         },
         {
           id: at("dotted-10mm"),
-          name: "Dotted wide",
+          name: t("page.dottedWide"),
           backgroundColor: tone.backgroundColor,
           elements: [{ kind: "dots", area: page, spacingPt: 10 * MM, color: tone.dot, radiusPt: 0.7 }],
         },

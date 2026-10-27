@@ -151,6 +151,12 @@ export type ShapeStyle = {
   pattern?: StrokePattern;
   /** Gap factor for the pattern (ADR 0023); 1 when absent. */
   patternSpacing?: number;
+  /**
+   * For a piece the precise eraser cut from a patterned outline: how far along the original
+   * outline it begins, in the shape's own units, so its dashes continue where they were
+   * (ADR 0037). Absent on every shape drawn whole.
+   */
+  patternOffsetPt?: number;
 };
 
 export type PageObject =
@@ -222,9 +228,21 @@ export type Stroke = {
   /** Ink opacity, 0–1. A highlighter sweep is translucent where a pen is not. */
   opacity: number;
   groupId: string | null;
+  /**
+   * Where this stroke sat inside the stroke the precise eraser cut it from (ADR 0037). Absent on
+   * every stroke drawn whole, so ordinary ink serializes exactly as before.
+   */
+  trim?: StrokeTrim;
   points: StrokePoint[];
   transform: Transform;
 };
+
+/**
+ * Arc length of the original stroke before and after a cut fragment, in the stroke's own points.
+ * Taper and pattern phase are measured from the original ends; without this every cut would grow
+ * new pointed tips and shift every dash and dot left behind.
+ */
+export type StrokeTrim = { startPt: number; endPt: number };
 
 export type StrokePoint = {
   x: number;

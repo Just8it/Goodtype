@@ -1,7 +1,17 @@
 import { describe, expect, it } from "vitest";
-import { isPresetTemplate, pagePresetOptions, pagePresetPath, pagePresetState, presetHeader, templateName, templatePreamble, withPagePreset } from "./presets";
+import { pagePresetOptions, pagePresetPath, pagePresetState, presetHeader, templateName, withPagePreset } from "./presets";
 
 describe("Page text preset imports", () => {
+  it("preserves raw examples, comments, strings and nested source when changing a header", () => {
+    const example = `${presetHeader()}inside`;
+    for (const body of [`\`\`\`typ\n${example}\n\`\`\``, `/*\n${example}\n*/`,
+      `#let example = [\n${example}\n]`, `#let example = "\n${example}\n"`]) {
+      expect(pagePresetState(body).kind).toBe("none");
+      expect(withPagePreset(body, null)).toBe(body);
+      expect(withPagePreset(presetHeader() + body, null)).toBe(body);
+      expect(withPagePreset(body, "/styles/new.typ")).toBe(presetHeader("/styles/new.typ") + body);
+    }
+  });
   it("adds, changes, and removes the managed header", () => {
     const inherited = `${presetHeader()}Hello`;
     expect(pagePresetPath(inherited)).toBe("/styles/default.typ");
@@ -52,17 +62,6 @@ Hello`;
 });
 
 describe("Page templates", () => {
-  it("tells a preset template from an ordinary Typst header", () => {
-    expect(isPresetTemplate("#let preset(body, rhythm: 16pt) = { body }")).toBe(true);
-    expect(isPresetTemplate("// header\n  #let preset (body) = body")).toBe(true);
-    expect(isPresetTemplate('#import "@preview/physica:0.9.3": *\n#let rot(c) = text(fill: red, c)')).toBe(false);
-    expect(isPresetTemplate("#let presets = (1, 2)")).toBe(false);
-  });
-
-  it("hands the page back to Goodtype after a preamble", () => {
-    expect(templatePreamble('#set page(paper: "a4")')).toBe('#set page(paper: "a4")\n#set page(..goodtype_page)');
-  });
-
   it("names a template by its Name line, like the Rust side", () => {
     expect(templateName("// Name: Messtechnik\n#set par(justify: true)")).toBe("Messtechnik");
     expect(templateName("  //name:  Lab notes  ")).toBe("Lab notes");

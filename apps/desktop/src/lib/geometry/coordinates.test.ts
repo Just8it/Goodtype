@@ -11,12 +11,39 @@ import {
   MIN_ZOOM,
   pageToScreen,
   pannedScroll,
+  pageAtViewportCenter,
   screenToPage,
+  rotatedVector,
   type PageViewport,
   type ScreenViewport,
 } from "./coordinates";
 
 describe("coordinate authority", () => {
+  it("maps rotated gesture vectors back to object axes", () => {
+    const point = { x: 24, y: -8 };
+    for (const angle of [0, 30, 90, -170]) {
+      const restored = rotatedVector(rotatedVector(point, angle), -angle);
+      expect(restored.x).toBeCloseTo(point.x);
+      expect(restored.y).toBeCloseTo(point.y);
+    }
+  });
+  it("finds the page in view at high zoom without requiring half its area", () => {
+    const viewport = { left: 0, top: 0, right: 1280, bottom: 708 };
+    expect(pageAtViewportCenter([
+      { id: "previous", bounds: { left: 0, top: -1750, right: 1190, bottom: -66 } },
+      { id: "visible", bounds: { left: 0, top: 0, right: 1190, bottom: 1684 } },
+    ], viewport)).toBe("visible");
+    expect(pageAtViewportCenter([], viewport)).toBeNull();
+  });
+
+  it("picks the nearest visible page in a gap and ignores horizontal offscreen pages", () => {
+    const viewport = { left: 0, top: 0, right: 600, bottom: 700 };
+    expect(pageAtViewportCenter([
+      { id: "offscreen", bounds: { left: 700, top: 0, right: 1300, bottom: 700 } },
+      { id: "above", bounds: { left: 0, top: -100, right: 600, bottom: 300 } },
+      { id: "below", bounds: { left: 0, top: 375, right: 600, bottom: 800 } },
+    ], viewport)).toBe("below");
+  });
   it("round-trips screen and page points at different zoom and origins", () => {
     const viewport: ScreenViewport = { left: 100, top: 60 };
     const view: PageViewport = { pageOriginX: 24, pageOriginY: 12, zoom: 1.5 };

@@ -30,12 +30,12 @@ const notebook = (name: string, modifiedMs: number | null = 0): LibraryEntry => 
 describe("library paths", () => {
   it("walks the trail from the root down to the folder in view", () => {
     expect(breadcrumb("Semester 3/Thermodynamik")).toEqual([
-      { name: "Bibliothek", path: "" },
+      { name: "Library", path: "" },
       { name: "Semester 3", path: "Semester 3" },
       { name: "Thermodynamik", path: "Semester 3/Thermodynamik" },
     ]);
     // The root is a crumb of its own, so there is always something to navigate back to.
-    expect(breadcrumb("")).toEqual([{ name: "Bibliothek", path: "" }]);
+    expect(breadcrumb("")).toEqual([{ name: "Library", path: "" }]);
   });
 
   it("climbs one level at a time and stops at the root", () => {
@@ -96,6 +96,9 @@ describe("names Goodtype will create", () => {
     // 80 characters, not 80 UTF-8 bytes: Rust counts characters, so this must be accepted.
     expect(nameProblem("Ü".repeat(80))).toBeNull();
     expect(nameProblem("Ü".repeat(81))).not.toBeNull();
+    // Rust refuses control characters; a tab pasted into a name must not get a green field.
+    expect(nameProblem("Serie\t7")).not.toBeNull();
+    expect(nameProblem("Serie\u00857")).not.toBeNull();
   });
 });
 

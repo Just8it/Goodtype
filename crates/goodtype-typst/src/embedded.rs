@@ -11,7 +11,6 @@
 //! official namespace, and only when the caller allows it.
 
 use std::collections::HashMap;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
@@ -253,6 +252,14 @@ fn diagnostic_from_source(diagnostic: &SourceDiagnostic) -> Diagnostic {
 /// font file is read from disk the first time a document actually uses it. Nothing about them
 /// leaves the device, and a PDF export embeds what it uses, so it looks the same everywhere.
 /// A notebook opened on a computer without that font falls back to the bundled set.
+pub fn font_families() -> Vec<String> {
+    fonts()
+        .book()
+        .families()
+        .map(|(family, _)| family.to_owned())
+        .collect()
+}
+
 fn fonts() -> &'static FontStore {
     static FONTS: OnceLock<FontStore> = OnceLock::new();
     FONTS.get_or_init(|| {
@@ -377,13 +384,15 @@ impl BlockWorld {
                     .vpath()
                     .realize(&self.root)
                     .map_err(|_| FileError::AccessDenied)?;
-                let canonical = path
-                    .canonicalize()
-                    .map_err(|error| FileError::from_io(error, &path))?;
-                if !canonical.starts_with(&self.root) {
-                    return Err(FileError::AccessDenied);
-                }
-                Ok(canonical)
+                // The same containment check as every other notebook path, not a second copy.
+                goodtype_core::paths::contained(&self.root, &path, "Typst file").map_err(|error| {
+                    match error {
+                        goodtype_core::paths::PathError::Io(error) => {
+                            FileError::from_io(error, &path)
+                        }
+                        _ => FileError::AccessDenied,
+                    }
+                })
             }
         }
     }
@@ -397,16 +406,7 @@ impl BlockWorld {
             return Err(FileError::from_io(too_large(maximum), &path));
         }
         let path = self.on_disk(id)?;
-        let mut bytes = Vec::new();
-        std::fs::File::open(&path)
-            .and_then(|file| {
-                file.take(maximum as u64 + 1).read_to_end(&mut bytes)?;
-                if bytes.len() > maximum {
-                    Err(too_large(maximum))
-                } else {
-                    Ok(())
-                }
-            })
+        let bytes = goodtype_core::storage::files::read_bounded(&path, maximum)
             .map_err(|error| FileError::from_io(error, &path))?;
         let bytes = Bytes::new(bytes);
         self.files.lock().unwrap().insert(id, bytes.clone());

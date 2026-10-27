@@ -1,3 +1,4 @@
+import { translate, type Translator } from "../i18n";
 // The page sizes Goodtype offers, in points.
 //
 // Exact rather than rounded. A4 spent a while as 595x842, which is a tenth of a millimetre short
@@ -23,15 +24,16 @@ export type PageSize = {
 export type Orientation = "portrait" | "landscape";
 
 /** ISO A sizes halve along the long edge, so each is the previous one folded once. */
-export const PAGE_SIZES: PageSize[] = [
+export function pageSizes(t: Translator = translate): PageSize[] { return [
   { id: "a6", name: "A6", detail: "105 × 148 mm", widthPt: 105 * MM, heightPt: 148 * MM },
   { id: "a5", name: "A5", detail: "148 × 210 mm", widthPt: 148 * MM, heightPt: 210 * MM },
   { id: "a4", name: "A4", detail: "210 × 297 mm", widthPt: 210 * MM, heightPt: 297 * MM },
   { id: "a3", name: "A3", detail: "297 × 420 mm", widthPt: 297 * MM, heightPt: 420 * MM },
-  { id: "letter", name: "Letter", detail: "8.5 × 11 in", widthPt: 8.5 * IN, heightPt: 11 * IN },
-  { id: "legal", name: "Legal", detail: "8.5 × 14 in", widthPt: 8.5 * IN, heightPt: 14 * IN },
-  { id: "tabloid", name: "Tabloid", detail: "11 × 17 in", widthPt: 11 * IN, heightPt: 17 * IN },
-];
+  { id: "letter", name: "Letter", detail: t("page.in"), widthPt: 8.5 * IN, heightPt: 11 * IN },
+  { id: "legal", name: "Legal", detail: t("page.in2"), widthPt: 8.5 * IN, heightPt: 14 * IN },
+  { id: "tabloid", name: "Tabloid", detail: t("page.in3"), widthPt: 11 * IN, heightPt: 17 * IN },
+]; }
+export const PAGE_SIZES = pageSizes();
 
 export const DEFAULT_PAGE_SIZE = PAGE_SIZES.find((size) => size.id === "a4") ?? PAGE_SIZES[2];
 
@@ -59,11 +61,11 @@ export function sizeOf(geometry: PageGeometry): { size: PageSize; orientation: O
 }
 
 /** How a geometry reads in the menu, for pages whose size is not one of the listed ones. */
-export function describeGeometry(geometry: PageGeometry): string {
+export function describeGeometry(geometry: PageGeometry, t: Translator = translate): string {
   const known = sizeOf(geometry);
   if (known) {
-    return known.orientation === "landscape" ? `${known.size.name} landscape` : known.size.name;
+    return known.orientation === "landscape" ? t("page.landscape", { "name": known.size.name }) : known.size.name;
   }
   const mm = (value: number) => Math.round(value / MM);
-  return `${mm(geometry.widthPt)} × ${mm(geometry.heightPt)} mm`;
+  return t("workspace.mm3", { "value1": mm(geometry.widthPt), "value2": mm(geometry.heightPt) });
 }

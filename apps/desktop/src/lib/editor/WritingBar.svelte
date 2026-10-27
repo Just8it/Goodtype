@@ -1,8 +1,9 @@
 <script lang="ts">
+  import { t } from "../i18n";
   import type { PresetSummary } from "../page/presets";
   import PresetMenu from "./PresetMenu.svelte";
   import EditorColorButton from "./EditorColorButton.svelte";
-  import { TYPST_SNIPPETS } from "./snippets";
+  import { typstSnippets } from "./snippets";
   import type { WritingCommand } from "./writingCommands";
 
   // One row of things you do to the text. What the panel *is* — its title, and how to close it —
@@ -34,58 +35,58 @@
   }
 </script>
 
-<nav class="writing-bar" aria-label="Page text formatting">
-  <div class="tools" role="group" aria-label="Text style">
-    <button type="button" aria-label="Bold" title="Bold (Ctrl+B)" onclick={() => onCommand("bold")}><b>B</b></button>
-    <button type="button" aria-label="Emphasis" title="Emphasis (Ctrl+I)" onclick={() => onCommand("italic")}><i>I</i></button>
-    <button type="button" aria-label="Underline" title="Underline (Ctrl+U)" onclick={() => onCommand("underline")}><u>U</u></button>
+<nav class="writing-bar" aria-label={$t("editor.pageTextFormatting")}>
+  <div class="tools" role="group" aria-label={$t("editor.textStyle")}>
+    <button type="button" aria-label={$t("editor.bold")} title={$t("editor.boldCtrlB")} onclick={() => onCommand("bold")}><b>B</b></button>
+    <button type="button" aria-label={$t("editor.emphasis")} title={$t("editor.emphasisCtrlI")} onclick={() => onCommand("italic")}><i>I</i></button>
+    <button type="button" aria-label={$t("editor.underline")} title={$t("editor.underlineCtrlU")} onclick={() => onCommand("underline")}><u>U</u></button>
     <EditorColorButton {onCommand} />
   </div>
 
   <span class="rule" aria-hidden="true"></span>
 
-  <div class="tools" role="group" aria-label="Structure">
+  <div class="tools" role="group" aria-label={$t("editor.structure")}>
     <!-- The menu is a native select so the keyboard and screen-reader behaviour comes for free;
          the face on top of it is what the eye gets, because a styled select cannot hide the
          platform's own arrow. -->
     <label class="menu-select heading">
-      <span class="sr-only">Heading level</span>
+      <span class="sr-only">{$t("editor.headingLevel")}</span>
       <span class="face" aria-hidden="true">H<span class="caret">▾</span></span>
-      <select aria-label="Heading level" title="Headings (Ctrl+Alt+1–3)" onchange={choose}>
-        <option value="">Heading level</option>
-        <option value="heading-1">Heading 1</option>
-        <option value="heading-2">Heading 2</option>
-        <option value="heading-3">Heading 3</option>
+      <select aria-label={$t("editor.headingLevel")} title={$t("editor.headingsCtrlAlt")} onchange={choose}>
+        <option value="">{$t("editor.headingLevel")}</option>
+        <option value="heading-1">{$t("editor.heading")}</option>
+        <option value="heading-2">{$t("editor.heading2")}</option>
+        <option value="heading-3">{$t("editor.heading3")}</option>
       </select>
     </label>
     <!-- Drawn as marker-plus-lines rather than the bare "•" and "1." glyphs the comp used: at
          28px a lone dot reads as punctuation, not as "turn these lines into a list". -->
-    <button type="button" aria-label="Bullet list" title="Bullet list" onclick={() => onCommand("bullet-list")}>
+    <button type="button" aria-label={$t("editor.bulletList")} title={$t("editor.bulletList")} onclick={() => onCommand("bullet-list")}>
       <svg viewBox="0 0 24 24" aria-hidden="true">
         <circle class="solid" cx="4.2" cy="6.5" r="1.5" /><circle class="solid" cx="4.2" cy="12" r="1.5" /><circle class="solid" cx="4.2" cy="17.5" r="1.5" />
         <path d="M9.5 6.5h10.5M9.5 12h10.5M9.5 17.5h10.5" />
       </svg>
     </button>
-    <button type="button" aria-label="Numbered list" title="Numbered list" onclick={() => onCommand("numbered-list")}>
+    <button type="button" aria-label={$t("editor.numberedList")} title={$t("editor.numberedList")} onclick={() => onCommand("numbered-list")}>
       <svg viewBox="0 0 24 24" aria-hidden="true">
         <path d="M10 6.5h10M10 12h10M10 17.5h10" />
         <path d="M3.4 4.9h1.3v4M3.2 8.9h2.4" />
         <path d="M6 19.6H3.2c0-1.2 2.5-2 2.5-3.1 0-.8-.8-1.3-2.2-.8" />
       </svg>
     </button>
-    <button class="math" type="button" aria-label="Inline math" title="Inline math" onclick={() => onCommand("inline-math")}>$x$</button>
+    <button class="math" type="button" aria-label={$t("editor.inlineMath")} title={$t("editor.inlineMath")} onclick={() => onCommand("inline-math")}>$x$</button>
   </div>
 
   <div class="spacer"></div>
 
   <label class="menu-select insert">
-    <span class="sr-only">Insert</span>
+    <span class="sr-only">{$t("editor.insert")}</span>
     <span class="face" aria-hidden="true">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>Insert
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>{$t("editor.insert")}
     </span>
-    <select aria-label="Insert Typst content" title="Insert Typst content" onchange={insert}>
-      <option value="">Insert Typst content</option>
-      {#each TYPST_SNIPPETS as snippet (snippet.label)}
+    <select aria-label={$t("editor.insertTypstContent")} title={$t("editor.insertTypstContent")} onchange={insert}>
+      <option value="">{$t("editor.insertTypstContent")}</option>
+      {#each typstSnippets($t) as snippet (snippet.label)}
         <option value={snippet.label}>{snippet.label} — {snippet.detail}</option>
       {/each}
     </select>

@@ -6,7 +6,6 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    fs,
     path::Path,
 };
 
@@ -450,6 +449,7 @@ pub(crate) fn validate_ink_layer(layer: &crate::InkLayer) -> Result<(), StorageE
             || !(0.0..=1.0).contains(&stroke.taper)
             || !(0.0..=1.0).contains(&stroke.opacity)
             || !crate::valid_pattern_spacing(stroke.pattern_spacing)
+            || stroke.trim.is_some_and(|trim| !trim.is_valid())
             || stroke.points.is_empty()
             || !positive(stroke.transform.scale_x)
             || !positive(stroke.transform.scale_y)
@@ -530,7 +530,7 @@ fn validate_files(
                     maximum: role.max_bytes(),
                 });
             }
-            if target.exists() && fs::read(target)? != file.bytes {
+            if target.exists() && !super::files::has_contents(&target, &file.bytes)? {
                 return Err(StorageError::AlreadyExists(file.path.clone()));
             }
         }

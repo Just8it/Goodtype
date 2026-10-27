@@ -2,7 +2,8 @@ use std::path::{Path, PathBuf};
 
 use goodtype_core::{
     PageBackground, PageGeometry, ShapeGeometry, ShapePoint, ShapeStyle, StrokePattern, StrokeTool,
-    outline::{OutlineOptions, OutlinePoint},
+    StrokeTrim,
+    outline::{OutlineOptions, OutlinePoint, OutlineTrim},
     pattern::patterned_outline_points,
     template::{Area, Edge, TemplateElement, TemplateShape, resolve},
 };
@@ -59,6 +60,9 @@ pub struct ExportStroke {
     /// Ink opacity, 0–1. A highlighter sweep is translucent; leaving it out is what made a
     /// highlighter come out solid in the PDF while it was see-through on screen.
     pub opacity: f64,
+    /// Lineage of a fragment left by the precise eraser, so the PDF keeps its original taper and
+    /// pattern phase exactly as the screen does (ADR 0037).
+    pub trim: Option<StrokeTrim>,
     pub points: Vec<ExportPoint>,
     pub transform: ExportTransform,
 }
@@ -214,13 +218,8 @@ fn compile_pdf(
     let mut overlay: Vec<(String, Vec<u8>)> = Vec::new();
     for (page_index, page) in pages.iter().enumerate() {
         if let Some(page_text) = &page.page_typst {
-            let source = match page.shared_style.as_deref() {
-                _ if has_managed_preset(page_text) => page_text_source(page, page_text),
-                Some(style) if !style.is_empty() => {
-                    format!("{style}\n{}", page_text_source(page, page_text))
-                }
-                _ => page_text_source(page, page_text),
-            };
+            let source =
+                prepared_page_text(root, page, page_text).map_err(ExportError::CompilerFailed)?;
             overlay.push((format!("page-text-{page_index}.typ"), source.into_bytes()));
         }
         for (index, block) in page.blocks.iter().enumerate() {
@@ -260,15 +259,10 @@ fn compile_pdf(
     .map_err(ExportError::CompilerFailed)
 }
 
+/// The notebook's filename rule, plus a `.pdf` extension. Shared rather than restated, so an export
+/// cannot be named something the store would refuse — a Windows device name such as `con.pdf`.
 fn validate_output_name(name: &str) -> Result<(), ExportError> {
-    let stem = name
-        .strip_suffix(".pdf")
-        .filter(|stem| !stem.is_empty())
-        .ok_or_else(|| ExportError::InvalidOutputName(name.to_owned()))?;
-    if !stem
-        .bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-    {
+    if !name.ends_with(".pdf") || goodtype_core::paths::validate_filename(name).is_err() {
         return Err(ExportError::InvalidOutputName(name.to_owned()));
     }
     Ok(())
@@ -740,6 +734,20 @@ fn page_text_layout(page: &ExportPage) -> PageTextLayout {
     }
 }
 
+pub fn prepared_page_text(root: &Path, page: &ExportPage, source: &str) -> Result<String, String> {
+    validate_page(root, page).map_err(|error| error.to_string())?;
+    let prepared = crate::page_source::prepare(root, source)?;
+    let body = page_text_source(page, &prepared.body);
+    Ok(match prepared.preamble {
+        Some(template) => format!("{template}\n{body}"),
+        None if !prepared.managed => match page.shared_style.as_deref() {
+            Some(style) if !style.is_empty() => format!("{style}\n{body}"),
+            _ => body,
+        },
+        _ => body,
+    })
+}
+
 fn page_text_source(page: &ExportPage, source: &str) -> String {
     let layout = page_text_layout(page);
     let color = match &page.background {
@@ -772,8 +780,6 @@ fn page_text_source(page: &ExportPage, source: &str) -> String {
         format!("{prelude}\n{source}")
     }
 }
-
-use crate::has_managed_preset;
 
 fn page_text_bounds(area: &Area, width_pt: f64, height_pt: f64) -> Option<PageTextBounds> {
     let bounds = PageTextBounds {
@@ -890,6 +896,12 @@ fn ink_svg_for<'a>(
                 width_pt: stroke.width_pt * scale,
                 pressure: stroke.pressure,
                 taper: stroke.taper,
+                // Stored in the stroke's own points; the silhouette is built after the transform,
+                // so the lineage scales with it exactly as the width does.
+                trim: stroke.trim.map(|trim| OutlineTrim {
+                    start: trim.start_pt * scale,
+                    end: trim.end_pt * scale,
+                }),
             },
             stroke.pattern,
             stroke.pattern_spacing,
@@ -999,7 +1011,20 @@ fn shape_element(shape: &ExportShape) -> String {
     let dash = shape_dash_array(&shape.style)
         .map(|[dash, gap]| {
             let tidy = |value: f64| (value * 1000.0).round() / 1000.0;
-            format!(r#" stroke-dasharray="{} {}""#, tidy(dash), tidy(gap))
+            // A piece cut by the precise eraser continues its original's dashes (ADR 0037).
+            let offset = if shape.style.pattern_offset_pt > 0.0 {
+                format!(
+                    r#" stroke-dashoffset="{}""#,
+                    tidy(shape.style.pattern_offset_pt)
+                )
+            } else {
+                String::new()
+            };
+            format!(
+                r#" stroke-dasharray="{} {}"{offset}"#,
+                tidy(dash),
+                tidy(gap)
+            )
         })
         .unwrap_or_default();
     let common = format!(
@@ -1122,6 +1147,7 @@ mod tests {
                 pressure: false,
                 taper: 0.0,
                 opacity: 1.0,
+                trim: None,
                 points: vec![
                     ExportPoint {
                         x: 10.0,
@@ -1201,6 +1227,7 @@ mod tests {
                 opacity: 1.0,
                 pattern: StrokePattern::Solid,
                 pattern_spacing: 1.0,
+                pattern_offset_pt: 0.0,
             },
         });
         let bytes = render_page_pdf(root.path(), &mixed).unwrap();
@@ -1324,6 +1351,7 @@ mod tests {
                 opacity: 1.0,
                 pattern: StrokePattern::Solid,
                 pattern_spacing: 1.0,
+                pattern_offset_pt: 0.0,
             },
         });
 
@@ -1344,6 +1372,15 @@ mod tests {
         // At 1.6pt: dashes of max(6.4, 6) - 1.6 and gaps of max(4, 3.5) + 1.6, as on screen.
         let dashed = patterned(StrokePattern::Dashed);
         assert!(dashed.contains(r#"stroke-dasharray="4.8 5.6""#), "{dashed}");
+        assert!(!dashed.contains("stroke-dashoffset"), "{dashed}");
+        let mut piece = page.shapes[0].clone();
+        piece.style.pattern = StrokePattern::Dashed;
+        piece.style.pattern_offset_pt = 12.5;
+        let continued = shape_svg(&page, &[&piece]);
+        assert!(
+            continued.contains(r#"stroke-dasharray="4.8 5.6" stroke-dashoffset="12.5""#),
+            "{continued}"
+        );
         let dotted = patterned(StrokePattern::Dotted);
         assert!(
             dotted.contains(r#"stroke-dasharray="0.01 4.4""#),
@@ -1378,6 +1415,7 @@ mod tests {
                 opacity: 1.0,
                 pattern: StrokePattern::Solid,
                 pattern_spacing: 1.0,
+                pattern_offset_pt: 0.0,
             },
         };
 
@@ -1478,6 +1516,54 @@ mod tests {
             (added_rows - added_rows.round()).abs() < 0.001,
             "blocks added {added_rows} rows"
         );
+    }
+
+    #[test]
+    fn preamble_and_function_templates_share_preview_export_and_cover_source() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("styles")).unwrap();
+        let mut page = page();
+        page.blocks.clear();
+        page.strokes.clear();
+        let canonical = "#import \"/styles/a.typ\": preset\n#show: preset.with(rhythm: goodtype_rhythm)\n\n#import \"/styles/a.typ\": custom\n#custom[Hello]";
+        page.page_typst = Some(canonical.to_owned());
+        for template in [
+            "#let custom(body) = strong(body)\n#set text(fill: blue)",
+            "#set page(paper: \"a4\", header: [Document header])\n#let custom(body) = strong(body)",
+            "#let custom(body) = strong(body)\n#let preset(body, rhythm: 16pt) = body",
+        ] {
+            std::fs::write(root.path().join("styles/a.typ"), template).unwrap();
+            for grid in [true, false] {
+                page.page_text_baseline_grid = grid;
+                let prepared = prepared_page_text(root.path(), &page, canonical).unwrap();
+                let preview = crate::compile_block(
+                    root.path(),
+                    &crate::CompileRequest {
+                        source: prepared,
+                        width_pt: page_text_layout(&page).width,
+                        generation: 1,
+                        allow_remote_packages: false,
+                    },
+                )
+                .unwrap();
+                assert!(preview.svg.is_some(), "{:?}", preview.diagnostics);
+                assert!(
+                    render_page_pdf(root.path(), &page)
+                        .unwrap()
+                        .starts_with(b"%PDF-")
+                );
+                assert!(
+                    export_pages(
+                        root.path(),
+                        "template-check.pdf",
+                        std::slice::from_ref(&page),
+                        false
+                    )
+                    .is_ok()
+                );
+            }
+        }
+        assert!(!root.path().join("page-text-0.typ").exists());
     }
 
     /// A template is paper, so it has to be under the ink and reach the page edge — and it has
@@ -1629,7 +1715,13 @@ mod tests {
 
     #[test]
     fn rejects_unsafe_names_paths_and_numbers() {
-        for name in ["../page.pdf", "folder/page.pdf", "page.PDF", ".pdf"] {
+        for name in [
+            "../page.pdf",
+            "folder/page.pdf",
+            "page.PDF",
+            ".pdf",
+            "con.pdf",
+        ] {
             assert!(matches!(
                 validate_output_name(name),
                 Err(ExportError::InvalidOutputName(_))

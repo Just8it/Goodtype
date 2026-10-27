@@ -1,7 +1,8 @@
 <script lang="ts">
+  import { t } from "../i18n";
   import { tick } from "svelte";
   import type { PresetSummary } from "../page/presets";
-  import { DEFAULT_PRESET_PATH, pagePresetOptions, pagePresetState } from "../page/presets";
+  import { DEFAULT_PRESET_PATH, presetPresentation, pagePresetOptions, pagePresetState } from "../page/presets";
 
   // The preset picker used to be a full-width <select> that printed the same list three times —
   // once as a page override, once as a notebook default, once as an import. It is one list now,
@@ -31,18 +32,18 @@
 
   const active = $derived(pagePresetState(source));
   const defaultPreset = $derived(presets.find((preset) => preset.kind === "default"));
-  const pagePresets = $derived(pagePresetOptions(presets));
-  const builtins = $derived(presets.filter((preset) => preset.kind === "builtin"));
+  const pagePresets = $derived(pagePresetOptions(presets).map(preset => presetPresentation(preset, $t)));
+  const builtins = $derived(presets.filter((preset) => preset.kind === "builtin").map(preset => presetPresentation(preset, $t)));
 
   /// A managed page names its preset; anything else says why it cannot be named.
   const label = $derived.by(() => {
-    if (active.kind === "custom") return "Custom source";
-    if (active.kind === "none") return "No preset";
-    if (active.path === DEFAULT_PRESET_PATH) return defaultPreset?.name ?? "Notebook default";
+    if (active.kind === "custom") return $t("editor.customSource");
+    if (active.kind === "none") return $t("editor.noPreset");
+    if (active.path === DEFAULT_PRESET_PATH) return defaultPreset?.name ?? $t("editor.notebookDefault");
     return (
       presets.find((preset) => preset.importPath === active.path)?.name ??
       active.path?.split("/").at(-1)?.replace(/\.typ$/, "") ??
-      "Preset"
+      $t("editor.preset")
     );
   });
 
@@ -61,11 +62,11 @@
             name: preset.name,
             hint: preset.description,
           })),
-          { action: "default:import", name: "Import .typ…", hint: "Use a file of your own" },
+          { action: "default:import", name: $t("editor.importTyp"), hint: $t("editor.useAFileOfYourOwn") },
         ]
       : [
           ...(defaultPreset
-            ? [{ action: `path:${DEFAULT_PRESET_PATH}`, name: defaultPreset.name, hint: "The notebook default" }]
+            ? [{ action: `path:${DEFAULT_PRESET_PATH}`, name: defaultPreset.name, hint: $t("editor.theNotebookDefault") }]
             : []),
           ...pagePresets.map((preset) => ({
             action: preset.importPath ? `path:${preset.importPath}` : `page:${preset.id}`,
@@ -73,11 +74,11 @@
             hint: preset.description,
           })),
           ...(active.kind === "managed" && active.path
-            ? [{ action: `edit:${active.path}`, name: "Edit this template", hint: "Change it; every page using it follows" }]
+            ? [{ action: `edit:${active.path}`, name: $t("editor.editThisTemplate"), hint: $t("editor.changeItEveryPageUsingItFollows") }]
             : []),
-          { action: "page:new", name: "+ New template", hint: "Start one and write it in the editor" },
-          { action: "none", name: "No preset", hint: "Plain Typst, no page template" },
-          { action: "page:import", name: "Import .typ…", hint: "Use a file of your own" },
+          { action: "page:new", name: $t("editor.newTemplate"), hint: $t("editor.startOneAndWriteItInThe") },
+          { action: "none", name: $t("editor.noPreset"), hint: $t("editor.plainTypstNoPageTemplate") },
+          { action: "page:import", name: $t("editor.importTyp"), hint: $t("editor.useAFileOfYourOwn") },
         ],
   );
 
@@ -151,7 +152,7 @@
     disabled={busy}
     aria-haspopup="menu"
     aria-expanded={open}
-    title="Page preset"
+    title={$t("editor.pagePreset")}
     onclick={toggle}
   >
     <span class="dot" class:custom={tone === "custom"} class:off={tone === "off"} aria-hidden="true"></span>
@@ -160,25 +161,25 @@
   </button>
 
   {#if open}
-    <div class="menu" bind:this={list} role="menu" tabindex="-1" aria-label="Page preset" onkeydown={keys}>
-      <div class="scope" role="group" aria-label="Apply to">
+    <div class="menu" bind:this={list} role="menu" tabindex="-1" aria-label={$t("editor.pagePreset")} onkeydown={keys}>
+      <div class="scope" role="group" aria-label={$t("editor.applyTo")}>
         <button
           type="button"
           class="menu-item"
           role="menuitemradio"
           aria-checked={scope === "page"}
           onclick={() => (scope = "page")}
-        >This page</button>
+        >{$t("editor.thisPage")}</button>
         <button
           type="button"
           class="menu-item"
           role="menuitemradio"
           aria-checked={scope === "notebook"}
           onclick={() => (scope = "notebook")}
-        >Whole notebook</button>
+        >{$t("editor.wholeNotebook")}</button>
       </div>
 
-      <ul role="group" aria-label="Presets">
+      <ul role="group" aria-label={$t("editor.presets")}>
         {#each entries as entry (entry.action)}
           <li role="none">
             <button
@@ -200,9 +201,9 @@
 
       <p class="footnote">
         {#if scope === "notebook"}
-          Changes the preset every page inherits{defaultPreset ? `. Now: ${defaultPreset.name}` : ""}.
+          {$t("editor.changesThePresetEveryPageInherits", { "value2": defaultPreset ? $t("editor.currentPreset", { name: defaultPreset.name }) : "" })}
         {:else}
-          Overrides the preset for this page only.
+          {$t("editor.overridesThePresetForThisPageOnly")}
         {/if}
       </p>
     </div>

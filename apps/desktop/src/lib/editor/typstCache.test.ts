@@ -7,6 +7,13 @@ function result(svg: string | null, generation = 1): TypstCompileResult {
 }
 
 describe("typstCache", () => {
+  it("isolates notebook imports and exact layout widths", () => {
+    const source = '#include "notes.typ"';
+    setCachedTypst(source, 200.0001, result("<svg>a</svg>"), "notebook-a");
+    expect(getCachedTypst(source, 200.0001, "notebook-b")).toBeUndefined();
+    expect(getCachedTypst(source, 200.0002, "notebook-a")).toBeUndefined();
+    expect(getCachedTypst(source, 200.0001, "notebook-a")?.svg).toBe("<svg>a</svg>");
+  });
   it("returns a stored compile for the same source and width", () => {
     const source = `= Cached ${Math.random()}`;
     expect(getCachedTypst(source, 200)).toBeUndefined();

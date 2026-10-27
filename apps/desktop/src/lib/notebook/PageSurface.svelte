@@ -1,0 +1,400 @@
+<script lang="ts">
+  import type { PageBackground, ShapeStyle, Stroke, StrokePattern } from "../model";
+  import PaperLayer from "../page/PaperLayer.svelte";
+  import type { StrokePerformance } from "../ink/metrics";
+  import type { TypstCompileResult } from "../editor/typst";
+  import { getCachedTypst } from "../editor/typstCache";
+  import { pagePresetPath } from "../page/presets";
+  import type { TypstCompileRequest } from "../ipc/typst";
+  import {
+    DEFAULT_POINTER_MAPPING,
+    DEFAULT_PRESSURE_CALIBRATION,
+    type InkTool,
+    type PointerMapping,
+    type PressureCalibration,
+  } from "../ink/pipeline";
+  import type { EraserMode, EraserReach } from "../settings";
+  import ImageObject from "./ImageObject.svelte";
+  import InkSurface from "./InkSurface.svelte";
+  import ShapeObject from "./ShapeObject.svelte";
+  import PageText from "./PageText.svelte";
+  import TypstBlock from "./TypstBlock.svelte";
+  import type { ShapeDraft, ShapeKind } from "../shape/geometry";
+  import { topmostShapeAt } from "../shape/hit";
+  import type {
+    BlockView,
+    ImageView,
+    PageTypstView,
+    ShapeEditCommit,
+    ShapeView,
+    TypstTransform,
+  } from "./pageView";
+
+  // The one page renderer. `interactive` is the only difference between the page being edited
+  // and the pages above and below it, so a page keeps its rendered blocks — and its painted
+  // SVGs — when focus moves onto it, instead of being torn down and rebuilt by a second
+  // component.
+  let {
+    blocks = [],
+    pageTypst = null,
+    images = [],
+    shapes = [],
+    results = {},
+    strokes = [],
+    strokePreview = null,
+    newStrokeZIndex = 1_000_001,
+    selectedStrokeIds = [],
+    lassoTargets,
+    onLassoSelect,
+    showSelectionBounds = true,
+    background = { kind: "plain", color: "#ffffff" },
+    pageWidthPt,
+    pageHeightPt,
+    zoom = 1,
+    interactive = false,
+    root = null,
+    inlineEditing = true,
+    sharedStyle = "",
+    pageTextBaselineGrid = true,
+    presetRevision = 0,
+    onRequestEdit,
+    tool = "select",
+    color = "#16212b",
+    widthPt = 2,
+    pressure = true,
+    taper = 0,
+    taperLengthWidths = 3,
+    pattern = "solid",
+    patternSpacing = 1,
+    opacity = 1,
+    straighten = false,
+    shapeKind = "line",
+    shapeStyle = {
+      strokeColor: "#16212b",
+      strokeWidthPt: 2,
+      fillColor: null,
+      opacity: 1,
+    },
+    shapeConstrain = false,
+    drawAndHoldShapes = true,
+    heldLineMinimumPt = 6,
+    eraseRadiusPt = 8,
+    eraserReach = "everything",
+    eraserMode = "stroke",
+    erasable,
+    calibration = DEFAULT_PRESSURE_CALIBRATION,
+    pointerMapping = DEFAULT_POINTER_MAPPING,
+    onEraseEnd,
+    onEraserEngaged,
+    directObjectInput = false,
+    selectedBlockId = null,
+    selectedImageId = null,
+    selectedShapeId = null,
+    shapesGrabbable = true,
+    editingShapeId = null,
+    onCompile,
+    onSourceChange,
+    onTransform,
+    onSelectBlock,
+    onDeselectBlock,
+    onSelectImage,
+    onMoveImage,
+    onScaleImage,
+    onSelectShape,
+    onChangeShape,
+    onEditShape,
+    onEraseShape,
+    onShapesErased,
+    onStrokeFinalized,
+    onShapeFinalized,
+    onInkShapeRecognized,
+    onStrokesChange,
+    onSelectionChange,
+    onStrokeMetrics,
+  }: {
+    blocks?: BlockView[];
+    pageTypst?: PageTypstView | null;
+    images?: ImageView[];
+    shapes?: ShapeView[];
+    results?: Record<string, TypstCompileResult | null>;
+    strokes?: Stroke[];
+    newStrokeZIndex?: number;
+    selectedStrokeIds?: string[];
+    strokePreview?: import("../ink/preview").InkPreview | null;
+    lassoTargets?: import("./lasso").LassoTargets;
+    onLassoSelect?: (polygon: import("../geometry/coordinates").Point[], strokeIds: string[]) => void;
+    showSelectionBounds?: boolean;
+    /** The paper: a flat colour, or a template resolved against this page's geometry. */
+    background?: PageBackground;
+    pageWidthPt: number;
+    pageHeightPt: number;
+    zoom?: number;
+    interactive?: boolean;
+    /** Notebook root, forwarded to the editor for completions. */
+    root?: string | null;
+    /** False while the side view is open: blocks route editing there instead. */
+    inlineEditing?: boolean;
+    sharedStyle?: string;
+    pageTextBaselineGrid?: boolean;
+    presetRevision?: number;
+    onRequestEdit?: (id: string) => void;
+    tool?: InkTool;
+    color?: string;
+    widthPt?: number;
+    /** Nib parameters for the active tool, resolved by the palette and stored on each stroke. */
+    pressure?: boolean;
+    taper?: number;
+    taperLengthWidths?: number;
+    pattern?: StrokePattern;
+    patternSpacing?: number;
+    opacity?: number;
+    straighten?: boolean;
+    shapeKind?: ShapeKind;
+    shapeStyle?: ShapeStyle;
+    shapeConstrain?: boolean;
+    drawAndHoldShapes?: boolean;
+    heldLineMinimumPt?: number;
+    eraseRadiusPt?: number;
+    eraserReach?: EraserReach;
+    eraserMode?: EraserMode;
+    erasable?: (stroke: Stroke) => boolean;
+    calibration?: PressureCalibration;
+    pointerMapping?: PointerMapping;
+    onEraseEnd?: () => void;
+    onEraserEngaged?: () => void;
+    directObjectInput?: boolean;
+    selectedBlockId?: string | null;
+    selectedImageId?: string | null;
+    selectedShapeId?: string | null;
+    /// False while the eraser is out, so it reaches the ink surface under a shape.
+    shapesGrabbable?: boolean;
+    editingShapeId?: string | null;
+    onCompile: (
+      id: string,
+      request: TypstCompileRequest,
+    ) => void;
+    onSourceChange?: (id: string, source: string) => void;
+    onTransform?: (id: string, transform: TypstTransform) => void;
+    onSelectBlock?: (id: string) => void;
+    onDeselectBlock?: () => void;
+    onSelectImage?: (id: string) => void;
+    onMoveImage?: (id: string, position: { x: number; y: number }) => void;
+    onScaleImage?: (id: string, scale: number) => void;
+    onSelectShape?: (id: string) => void;
+    onChangeShape?: (shape: ShapeView, commit?: ShapeEditCommit) => void;
+    onEditShape?: (id: string, editing: boolean) => void;
+    onEraseShape?: (id: string) => void;
+    onShapesErased?: (replaced: ReadonlyMap<string, ShapeView[]>) => void;
+    onStrokeFinalized?: (stroke: Stroke) => void;
+    onShapeFinalized?: (shape: ShapeDraft) => void;
+    onInkShapeRecognized?: (stroke: Stroke, shape: ShapeDraft) => void;
+    onStrokesChange?: (strokes: Stroke[], replaced?: ReadonlyMap<string, string[]>) => void;
+    onSelectionChange?: (ids: string[]) => void;
+    onStrokeMetrics?: (metrics: StrokePerformance) => void;
+  } = $props();
+
+  /**
+   * Shapes as a precise erase is cutting them. Held here rather than in the page's shapes so the
+   * gesture stays local; the pieces become real shapes once, on pen-up.
+   */
+  let shapeErasePreview = $state.raw<ReadonlyMap<string, ShapeView[]> | null>(null);
+  const displayedShapes = $derived(shapeErasePreview
+    ? shapes.flatMap((shape) => shapeErasePreview!.get(shape.id) ?? [shape])
+    : shapes);
+
+  const toPageDelta = (screenDx: number, screenDy: number) => ({
+    x: screenDx / zoom,
+    y: screenDy / zoom,
+  });
+
+  // Editing temporarily lifts the object input surface; committed content otherwise follows the
+  // page's shared visual order.
+  let editingBlockId = $state<string | null>(null);
+</script>
+
+{#snippet pageTextFor(typst: NonNullable<typeof pageTypst>)}
+  {@const templatePath = pagePresetPath(typst.source)}
+  <PageText
+    source={typst.source}
+    compileResult={results[typst.id] ?? null}
+    compileContext={templatePath ? "" : sharedStyle}
+    {background}
+    geometry={{ widthPt: pageWidthPt, heightPt: pageHeightPt }}
+    snapBlocksToGrid={pageTextBaselineGrid}
+    compileDependency={templatePath ? presetRevision : 0}
+    readingOrder={typst.readingOrder}
+    onCompile={(request) => onCompile(typst.id, request)}
+  />
+{/snippet}
+
+<PaperLayer {background} widthPt={pageWidthPt} heightPt={pageHeightPt} {root} {zoom} />
+<div class="page-text-layer">
+  {#if pageTypst}
+    {@render pageTextFor(pageTypst)}
+  {/if}
+</div>
+<div class:interactive class:editing={editingBlockId !== null} class="objects">
+  {#each blocks as block (block.id)}
+    <TypstBlock
+      id={block.id}
+      source={block.source}
+      initialX={block.x}
+      initialY={block.y}
+      initialLayoutWidthPt={block.layoutWidthPt}
+      initialScale={block.scale}
+      rotation={block.rotation ?? 0}
+      zIndex={block.zIndex}
+      readingOrder={block.readingOrder}
+      compileResult={results[block.id] ?? null}
+      cached={getCachedTypst(`${sharedStyle}\n${block.source}`, block.layoutWidthPt, root ?? "") ?? null}
+      compileContext={sharedStyle}
+      {root}
+      selected={interactive && selectedBlockId === block.id}
+      {toPageDelta}
+      {pageWidthPt}
+      {pageHeightPt}
+      {zoom}
+      onSelect={interactive ? () => onSelectBlock?.(block.id) : undefined}
+      onDeselect={interactive ? () => onDeselectBlock?.() : undefined}
+      onCompile={(request) => onCompile(block.id, { ...request, sharedStyle })}
+      onSourceChange={(source) => onSourceChange?.(block.id, source)}
+      onTransform={(transform) => onTransform?.(block.id, transform)}
+      onEditingChange={(editing) =>
+        (editingBlockId = editing ? block.id : editingBlockId === block.id ? null : editingBlockId)}
+      inlineEditing={interactive && inlineEditing}
+      onRequestEdit={() => onRequestEdit?.(block.id)}
+    />
+  {/each}
+  {#each images as image (image.id)}
+    <ImageObject
+      id={image.id}
+      src={image.url}
+      alt={image.alt}
+      x={image.x}
+      y={image.y}
+      widthPt={image.widthPt}
+      heightPt={image.heightPt}
+      scale={image.scale}
+      rotation={image.rotation ?? 0}
+      zIndex={image.zIndex}
+      readingOrder={image.readingOrder}
+      selected={interactive && selectedImageId === image.id}
+      {toPageDelta}
+      {pageWidthPt}
+      {pageHeightPt}
+      onSelect={interactive ? () => onSelectImage?.(image.id) : undefined}
+      onMove={(position) => onMoveImage?.(image.id, position)}
+      onScale={(scale) => onScaleImage?.(image.id, scale)}
+    />
+  {/each}
+  {#each displayedShapes as shape (shape.id)}
+    <ShapeObject
+      {shape}
+      grabbable={interactive && shapesGrabbable}
+      selected={interactive && selectedShapeId === shape.id}
+      editing={interactive && editingShapeId === shape.id}
+      {pageWidthPt}
+      {pageHeightPt}
+      {zoom}
+      {toPageDelta}
+      onSelect={interactive ? () => onSelectShape?.(shape.id) : undefined}
+      onChange={interactive ? (next, commit) => onChangeShape?.(next, commit) : undefined}
+      onEditingChange={interactive ? (editing) => onEditShape?.(shape.id, editing) : undefined}
+    />
+  {/each}
+</div>
+<div class:object-input={directObjectInput} class="ink-layer">
+  <InkSurface
+    {strokePreview}
+    {strokes}
+    {newStrokeZIndex}
+    objectZIndices={[
+      ...blocks.map((block) => block.zIndex),
+      ...images.map((image) => image.zIndex),
+      ...displayedShapes.map((shape) => shape.zIndex),
+      ...(pageTypst ? [0] : []),
+    ]}
+    {selectedStrokeIds}
+    {lassoTargets}
+    {onLassoSelect}
+    {showSelectionBounds}
+    {pageWidthPt}
+    {pageHeightPt}
+    {zoom}
+    {tool}
+    {color}
+    {widthPt}
+    {pressure}
+    {taper}
+    {taperLengthWidths}
+    {pattern}
+    {patternSpacing}
+    {opacity}
+    {straighten}
+    {shapeKind}
+    {shapeStyle}
+    {shapeConstrain}
+    {drawAndHoldShapes}
+    {heldLineMinimumPt}
+    {eraseRadiusPt}
+    {eraserReach}
+    {eraserMode}
+    {erasable}
+    {calibration}
+    {pointerMapping}
+    shapeAt={interactive
+      ? (point, reachPt) => {
+          const found = topmostShapeAt(shapes, point, reachPt);
+          return found && { id: found.id, zIndex: found.zIndex };
+        }
+      : undefined}
+    onEraseShape={interactive ? (id) => onEraseShape?.(id) : undefined}
+    shapes={interactive ? shapes : undefined}
+    onShapeErasePreview={(preview) => (shapeErasePreview = preview)}
+    onShapesErased={interactive ? (replaced) => onShapesErased?.(replaced) : undefined}
+    onEraseEnd={interactive ? () => onEraseEnd?.() : undefined}
+    onEraserEngaged={interactive ? () => onEraserEngaged?.() : undefined}
+    onStrokeFinalized={(stroke) => onStrokeFinalized?.(stroke)}
+    onShapeFinalized={(shape) => onShapeFinalized?.(shape)}
+    onInkShapeRecognized={(stroke, shape) => onInkShapeRecognized?.(stroke, shape)}
+    onStrokesChange={(next, replaced) => onStrokesChange?.(next, replaced)}
+    onSelectionChange={(next) => onSelectionChange?.(next)}
+    onStrokeMetrics={(metrics) => onStrokeMetrics?.(metrics)}
+  />
+</div>
+
+<style>
+  .page-text-layer,
+  .objects,
+  .ink-layer {
+    position: absolute;
+    inset: 0;
+  }
+
+  .page-text-layer {
+    z-index: 0;
+    overflow: hidden;
+    pointer-events: none;
+  }
+
+  .objects {
+    pointer-events: none;
+  }
+
+  /* Editing must receive input even when this block is normally below committed ink. */
+  .objects.editing {
+    z-index: 2147483647;
+  }
+
+  /* Only the page being edited hands pointer input to its objects; neighbours stay readable
+     but inert, so a stray tap near the edge of the viewport cannot drag a block on a page the
+     writer is not looking at. Ink stays live on every page. */
+  .objects.interactive :global(.typst-block),
+  .objects.interactive :global(.image-object) {
+    pointer-events: auto;
+  }
+
+  .ink-layer.object-input {
+    pointer-events: none;
+  }
+</style>

@@ -57,11 +57,12 @@ pub fn search_notebook(selected_root: &Path, query: &str) -> Result<Vec<SearchHi
             let Some(position) = lowered.find(&needle) else {
                 continue;
             };
+            let (position, length) = original_match(&source, position, needle.len());
             hits.push(SearchHit {
                 page_id: page.id.clone(),
                 page_number: page_index + 1,
                 object_id: object.fields().id.clone(),
-                excerpt: excerpt_around(&source, position, needle.len()),
+                excerpt: excerpt_around(&source, position, length),
             });
             if hits.len() >= MAX_SEARCH_RESULTS {
                 return Ok(hits);
@@ -71,10 +72,29 @@ pub fn search_notebook(selected_root: &Path, query: &str) -> Result<Vec<SearchHi
     Ok(hits)
 }
 
+fn original_match(source: &str, start: usize, length: usize) -> (usize, usize) {
+    let mut lowered_offset = 0;
+    let mut original_start = None;
+    for (offset, character) in source.char_indices() {
+        if original_start.is_none() && lowered_offset >= start {
+            original_start = Some(offset);
+        }
+        lowered_offset += character.to_lowercase().map(char::len_utf8).sum::<usize>();
+        if lowered_offset > start && original_start.is_none() {
+            original_start = Some(offset);
+        }
+        if lowered_offset >= start + length {
+            let from = original_start.unwrap_or(offset);
+            return (from, offset + character.len_utf8() - from);
+        }
+    }
+    let from = original_start.unwrap_or(source.len());
+    (from, source.len() - from)
+}
+
 fn excerpt_around(source: &str, position: usize, length: usize) -> String {
     const CONTEXT: usize = 40;
-    // The match position was found in a lowercased copy whose byte offsets can differ from the
-    // original for non-ASCII text; clamp and slice only at original char boundaries.
+    // The match has been mapped back to the original UTF-8 offsets.
     let position = position.min(source.len());
     let start = source
         .char_indices()
@@ -96,6 +116,30 @@ fn excerpt_around(source: &str, position: usize, length: usize) -> String {
 #[cfg(test)]
 mod tests {
     use crate::storage::{fixtures::*, *};
+
+    #[test]
+    fn expanded_lowercase_offsets_keep_the_match_in_the_original_excerpt() {
+        for (source, needle) in [
+            (
+                format!("{} TARGET {}", "İ".repeat(100), "z".repeat(100)),
+                "target",
+            ),
+            ("abc İ XYZ".into(), "i"),
+            ("abc ΣΟΣ end".into(), "σος"),
+        ] {
+            let position = source.to_lowercase().find(needle).unwrap();
+            let (start, length) = super::original_match(&source, position, needle.len());
+            assert!(
+                source[start..start + length]
+                    .to_lowercase()
+                    .contains(needle)
+            );
+            assert!(
+                super::excerpt_around(&source, start, length)
+                    .contains(&source[start..start + length])
+            );
+        }
+    }
 
     #[test]
     fn searches_typst_sources_across_pages() {

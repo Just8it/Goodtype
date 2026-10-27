@@ -1,8 +1,10 @@
 <script lang="ts">
-  import { tick } from "svelte";
+  import { onMount, tick } from "svelte";
+  import { typstFontFamilies } from "../ipc/typst";
+  import { t } from "../i18n";
   import type { AppSettings } from "../settings";
   import {
-    SETTING_GROUPS,
+    settingGroups,
     searchSettings,
     type SettingActions,
     type SettingGroup,
@@ -28,29 +30,41 @@
     actions,
     onChange,
     onClose,
+    selectedBlockFont = null,
+    onFontChange,
   }: {
     settings: AppSettings;
     /** What the entries that *do* something rather than store something should call. */
     actions: SettingActions;
     onChange: (settings: AppSettings) => void;
     onClose: () => void;
+    selectedBlockFont?: string | null;
+    onFontChange?: (font: string) => void;
   } = $props();
 
-  let groupId = $state(SETTING_GROUPS[0].id);
+  let fonts = $state<string[]>(["DejaVu Sans Mono", "Libertinus Serif", "New Computer Modern"]);
+  let fontLoadFailed = $state(false);
+  onMount(() => {
+    if (!("__TAURI_INTERNALS__" in window)) return;
+    void typstFontFamilies().then(value => { fonts = value; }).catch(() => { fontLoadFailed = true; });
+  });
+  const groups = $derived(settingGroups($t, [...new Set([...fonts, settings.inlineTextFont, selectedBlockFont].filter((font): font is string => Boolean(font)))]));
+  let groupId = $state("appearance");
   let query = $state("");
   let panel = $state<HTMLElement>();
   let field = $state<HTMLInputElement>();
 
   const group = $derived<SettingGroup>(
-    SETTING_GROUPS.find((entry) => entry.id === groupId) ?? SETTING_GROUPS[0],
+    groups.find((entry) => entry.id === groupId) ?? groups[0],
   );
-  const hits = $derived(searchSettings(query));
+  const hits = $derived(searchSettings(query, groups));
   const searching = $derived(query.trim().length > 0);
 
   function apply(item: SettingItem, value: boolean | string | number) {
+    if (item.id === "inlineTextFont" && onFontChange) { onFontChange(value as string); return; }
     const control = item.control;
     if (control.kind === "toggle") onChange(control.write(settings, value as boolean));
-    else if (control.kind === "choice") onChange(control.write(settings, value as string));
+    else if (control.kind === "choice" || control.kind === "select") onChange(control.write(settings, value as string));
     else if (control.kind === "slider") onChange(control.write(settings, value as number));
   }
 
@@ -131,7 +145,16 @@
         >{option.label}</button>
       {/each}
     </div>
-  {:else}
+  {:else if item.control.kind === "select"}
+    <span class="select-shell">
+    <select class="setting-select" aria-label={item.label} value={item.id === "inlineTextFont" ? selectedBlockFont ?? settings.inlineTextFont : item.control.read(settings)}
+      onchange={event => apply(item, event.currentTarget.value)}>
+      {#each item.control.options as option (option.value)}<option value={option.value}>{option.label}</option>{/each}
+    </select>
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5" /></svg>
+    </span>
+    {#if item.id === "inlineTextFont" && fontLoadFailed}<span class="hint" role="status">{$t("settings.fontListUnavailable")}</span>{/if}
+  {:else if item.control.kind === "slider"}
     {@const value = item.control.read(settings)}
     <div class="slider">
       <input
@@ -159,7 +182,7 @@
   </div>
 {/snippet}
 
-<div class="panel-scrim" role="presentation">
+<div class="panel-scrim" role="presentation" data-preserve-selection>
   <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
   <div
     bind:this={panel}
@@ -167,13 +190,13 @@
     role="dialog"
     aria-modal="true"
     tabindex="-1"
-    aria-label="Settings"
+    aria-label={$t("library.settings")}
     onkeydown={keydown}
   >
     <header>
       <div class="subject">
-        <span class="eyebrow">Local preferences</span>
-        <strong>Settings</strong>
+        <span class="eyebrow">{$t("workspace.localPreferences")}</span>
+        <strong>{$t("library.settings")}</strong>
       </div>
 
       <label class="search">
@@ -182,13 +205,13 @@
           bind:this={field}
           bind:value={query}
           type="search"
-          placeholder="Search settings"
-          aria-label="Search settings"
+          placeholder={$t("workspace.searchSettings")}
+          aria-label={$t("workspace.searchSettings")}
           spellcheck="false"
         />
       </label>
 
-      <button type="button" class="close" aria-label="Close settings" onclick={onClose}>
+      <button type="button" class="close" aria-label={$t("workspace.closeSettings")} onclick={onClose}>
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18" /></svg>
       </button>
     </header>
@@ -196,8 +219,8 @@
     <div class="body">
       <!-- Categories rather than a longer column: reaching a preference should not mean
            scrolling past every preference that was added before it. -->
-      <div class="nav" role="tablist" aria-label="Setting categories" aria-orientation="vertical">
-        {#each SETTING_GROUPS as entry (entry.id)}
+      <div class="nav" role="tablist" aria-label={$t("workspace.settingCategories")} aria-orientation="vertical">
+        {#each groups as entry (entry.id)}
           <button
             type="button"
             role="tab"
@@ -220,7 +243,7 @@
       <div class="pane">
         {#if searching}
           <div class="pane-head">
-            <h2>{hits.length} {hits.length === 1 ? "result" : "results"}</h2>
+            <h2>{$t("counts.results", { count: hits.length })}</h2>
           </div>
           {#if hits.length}
             <div class="settings">
@@ -230,8 +253,7 @@
             </div>
           {:else}
             <p class="empty">
-              Nothing matches &ldquo;{query}&rdquo;. Nib, width and colour are on the palette
-              rather than in here.
+              {$t("workspace.nothingMatchesNibWidthAndColourAre", { "query": query })}
             </p>
           {/if}
         {:else}
@@ -251,6 +273,10 @@
 </div>
 
 <style>
+  .select-shell { position: relative; display: inline-flex; width: min(360px, 100%); }
+  .setting-select { width: 100%; height: var(--control); padding: 0 32px 0 10px; border: 0; border-radius: var(--radius); background: var(--wash); color: var(--text); color-scheme: dark; font: inherit; font-size: var(--text-md); appearance: none; }
+  .setting-select:focus-visible { outline: 2px solid var(--blueprint); outline-offset: 1px; }
+  .select-shell svg { position: absolute; top: 50%; right: 8px; width: var(--icon-dense); height: var(--icon-dense); transform: translateY(-50%); fill: none; stroke: var(--muted); stroke-width: var(--stroke-dense); stroke-linecap: round; stroke-linejoin: round; pointer-events: none; }
   .panel-scrim {
     position: fixed;
     z-index: 80;

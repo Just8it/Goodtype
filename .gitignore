@@ -18,3 +18,7 @@ node_modules/
 
 # Machine-local assistant permissions; never part of the product configuration.
 /.claude/settings.local.json
+
+# Generated local browser checks, source snapshots and dev-launch overrides.
+/output/
+/.playwright-cli/

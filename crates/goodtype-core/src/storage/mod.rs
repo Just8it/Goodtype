@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{InkLayer, NotebookManifest, Page};
 
+mod delta;
 pub mod files;
 mod history;
 mod pages;
@@ -25,6 +26,7 @@ mod write;
 mod fixtures;
 
 pub use crate::object::{MAX_IMAGE_BYTES, MAX_PDF_BYTES};
+pub use delta::{PageDelta, commit_page_delta};
 pub use history::{
     HistoryResult, NotebookHistory, commit_notebook, focus_page, observe_notebook, observe_page,
     redo_notebook, undo_notebook,
@@ -41,8 +43,8 @@ pub use recovery::{
 pub use search::{SearchHit, search_notebook};
 pub(crate) use validate::validate_ink_layer;
 pub use write::{
-    list_typst_styles, read_pdf_reference, remove_typst_style, store_pasted_image,
-    store_pdf_reference, write_typst_style,
+    install_typst_style, list_typst_styles, read_pdf_reference, remove_typst_style,
+    store_pasted_image, store_pdf_reference, update_typst_style, write_typst_style,
 };
 
 /// The store's size budget, in one place.
@@ -52,7 +54,7 @@ pub use write::{
 /// `MAX_INK_POINTS_PER_LAYER` — the limit actually enforced before a write — with
 /// `MAX_INK_BYTES` only having to stay above what that many quantized samples serialize to.
 pub(crate) const MAX_JSON_BYTES: usize = 8 * 1024 * 1024;
-pub(crate) const MAX_INK_BYTES: usize = 64 * 1024 * 1024;
+pub const MAX_INK_BYTES: usize = 64 * 1024 * 1024;
 pub(crate) const MAX_INK_STROKES_PER_LAYER: usize = 20_000;
 pub(crate) const MAX_INK_POINTS_PER_LAYER: usize = 750_000;
 pub(crate) const MAX_RECOVERY_BYTES: usize = 192 * 1024 * 1024;
@@ -97,6 +99,9 @@ pub enum StorageError {
     InvalidPath(String),
     InvalidNotebook(String),
     AlreadyExists(String),
+    ExternalChange(String),
+    RevisionConflict { expected: u64, found: u64 },
+    RecoveryLimit { maximum: usize },
     ImageTooLarge { size: usize, maximum: usize },
 }
 
@@ -108,6 +113,21 @@ impl fmt::Display for StorageError {
             Self::InvalidPath(path) => write!(formatter, "invalid notebook path: {path}"),
             Self::InvalidNotebook(message) => write!(formatter, "invalid notebook: {message}"),
             Self::AlreadyExists(path) => write!(formatter, "file already exists: {path}"),
+            Self::ExternalChange(details) => {
+                write!(formatter, "external change detected; {details}")
+            }
+            Self::RevisionConflict { expected, found } => {
+                write!(
+                    formatter,
+                    "revision conflict: expected {expected}, found {found}"
+                )
+            }
+            Self::RecoveryLimit { maximum } => {
+                write!(
+                    formatter,
+                    "recovery contains {maximum} unresolved candidates"
+                )
+            }
             Self::ImageTooLarge { size, maximum } => {
                 write!(formatter, "image is {size} bytes; maximum is {maximum}")
             }

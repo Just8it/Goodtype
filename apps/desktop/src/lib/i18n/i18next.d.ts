@@ -1,0 +1,10 @@
+import type { en } from "./en";
+
+declare module "i18next" {
+  interface CustomTypeOptions {
+    defaultNS: "translation";
+    returnNull: false;
+    strictKeyChecks: true;
+    resources: { translation: typeof en };
+  }
+}

@@ -1,4 +1,4 @@
-use std::{fs, path::Path};
+use std::path::Path;
 
 use goodtype_core::storage;
 use serde::{Deserialize, Serialize};
@@ -126,25 +126,7 @@ fn safe_stem(name: &str) -> String {
         .file_stem()
         .and_then(|value| value.to_str())
         .unwrap_or(name);
-    let mut stem = name
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() {
-                character.to_ascii_lowercase()
-            } else {
-                '-'
-            }
-        })
-        .collect::<String>();
-    while stem.contains("--") {
-        stem = stem.replace("--", "-");
-    }
-    stem = stem.trim_matches('-').chars().take(48).collect();
-    if stem.is_empty() {
-        "preset".into()
-    } else {
-        stem
-    }
+    goodtype_core::paths::safe_stem(name, 48, "preset").to_ascii_lowercase()
 }
 
 fn page_filename(choice: &PresetChoice, source_text: &str) -> Result<String, String> {
@@ -159,12 +141,31 @@ fn page_filename(choice: &PresetChoice, source_text: &str) -> Result<String, Str
 pub(crate) fn install_default(
     root: &Path,
     choice: &PresetChoice,
+    expected_source: Option<&str>,
 ) -> Result<Option<PresetSummary>, String> {
     validate(choice)?;
     let Some((name, source)) = source(choice)? else {
         return Ok(None);
     };
-    storage::write_typst_style(root, "default.typ", source).map_err(|error| error.to_string())?;
+    let current = storage::list_typst_styles(root)
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .find(|file| file.path == "styles/default.typ");
+    if current.as_ref().map(|file| file.bytes.as_slice()) != expected_source.map(str::as_bytes) {
+        return Err(storage::StorageError::ExternalChange("styles/default.typ".into()).to_string());
+    }
+    if let Some(previous) = expected_source {
+        if previous != source {
+            let digest = format!("{:x}", Sha256::digest(previous.as_bytes()));
+            storage::install_typst_style(root, &format!("default-saved-{digest}.typ"), previous)
+                .map_err(|error| error.to_string())?;
+        }
+        storage::update_typst_style(root, "default.typ", source, previous)
+            .map_err(|error| error.to_string())?;
+    } else {
+        storage::install_typst_style(root, "default.typ", source)
+            .map_err(|error| error.to_string())?;
+    }
     Ok(Some(PresetSummary {
         id: "default".into(),
         name: name.into(),
@@ -231,25 +232,29 @@ pub async fn list_typst_presets(
 }
 
 #[tauri::command]
-pub async fn pick_typst_preset(app: tauri::AppHandle) -> Result<Option<PresetChoice>, String> {
+pub async fn pick_typst_preset(
+    app: tauri::AppHandle,
+    ui_language: Option<String>,
+) -> Result<Option<PresetChoice>, String> {
     let Some(picked) = app
         .dialog()
         .file()
-        .add_filter("Typst preset", &["typ"])
+        .set_title(crate::settings::dialog_label(
+            ui_language.as_deref(),
+            "Import Typst preset",
+            "Typst-Vorlage importieren",
+        ))
+        .add_filter(
+            crate::settings::dialog_label(ui_language.as_deref(), "Typst preset", "Typst-Vorlage"),
+            &["typ"],
+        )
         .blocking_pick_file()
     else {
         return Ok(None);
     };
     let path = picked.into_path().map_err(|error| error.to_string())?;
-    let metadata = fs::metadata(&path).map_err(|error| error.to_string())?;
-    if metadata.len() > goodtype_typst::MAX_SOURCE_BYTES as u64 {
-        return Err(format!(
-            "Preset is {} bytes; maximum is {}",
-            metadata.len(),
-            goodtype_typst::MAX_SOURCE_BYTES
-        ));
-    }
-    let bytes = fs::read(&path).map_err(|error| error.to_string())?;
+    let bytes = crate::store::read_bounded(&path, goodtype_typst::MAX_SOURCE_BYTES)
+        .map_err(|error| format!("Preset: {error}"))?;
     let source = String::from_utf8(bytes).map_err(|_| "Preset must be UTF-8".to_owned())?;
     goodtype_typst::validate_preset_source(&source)?;
     let name = path
@@ -270,14 +275,17 @@ pub async fn validate_typst_preset(choice: PresetChoice) -> Result<(), String> {
 #[tauri::command]
 pub async fn set_default_typst_preset(
     roots: tauri::State<'_, AllowedRoots>,
+    histories: tauri::State<'_, crate::notebook::NotebookHistories>,
     tinymist: tauri::State<'_, Tinymist>,
     root: String,
     choice: PresetChoice,
+    expected_source: Option<String>,
 ) -> Result<Option<PresetSummary>, String> {
-    let root = ensure_allowed(&roots, &root)?;
-    let result = tauri::async_runtime::spawn_blocking(move || install_default(&root, &choice))
-        .await
-        .map_err(|error| error.to_string())??;
+    let result = crate::notebook::on_notebook(&roots, &histories, root, move |root, _| {
+        install_default(root, &choice, expected_source.as_deref()).map_err(Into::into)
+    })
+    .await
+    .map_err(|error| error.to_string())?;
     tinymist.reset();
     Ok(result)
 }
@@ -285,20 +293,20 @@ pub async fn set_default_typst_preset(
 #[tauri::command]
 pub async fn install_page_typst_preset(
     roots: tauri::State<'_, AllowedRoots>,
+    histories: tauri::State<'_, crate::notebook::NotebookHistories>,
     tinymist: tauri::State<'_, Tinymist>,
     root: String,
     choice: PresetChoice,
 ) -> Result<Option<PresetSummary>, String> {
-    let root = ensure_allowed(&roots, &root)?;
-    let summary = tauri::async_runtime::spawn_blocking(move || {
+    let summary = crate::notebook::on_notebook(&roots, &histories, root, move |root, _| {
         validate(&choice)?;
         let Some((name, source_text)) = source(&choice)? else {
             return Ok(None);
         };
         let filename = page_filename(&choice, source_text)?;
-        let path = storage::write_typst_style(&root, &filename, source_text)
+        let path = storage::install_typst_style(root, &filename, source_text)
             .map_err(|error| error.to_string())?;
-        Ok::<_, String>(Some(PresetSummary {
+        Ok(Some(PresetSummary {
             id: path.clone(),
             name: name.into(),
             description: "Page override".into(),
@@ -307,7 +315,7 @@ pub async fn install_page_typst_preset(
         }))
     })
     .await
-    .map_err(|error| error.to_string())??;
+    .map_err(|error| error.to_string())?;
     tinymist.reset();
     Ok(summary)
 }
@@ -378,12 +386,12 @@ fn next_template_filename(existing: &[String]) -> String {
 #[tauri::command]
 pub async fn create_typst_preset(
     roots: tauri::State<'_, AllowedRoots>,
+    histories: tauri::State<'_, crate::notebook::NotebookHistories>,
     tinymist: tauri::State<'_, Tinymist>,
     root: String,
 ) -> Result<PresetSummary, String> {
-    let root = ensure_allowed(&roots, &root)?;
-    let summary = tauri::async_runtime::spawn_blocking(move || {
-        let existing = storage::list_typst_styles(&root)
+    let summary = crate::notebook::on_notebook(&roots, &histories, root, move |root, _| {
+        let existing = storage::list_typst_styles(root)
             .map_err(|error| error.to_string())?
             .into_iter()
             .map(|file| file.path.replace('\\', "/"))
@@ -391,9 +399,9 @@ pub async fn create_typst_preset(
         let filename = next_template_filename(&existing);
         let name = name_from_filename(&filename);
         let source = format!("// Name: {name}\n{STARTER}");
-        let path = storage::write_typst_style(&root, &filename, &source)
+        let path = storage::install_typst_style(root, &filename, &source)
             .map_err(|error| error.to_string())?;
-        Ok::<_, String>(PresetSummary {
+        Ok(PresetSummary {
             id: path.clone(),
             name,
             description: "Notebook preset".into(),
@@ -402,7 +410,7 @@ pub async fn create_typst_preset(
         })
     })
     .await
-    .map_err(|error| error.to_string())??;
+    .map_err(|error| error.to_string())?;
     tinymist.reset();
     Ok(summary)
 }
@@ -434,19 +442,20 @@ pub async fn read_typst_preset(
 #[tauri::command]
 pub async fn save_typst_preset(
     roots: tauri::State<'_, AllowedRoots>,
+    histories: tauri::State<'_, crate::notebook::NotebookHistories>,
     root: String,
     path: String,
     source: String,
+    expected_source: String,
 ) -> Result<(), String> {
-    let root = ensure_allowed(&roots, &root)?;
     let filename = style_filename(&path)?;
-    tauri::async_runtime::spawn_blocking(move || {
-        storage::write_typst_style(&root, &filename, &source)
+    crate::notebook::on_notebook(&roots, &histories, root, move |root, _| {
+        storage::update_typst_style(root, &filename, &source, &expected_source)
             .map(|_| ())
-            .map_err(|error| error.to_string())
+            .map_err(Into::into)
     })
     .await
-    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())
 }
 
 #[cfg(test)]
@@ -479,7 +488,7 @@ mod tests {
             name: "broken.typ".into(),
             source: "#let not_a_preset = 1".into(),
         };
-        assert!(install_default(root.path(), &choice).is_err());
+        assert!(install_default(root.path(), &choice, None).is_err());
         assert!(!root.path().join("styles/default.typ").exists());
     }
 
@@ -491,6 +500,7 @@ mod tests {
             &PresetChoice::Builtin {
                 id: "compact-stem".into(),
             },
+            None,
         )
         .unwrap();
         let result = goodtype_typst::compile_block(
@@ -556,5 +566,56 @@ mod tests {
         assert!(style_filename("/blocks/page.typ").is_err());
         assert!(style_filename("/styles/../goodtype.json").is_err());
         assert!(style_filename("/styles/sub/x.typ").is_err());
+    }
+
+    #[test]
+    fn replacing_default_preserves_the_edited_source_and_rejects_stale_choices() {
+        let root = tempfile::tempdir().unwrap();
+        let edited = "// Name: My handwritten template\n#set text(size: 13pt)";
+        storage::write_typst_style(root.path(), "default.typ", edited).unwrap();
+        let choice = PresetChoice::Builtin {
+            id: "clean-notes".into(),
+        };
+        assert!(install_default(root.path(), &choice, None).is_err());
+        assert!(install_default(root.path(), &choice, Some("stale")).is_err());
+        assert_eq!(storage::list_typst_styles(root.path()).unwrap().len(), 1);
+        install_default(root.path(), &choice, Some(edited)).unwrap();
+        let saved = storage::list_typst_styles(root.path()).unwrap();
+        assert_eq!(saved.len(), 2);
+        assert!(
+            saved
+                .iter()
+                .any(|file| file.path.starts_with("styles/default-saved-")
+                    && file.bytes == edited.as_bytes())
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("styles/default.typ")).unwrap(),
+            CLEAN_NOTES
+        );
+        // Reselecting the same preset neither overwrites a backup nor adds another one.
+        install_default(root.path(), &choice, Some(CLEAN_NOTES)).unwrap();
+        assert_eq!(storage::list_typst_styles(root.path()).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_backup_collision_preserves_both_existing_files() {
+        let root = tempfile::tempdir().unwrap();
+        let previous = "#set text(size: 13pt)";
+        storage::write_typst_style(root.path(), "default.typ", previous).unwrap();
+        let digest = format!("{:x}", Sha256::digest(previous.as_bytes()));
+        let backup = format!("default-saved-{digest}.typ");
+        storage::write_typst_style(root.path(), &backup, "edited backup").unwrap();
+        let choice = PresetChoice::Builtin {
+            id: "clean-notes".into(),
+        };
+        assert!(install_default(root.path(), &choice, Some(previous)).is_err());
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("styles/default.typ")).unwrap(),
+            previous
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("styles").join(backup)).unwrap(),
+            "edited backup"
+        );
     }
 }

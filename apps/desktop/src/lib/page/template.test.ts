@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import cases from "../../../../../fixtures/templates/resolved.json";
 import type { PageGeometry, PageTemplate } from "../model";
-import { resolveTemplate, templateSvg, type TemplateShape } from "./template";
+import { MAX_SHAPES, resolveTemplate, templatePreviewSvg, templateSvg, type TemplateShape } from "./template";
+import { render } from "svelte/server";
+import NotebookCover from "../library/NotebookCover.svelte";
 import { PAPER_TONES, templateGroups } from "./templates";
 
 type Case = {
@@ -12,6 +14,50 @@ type Case = {
 };
 
 describe("template resolution", () => {
+  const geometry = { widthPt: 100, heightPt: 100 };
+  const area = { topPt: 0, rightPt: 0, bottomPt: 0, leftPt: 0 };
+  const blank: PageTemplate = { id: "custom", name: "Custom", backgroundColor: "#fFfFfF80", elements: [] };
+
+  it.each([
+    '#ffffff"/><style>body{opacity:0}</style><rect fill="',
+    '#ffffff" onload="alert(1)',
+    '&quot;/><foreignObject><form></form></foreignObject>',
+    'url(https://example.invalid/paint.svg#x)',
+  ])("refuses untrusted SVG paints in backgrounds, lines, dots, and major rules: %s", (payload) => {
+    const templates: PageTemplate[] = [
+      { ...blank, backgroundColor: payload },
+      { ...blank, elements: [{ kind: "horizontal_lines", area, spacingPt: 10, color: payload, weightPt: 1 }] },
+      { ...blank, elements: [{ kind: "dots", area, spacingPt: 10, color: payload, radiusPt: 1 }] },
+      { ...blank, elements: [{ kind: "grid", area, spacingPt: 10, color: "#abcdef", weightPt: 1, major: { every: 2, color: payload, weightPt: 2 } }] },
+    ];
+    for (const template of templates) {
+      for (const draw of [templateSvg, templatePreviewSvg]) expect(draw(template, geometry)).toBe("");
+      const { body } = render(NotebookCover, { props: {
+        paper: { geometry, background: { kind: "template", template } }, path: null, widthPx: 100,
+      } });
+      expect(body).not.toMatch(/<(?:style|form|foreignObject)\b|onload="alert/);
+    }
+  });
+
+  it("retains canonical mixed-case and alpha paints in page and preview markup", () => {
+    const template: PageTemplate = { ...blank, elements: [{ kind: "horizontal_lines", area, spacingPt: 10, color: "#AbCdEf", weightPt: 1 }] };
+    for (const draw of [templateSvg, templatePreviewSvg]) {
+      const svg = draw(template, geometry);
+      expect(svg).toContain('fill="#fFfFfF80"');
+      expect(svg).toContain('stroke="#AbCdEf"');
+    }
+    expect(templatePreviewSvg(template, geometry)).toContain('viewBox="0 0 45 45"');
+  });
+
+  it("bounds dotted shelf paper before allocating the full grid", () => {
+    const template: PageTemplate = { ...blank, elements: [{
+      kind: "dots", area, spacingPt: 3, color: "#abcdef", radiusPt: 1,
+    }] };
+    const largestPage = { widthPt: 100_000, heightPt: 100_000 };
+    expect(resolveTemplate(template, largestPage)).toHaveLength(MAX_SHAPES);
+    expect(templateSvg(template, largestPage).match(/<circle /g)).toHaveLength(MAX_SHAPES);
+  }, 2_000);
+
   // The same fixture `goodtype_core::template` asserts against. If the two resolvers drift, one
   // of them fails here and the screen cannot start disagreeing with the PDF unnoticed.
   it.each(cases as Case[])("matches the shared fixture: $name", (specimen) => {

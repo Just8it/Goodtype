@@ -22,6 +22,9 @@ importers:
       codemirror:
         specifier: 6.0.2
         version: 6.0.2
+      i18next:
+        specifier: 26.5.4
+        version: 26.5.4(typescript@6.0.3)
       pdfjs-dist:
         specifier: 5.7.284
         version: 5.7.284
@@ -521,6 +524,14 @@ packages:
     resolution: {integrity: sha512-5xoDfX+fL7faATnagmWPpbFtwh/R77WmMMqqHGS65C3vvB0YHrgF+B1YmZ3441tMj5n63k0212XNoJwzlhffQw==}
     engines: {node: ^8.16.0 || ^10.6.0 || >=11.0.0}
     os: [darwin]
+
+  i18next@26.5.4:
+    resolution: {integrity: sha512-Wg0O1u2xmnsve9gICDwGekLkMe9SIC7+ZiuLYfWUGb/A3TQdRKygQ4OY9ros4raf5D66ZnW9JMrTDtGP2b8a7Q==}
+    peerDependencies:
+      typescript: ^5 || ^6 || ^7
+    peerDependenciesMeta:
+      typescript:
+        optional: true
 
   is-reference@3.0.3:
     resolution: {integrity: sha512-ixkJoqQvAP88E6wLydLGGqCJsrFUnqoH6HnaczB8XmDH1oaWU+xxdptvikTgaEhtZ53Ky6YXiBuUI2WXLMCwjw==}
@@ -1185,6 +1196,10 @@ snapshots:
 
   fsevents@2.3.3:
     optional: true
+
+  i18next@26.5.4(typescript@6.0.3):
+    optionalDependencies:
+      typescript: 6.0.3
 
   is-reference@3.0.3:
     dependencies:

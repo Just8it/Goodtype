@@ -79,4 +79,20 @@ describe("ink patterns", () => {
     expect(dashes[0].at(-1)?.x).toBe(8);
     expect(dashes[1][0].x).toBe(18);
   });
+
+  // The precise eraser's promise, mirrored in `pattern.rs`: what is left of a patterned stroke keeps
+  // every mark where it was, because a fragment continues its original's phase.
+  it("keeps a fragment's marks where its original drew them", () => {
+    const from = (x: number) => [{ x, y: 0, pressure: 1 }, { x: 60, y: 0, pressure: 1 }];
+    const rounded = (value: number) => Math.round(value * 1e9) / 1e9;
+    for (const pattern of ["dashed", "dotted"] as const) {
+      for (const cut of [3, 9.5, 14, 27.25]) {
+        const expected = patternRuns(from(0), 2, pattern, 1)
+          .filter((run) => run.at(-1)!.x > cut || run[0].x >= cut)
+          .map((run) => rounded(Math.max(run[0].x, cut)));
+        const fragment = patternRuns(from(cut), 2, pattern, 1, cut);
+        expect(fragment.map((run) => rounded(run[0].x)), `${pattern} cut at ${cut}`).toEqual(expected);
+      }
+    }
+  });
 });

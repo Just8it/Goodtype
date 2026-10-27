@@ -1,9 +1,17 @@
 import { describe, expect, it } from "vitest";
-import { fromByteOffset, toByteOffset, toSnippetTemplate } from "./completion";
+import { byteOffsetMapper, fromByteOffset, toByteOffset, toSnippetTemplate } from "./completion";
 
 // Rust counts UTF-8 bytes, CodeMirror counts UTF-16 units. Any Typst source with a math symbol
 // makes the two disagree, so the round trip is worth pinning down.
 describe("offset conversion", () => {
+  it("maps an entire analysis reply with the same Unicode and partial-byte behavior", () => {
+    for (const text of ["", "ASCII", "a∑b→c𝕜d", "e\u0301😀\ud800x\udc00", "\ufeffa", "\ufeff", "a\ufeffb"]) {
+      const offset = byteOffsetMapper(text);
+      for (let index = 0; index <= new TextEncoder().encode(text).length + 2; index += 1) {
+        expect(offset(index)).toBe(fromByteOffset(text, index));
+      }
+    }
+  });
   it("converts, round-trips Unicode boundaries, and clamps past the end", () => {
     const text = "$ ∑ x $";
     expect(toByteOffset(text, 3)).toBe(5);

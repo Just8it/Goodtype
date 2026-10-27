@@ -5,8 +5,10 @@
 //! packages are gated separately (see the `World` implementation).
 
 pub mod export;
+pub mod page_source;
 
 mod embedded;
+pub use embedded::font_families;
 
 use std::path::{Path, PathBuf};
 
@@ -23,13 +25,10 @@ const MAX_WIDTH_PT: f64 = 10_000.0;
 /// generated `goodtype_rhythm` prelude — and each carried its own copy of the test. A change to
 /// the generated header would have made the export silently double-apply the style and the
 /// editor silently stop shifting, neither of which fails loudly.
-const MANAGED_PRESET_IMPORT_PREFIX: &str = "#import \"/styles/";
-const MANAGED_PRESET_SHOW_LINE: &str = "#show: preset.with(rhythm: goodtype_rhythm)";
-
+///
 /// Whether a Page text source already carries the generated preset header.
 pub fn has_managed_preset(source: &str) -> bool {
-    source.starts_with(MANAGED_PRESET_IMPORT_PREFIX)
-        && source.lines().nth(1) == Some(MANAGED_PRESET_SHOW_LINE)
+    page_source::managed_header(source).is_some()
 }
 
 /// Slack compiled around a preview so it is not clipped by its own page frame.
@@ -312,6 +311,13 @@ mod tests {
     /// The font-name tips offer installed fonts too, since they read the same font book.
     #[test]
     fn suggests_installed_fonts_by_name() {
+        let families = super::font_families();
+        assert!(families.iter().any(|font| font == "Libertinus Serif"));
+        assert!(
+            families
+                .iter()
+                .all(|font| !font.is_empty() && !font.contains(['/', '\\']))
+        );
         if !Path::new(r"C:\Windows\Fonts\arial.ttf").exists() {
             return;
         }

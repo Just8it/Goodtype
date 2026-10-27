@@ -19,6 +19,7 @@ fn layer() -> InkLayer {
             taper: 0.12,
             opacity: 1.0,
             group_id: None,
+            trim: None,
             points: vec![StrokePoint {
                 x: -0.0,
                 y: 842.0,

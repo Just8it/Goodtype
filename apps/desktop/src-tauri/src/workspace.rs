@@ -70,8 +70,18 @@ pub fn phase0_notebook_root(
 pub async fn pick_notebook_root(
     app: tauri::AppHandle,
     roots: tauri::State<'_, AllowedRoots>,
+    ui_language: Option<String>,
 ) -> Result<Option<String>, String> {
-    let Some(picked) = app.dialog().file().blocking_pick_folder() else {
+    let Some(picked) = app
+        .dialog()
+        .file()
+        .set_title(crate::settings::dialog_label(
+            ui_language.as_deref(),
+            "Open notebook",
+            "Notizbuch öffnen",
+        ))
+        .blocking_pick_folder()
+    else {
         return Ok(None);
     };
     let picked = picked.into_path().map_err(|error| error.to_string())?;

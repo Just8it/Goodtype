@@ -72,6 +72,7 @@ export function resolveTemplate(template: PageTemplate, geometry: PageGeometry):
         for (const cy of centred(box.top, box.bottom, element.spacingPt)) {
           for (const cx of columns) {
             shapes.push({ kind: "dot", cx, cy, radiusPt: element.radiusPt, color: element.color });
+            if (shapes.length >= MAX_SHAPES) return shapes;
           }
         }
         break;
@@ -166,21 +167,11 @@ export function templatePreviewSvg(template: PageTemplate, geometry: PageGeometr
   );
 }
 
-/**
- * The template's shapes as markup, without a surrounding `<svg>` or a background.
- *
- * Exported so a page can be composed with something else on top of it — a cover draws ruling and
- * then ink into one document — without a second copy of the shape-to-markup mapping that could
- * drift from this one.
- */
-export function templateBodySvg(template: PageTemplate, geometry: PageGeometry): string {
-  return resolveTemplate(template, geometry)
-    .map((shape) =>
-      shape.kind === "line"
-        ? `<line x1="${round(shape.x1)}" y1="${round(shape.y1)}" x2="${round(shape.x2)}" y2="${round(shape.y2)}" stroke="${shape.color}" stroke-width="${round(shape.weightPt)}"/>`
-        : `<circle cx="${round(shape.cx)}" cy="${round(shape.cy)}" r="${round(shape.radiusPt)}" fill="${shape.color}"/>`,
-    )
-    .join("");
+/** The one shape-to-markup mapping, behind every page, preview and cover. */
+function shapeMarkup(shape: TemplateShape): string {
+  return shape.kind === "line"
+    ? `<line x1="${round(shape.x1)}" y1="${round(shape.y1)}" x2="${round(shape.x2)}" y2="${round(shape.y2)}" stroke="${shape.color}" stroke-width="${round(shape.weightPt)}"/>`
+    : `<circle cx="${round(shape.cx)}" cy="${round(shape.cy)}" r="${round(shape.radiusPt)}" fill="${shape.color}"/>`;
 }
 
 function svgFor(
@@ -189,13 +180,12 @@ function svgFor(
   viewWidthPt: number,
   viewHeightPt: number,
 ): string {
-  const body = resolveTemplate(template, geometry)
-    .map((shape) =>
-      shape.kind === "line"
-        ? `<line x1="${round(shape.x1)}" y1="${round(shape.y1)}" x2="${round(shape.x2)}" y2="${round(shape.y2)}" stroke="${shape.color}" stroke-width="${round(shape.weightPt)}"/>`
-        : `<circle cx="${round(shape.cx)}" cy="${round(shape.cy)}" r="${round(shape.radiusPt)}" fill="${shape.color}"/>`,
-    )
-    .join("");
+  // Only canonical hex paints may enter inline SVG, including plain-paper previews.
+  const color = /^#[0-9a-f]{6}(?:[0-9a-f]{2})?$/i;
+  if (!color.test(template.backgroundColor)) return "";
+  const shapes = resolveTemplate(template, geometry);
+  if (shapes.some((shape) => !color.test(shape.color))) return "";
+  const body = shapes.map(shapeMarkup).join("");
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${round(viewWidthPt)} ${round(viewHeightPt)}" preserveAspectRatio="none"><rect width="100%" height="100%" fill="${template.backgroundColor}"/>${body}</svg>`;
 }
 

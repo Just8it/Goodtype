@@ -6,7 +6,7 @@
 // at all because a stroke is a filled silhouette rather than a stroked centreline.
 
 import { DEFAULT_INK_Z_INDEX, type Stroke } from "../model";
-import { outlinePath } from "./outline";
+import { outlinePath, type OutlineTrim } from "./outline";
 import { patternedOutlinePoints } from "./pattern";
 import { transformedPoint } from "./selection";
 
@@ -16,6 +16,7 @@ export type PaintedPath = {
   d: string;
   color: string;
   opacity: number;
+  selected?: boolean;
 };
 
 export type PaintedStratum = {
@@ -32,19 +33,57 @@ export type PaintedStratum = {
  * the thousands left alone hit it. Weak, so nothing here keeps a deleted stroke alive.
  */
 const silhouettes = new WeakMap<Stroke, { widthPt: number; d: string }>();
+const strataCache = new WeakMap<Stroke[], {
+  thinnest: number;
+  boundaries: string;
+  floor: number;
+  selection: string;
+  selectionScale: number;
+  live: string;
+  strata: PaintedStratum[];
+}>();
 
-function silhouette(stroke: Stroke, minimumWidthPt: number): string {
-  const widthPt = Math.max(
+/**
+ * The last merged path built for a run, keyed by the run's first stroke. A run made of the very
+ * same silhouette strings reuses the very same path string, so the DOM sees an unchanged `d` and
+ * re-parses nothing. That is what keeps an erase gesture from re-parsing the page's ink each frame.
+ */
+const runCache = new WeakMap<Stroke, { parts: string[]; d: string }>();
+
+function joinedRun(first: Stroke, parts: string[]): string {
+  const cached = runCache.get(first);
+  if (cached && cached.parts.length === parts.length && cached.parts.every((part, index) => part === parts[index])) {
+    return cached.d;
+  }
+  const d = parts.join(" ");
+  runCache.set(first, { parts, d });
+  return d;
+}
+
+export function silhouetteWidth(stroke: Stroke, minimumWidthPt: number): number {
+  return Math.max(
     stroke.widthPt * Math.max(stroke.transform.scaleX, stroke.transform.scaleY),
     minimumWidthPt,
   );
+}
+
+export function hasSilhouette(stroke: Stroke, minimumWidthPt: number): boolean {
+  return silhouettes.get(stroke)?.widthPt === silhouetteWidth(stroke, minimumWidthPt);
+}
+
+export function installSilhouette(stroke: Stroke, minimumWidthPt: number, d: string): void {
+  silhouettes.set(stroke, { widthPt: silhouetteWidth(stroke, minimumWidthPt), d });
+}
+
+export function silhouette(stroke: Stroke, minimumWidthPt: number): string {
+  const widthPt = silhouetteWidth(stroke, minimumWidthPt);
   const cached = silhouettes.get(stroke);
   // The floor moves with zoom, so a cached path is only reusable at the width it was built for.
   if (cached && cached.widthPt === widthPt) return cached.d;
 
   const d = patternedOutlinePoints(
-    stroke.points.map((point) => ({ ...point, ...transformedPoint(stroke, point) })),
-    { widthPt, pressure: stroke.pressure, taper: stroke.taper },
+    stroke.points.map((point) => ({ ...transformedPoint(stroke, point), pressure: point.pressure })),
+    { widthPt, pressure: stroke.pressure, taper: stroke.taper, trim: placedTrim(stroke) },
     stroke.pattern ?? "solid",
     stroke.patternSpacing ?? 1,
     stroke.tool === "pen",
@@ -53,6 +92,16 @@ function silhouette(stroke: Stroke, minimumWidthPt: number): string {
     .join(" ");
   silhouettes.set(stroke, { widthPt, d });
   return d;
+}
+
+/**
+ * A fragment's lineage in page points. It is stored in the stroke's own points and the silhouette
+ * is built after the transform, so it scales exactly as the width does; the export does the same.
+ */
+export function placedTrim(stroke: Stroke): OutlineTrim | undefined {
+  if (!stroke.trim) return undefined;
+  const scale = Math.max(stroke.transform.scaleX, stroke.transform.scaleY);
+  return { start: stroke.trim.startPt * scale, end: stroke.trim.endPt * scale };
 }
 
 /**
@@ -65,26 +114,42 @@ function silhouette(stroke: Stroke, minimumWidthPt: number): string {
  * which is wrong on screen and disagrees with the PDF, where every stroke is its own shape.
  *
  * `minimumWidthPt` keeps hairline ink from vanishing when the page is zoomed far out.
+ *
+ * `liveIds` are strokes an active gesture is still changing, such as fragments under the precise
+ * eraser. They paint as runs of their own, so each frame replaces only their paths and every other
+ * run keeps its exact string.
  */
-export function paintOrder(strokes: Stroke[], minimumWidthPt = 0): PaintedPath[] {
-  const painted: PaintedPath[] = [];
+export function paintOrder(
+  strokes: Stroke[],
+  minimumWidthPt = 0,
+  selectedIds?: ReadonlySet<string>,
+  selectionScale = 1,
+  liveIds?: ReadonlySet<string>,
+): PaintedPath[] {
+  const runs: { first: Stroke; parts: string[]; color: string; opacity: number; selected?: boolean; live?: boolean }[] = [];
   for (const stroke of strokes) {
-    const d = silhouette(stroke, minimumWidthPt);
+    const selected = selectedIds?.has(stroke.id);
+    const live = liveIds?.has(stroke.id);
+    const d = silhouette(stroke, selected ? minimumWidthPt / selectionScale : minimumWidthPt);
     if (!d) continue;
 
-    const previous = painted[painted.length - 1];
+    const previous = runs[runs.length - 1];
     if (
       previous &&
       previous.opacity === 1 &&
       stroke.opacity === 1 &&
       previous.color === stroke.color
+      && previous.selected === selected
+      && previous.live === live
     ) {
-      previous.d += ` ${d}`;
+      previous.parts.push(d);
       continue;
     }
-    painted.push({ key: stroke.id, d, color: stroke.color, opacity: stroke.opacity });
+    runs.push({ first: stroke, parts: [d], color: stroke.color, opacity: stroke.opacity, selected, live });
   }
-  return painted;
+  return runs.map(({ first, parts, color, opacity, selected }) => ({
+    key: first.id, d: joinedRun(first, parts), color, opacity, ...(selectedIds ? { selected } : {}),
+  }));
 }
 
 /** Collapse ink into at most one SVG stratum between each pair of movable objects. */
@@ -92,8 +157,23 @@ export function paintStrata(
   strokes: Stroke[],
   objectZIndices: number[],
   minimumWidthPt = 0,
+  selectedIds?: string[],
+  selectionScale = 1,
+  liveIds?: ReadonlySet<string>,
 ): PaintedStratum[] {
   const boundaries = [...objectZIndices].sort((left, right) => left - right);
+  const cached = strataCache.get(strokes);
+  const thinnest = cached?.thinnest ?? strokes.reduce((minimum, stroke) =>
+    Math.min(minimum, stroke.widthPt * Math.max(stroke.transform.scaleX, stroke.transform.scaleY)), Infinity);
+  // Ordinary-width ink has identical geometry across zoom tiers; keep its SVG strings intact.
+  const floor = minimumWidthPt <= thinnest * Math.min(1, selectionScale) ? 0 : minimumWidthPt;
+  const cachedScale = floor && selectedIds?.length ? selectionScale : 1;
+  const boundaryKey = boundaries.join(",");
+  const selection = JSON.stringify(selectedIds ?? []);
+  const live = liveIds?.size ? [...liveIds].join(",") : "";
+  if (cached && cached.floor === floor && cached.boundaries === boundaryKey && cached.selection === selection &&
+    cached.selectionScale === cachedScale && cached.live === live) return cached.strata;
+  const selected = selectedIds?.length ? new Set(selectedIds) : undefined;
   const groups = new Map<number, Stroke[]>();
   for (const stroke of orderedStrokes(strokes)) {
     const zIndex = stroke.zIndex ?? DEFAULT_INK_Z_INDEX;
@@ -103,11 +183,13 @@ export function paintStrata(
     if (group) group.push(stroke);
     else groups.set(band, [stroke]);
   }
-  return [...groups.values()].map((group) => ({
+  const strata = [...groups.values()].map((group) => ({
     key: group[0].id,
     zIndex: group[0].zIndex ?? DEFAULT_INK_Z_INDEX,
-    paths: paintOrder(group, minimumWidthPt),
+    paths: paintOrder(group, floor, selected, selectionScale, liveIds?.size ? liveIds : undefined),
   }));
+  strataCache.set(strokes, { thinnest, boundaries: boundaryKey, floor, selection, selectionScale: cachedScale, live, strata });
+  return strata;
 }
 
 function orderedStrokes(strokes: Stroke[]): Stroke[] {

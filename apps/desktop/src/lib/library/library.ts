@@ -1,3 +1,4 @@
+import { translate, type Translator } from "../i18n";
 /**
  * The library as the frontend sees it: relative paths and nothing else.
  *
@@ -53,7 +54,7 @@ export type Crumb = { name: string; path: string };
  * disclosure triangle is the one control on this surface you would have to put the pen down for.
  * Jumping to a distant branch is what favourites, recents and search are for.
  */
-export function breadcrumb(path: string, rootName = "Bibliothek"): Crumb[] {
+export function breadcrumb(path: string, rootName: string = translate("library.library")): Crumb[] {
   const crumbs: Crumb[] = [{ name: rootName, path: "" }];
   let walked = "";
   for (const segment of path.split("/").filter(Boolean)) {
@@ -102,6 +103,8 @@ export function canMoveLibraryEntries(sources: string[], destination: string): b
  * two distinct names into one folder.
  */
 const FORBIDDEN = /[\\/:*?"<>|]/;
+/** Rust's `char::is_control`: the C0 and C1 control ranges. */
+const CONTROL = /[\u0000-\u001f\u007f-\u009f]/;
 /**
  * The same superset `is_windows_reserved` refuses in `crates/goodtype-core/src/paths.rs`, which
  * is the rule that actually governs: this copy only makes the message immediate. `com0`/`lpt0`
@@ -113,17 +116,17 @@ const RESERVED = /^(con|prn|aux|nul|com|lpt|com[0-9]|lpt[0-9])$/i;
 /** Mirrors `MAX_NAME_CHARS` in `apps/desktop/src-tauri/src/library.rs`. */
 const MAX_NAME_CHARS = 80;
 
-export function nameProblem(name: string): string | null {
+export function nameProblem(name: string, t: Translator = translate): string | null {
   const trimmed = name.trim();
-  if (!trimmed) return "A name is needed";
-  if (trimmed !== name) return "Names cannot start or end with a space";
+  if (!trimmed) return t("library.aNameIsNeeded");
+  if (trimmed !== name) return t("library.namesCannotStartOrEndWithA");
   // Counted the way Rust counts it — `length` is UTF-16 units, so an emoji or an accented
   // character would otherwise be measured differently on each side of the boundary.
-  if ([...name].length > MAX_NAME_CHARS) return "That name is too long";
-  if (FORBIDDEN.test(name)) return 'A name cannot contain \\ / : * ? " < > |';
-  if (name.startsWith(".")) return "A name starting with a dot would be hidden";
-  if (name.endsWith(".")) return "Names cannot end with a dot";
-  if (RESERVED.test(name)) return "That name is reserved by Windows";
+  if ([...name].length > MAX_NAME_CHARS) return t("library.thatNameIsTooLong");
+  if (FORBIDDEN.test(name) || CONTROL.test(name)) return t("library.aNameCannotContain");
+  if (name.startsWith(".")) return t("library.aNameStartingWithADotWould");
+  if (name.endsWith(".")) return t("library.namesCannotEndWithADot");
+  if (RESERVED.test(name)) return t("library.thatNameIsReservedByWindows");
   return null;
 }
 

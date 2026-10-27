@@ -1,10 +1,11 @@
-import { invoke } from "@tauri-apps/api/core";
+import { translate, type Translator } from "./i18n";
+import { loadAppSettings, saveAppSettings } from "./ipc/workspace";
 import type { PenSideButton, PressureCalibration } from "./ink/pipeline";
 import type { StrokePattern } from "./model";
-import type { HistoryCorner } from "./prototype/chromeLayout";
-import type { PaletteCommand } from "./prototype/palette";
+import type { HistoryCorner } from "./notebook/chromeLayout";
+import type { PaletteCommand } from "./notebook/palette";
 import type { ShapeKind } from "./shape/geometry";
-import { DEFAULT_LASSO_TARGETS, type LassoTargets } from "./prototype/lasso";
+import { DEFAULT_LASSO_TARGETS, type LassoTargets } from "./notebook/lasso";
 
 /**
  * A pen slot on the palette. The two tiles are assignable slots, not fixed pens: pick a type
@@ -42,11 +43,11 @@ export type PenType = {
 };
 
 /** The pen library. Slots start from one of these, then diverge as the writer tunes them. */
-export const PEN_TYPES: PenType[] = [
+export function penTypes(t: Translator = translate): PenType[] { return [
   {
     id: "fountain",
-    label: "Fountain",
-    description: "Pressure-varying, heavily smoothed",
+    label: t("settings.fountain"),
+    description: t("settings.pressureVaryingHeavilySmoothed"),
     pressure: true,
     smoothing: 0.35,
     taper: 0.12,
@@ -54,8 +55,8 @@ export const PEN_TYPES: PenType[] = [
   },
   {
     id: "ballpoint",
-    label: "Ballpoint",
-    description: "Even line, light smoothing",
+    label: t("settings.ballpoint"),
+    description: t("settings.evenLineLightSmoothing"),
     pressure: false,
     smoothing: 0.15,
     taper: 0,
@@ -63,8 +64,8 @@ export const PEN_TYPES: PenType[] = [
   },
   {
     id: "pencil",
-    label: "Pencil",
-    description: "Pressure-varying, minimal smoothing",
+    label: t("settings.pencil"),
+    description: t("settings.pressureVaryingMinimalSmoothing"),
     pressure: true,
     smoothing: 0.08,
     taper: 0.05,
@@ -72,8 +73,8 @@ export const PEN_TYPES: PenType[] = [
   },
   {
     id: "marker",
-    label: "Marker",
-    description: "Broad and even",
+    label: t("settings.marker"),
+    description: t("settings.broadAndEven"),
     pressure: false,
     smoothing: 0.2,
     taper: 0,
@@ -81,25 +82,32 @@ export const PEN_TYPES: PenType[] = [
   },
   {
     id: "technical",
-    label: "Technical",
-    description: "Exact width, no pressure — for diagrams",
+    label: t("settings.technical"),
+    description: t("settings.exactWidthNoPressureForDiagrams"),
     pressure: false,
     smoothing: 0.05,
     taper: 0,
     widthPt: 0.8,
   },
-];
+]; }
+export const PEN_TYPES = penTypes();
 
-export function penType(id: PenTypeId): PenType {
-  return PEN_TYPES.find((type) => type.id === id) ?? PEN_TYPES[0];
+export function penType(id: PenTypeId, t?: Translator): PenType {
+  const types = t ? penTypes(t) : PEN_TYPES;
+  return types.find((type) => type.id === id) ?? types[0];
 }
 export type UndoScope = "page" | "notebook";
 export type PaletteDockSetting = "left" | "right" | "top" | "bottom";
 
 export type EraserSize = "small" | "medium" | "large";
 export type EraserReach = "everything" | "highlighter";
+/** Whole marks, or only the ink under the eraser (ADR 0037). */
+export type EraserMode = "stroke" | "precise";
 
 export type AppSettings = {
+  uiLanguage: "en" | "de";
+  /** Resolved into ordinary Typst source when a new movable text block is created. */
+  inlineTextFont: string;
   penPresets: PenPreset[];
   highlighter: PenPreset;
   /**
@@ -164,11 +172,14 @@ export type AppSettings = {
   /** After an erase picked from the bar, go back to the tool used before it. */
   eraserReturns: boolean;
   eraserReach: EraserReach;
+  eraserMode: EraserMode;
   /** Palette tiles taken off the bar. Their keyboard shortcuts keep working. */
   hiddenTools: PaletteCommand[];
 };
 
 export const DEFAULT_SETTINGS: AppSettings = {
+  uiLanguage: "en",
+  inlineTextFont: "",
   penPresets: [
     { widthPt: 1.6, color: "#1e232b", type: "fountain", pressure: true, pattern: "solid" },
     { widthPt: 2.8, color: "#2f6fdb", type: "ballpoint", pressure: false, pattern: "solid" },
@@ -218,6 +229,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   penSideButton: "eraser",
   eraserReturns: true,
   eraserReach: "everything",
+  eraserMode: "stroke",
   hiddenTools: [],
 };
 
@@ -252,23 +264,24 @@ export const MAX_WIDTHS = 4;
 export const MAX_RECENT_COLORS = 8;
 
 /** Colours offered in the colour panel before the writer has curated any. */
-export const COLOR_PRESETS: { hex: string; name: string }[] = [
-  { hex: "#1e232b", name: "Graphite" },
-  { hex: "#4c8df0", name: "Blueprint" },
-  { hex: "#e5645e", name: "Oxide" },
-  { hex: "#e0912b", name: "Amber" },
-  { hex: "#e9d636", name: "Sulphur" },
-  { hex: "#57c08a", name: "Verdigris" },
-  { hex: "#8a6fd4", name: "Iris" },
-  { hex: "#6a727c", name: "Slate" },
-];
+export function colorPresets(t: Translator = translate): { hex: string; name: string }[] { return [
+  { hex: "#1e232b", name: t("settings.graphite") },
+  { hex: "#4c8df0", name: t("settings.blueprint") },
+  { hex: "#e5645e", name: t("settings.oxide") },
+  { hex: "#e0912b", name: t("settings.amber") },
+  { hex: "#e9d636", name: t("settings.sulphur") },
+  { hex: "#57c08a", name: t("settings.verdigris") },
+  { hex: "#8a6fd4", name: t("settings.iris") },
+  { hex: "#6a727c", name: t("settings.slate") },
+]; }
+export const COLOR_PRESETS = colorPresets();
 
 /** Nib widths are stored in points and shown to the writer in millimetres. */
 export const MM_PER_PT = 1 / 2.835;
 
 /** A readable name for a colour, so assistive tech never has to spell out a hex code. */
-export function colorName(hex: string): string {
-  const known = COLOR_PRESETS.find(
+export function colorName(hex: string, t: Translator = translate): string {
+  const known = colorPresets(t).find(
     (preset) => preset.hex.toLowerCase() === hex.toLowerCase(),
   );
   return known ? known.name : hex.toUpperCase();
@@ -311,7 +324,7 @@ export function withRecentColor(recent: string[], color: string): string[] {
 export async function loadSettings(tauriAvailable: boolean): Promise<AppSettings> {
   if (!tauriAvailable) return structuredClone(DEFAULT_SETTINGS);
   try {
-    return await invoke<AppSettings>("load_app_settings");
+    return await loadAppSettings();
   } catch {
     return structuredClone(DEFAULT_SETTINGS);
   }
@@ -323,7 +336,7 @@ export async function saveSettings(
   settings: AppSettings,
 ): Promise<AppSettings> {
   if (!tauriAvailable) return settings;
-  return await invoke<AppSettings>("save_app_settings", { settings });
+  return await saveAppSettings(settings);
 }
 
 export type RecentNotebook = {

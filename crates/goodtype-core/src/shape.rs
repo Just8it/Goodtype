@@ -129,6 +129,15 @@ pub struct ShapeStyle {
         skip_serializing_if = "crate::is_unit_spacing"
     )]
     pub pattern_spacing: f64,
+    /// For a piece the precise eraser cut from a patterned outline: how far along the original
+    /// outline it begins, so its dashes continue where they were (ADR 0037). Omitted at 0.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub pattern_offset_pt: f64,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_zero(value: &f64) -> bool {
+    *value == 0.0
 }
 
 impl ShapeStyle {
@@ -149,6 +158,9 @@ impl ShapeStyle {
         }
         if !crate::valid_pattern_spacing(self.pattern_spacing) {
             return Err("shape pattern spacing is out of range");
+        }
+        if !(0.0..=crate::MAX_STROKE_TRIM_PT).contains(&self.pattern_offset_pt) {
+            return Err("shape pattern offset is out of range");
         }
         Ok(())
     }
@@ -212,6 +224,7 @@ mod tests {
             opacity: 1.0,
             pattern: StrokePattern::Solid,
             pattern_spacing: 1.0,
+            pattern_offset_pt: 0.0,
         };
         assert!(geometry.validate().is_ok());
         assert!(style.validate().is_ok());
@@ -249,5 +262,33 @@ mod tests {
             ..dotted
         };
         assert!(out_of_range.validate().is_err());
+    }
+
+    #[test]
+    fn pattern_offset_round_trips_is_omitted_at_zero_and_is_bounded() {
+        let old = r##"{"strokeColor":"#16212b","strokeWidthPt":1.6,"fillColor":null,"opacity":1.0,"pattern":"dashed"}"##;
+        let whole: ShapeStyle = serde_json::from_str(old).unwrap();
+        assert_eq!(whole.pattern_offset_pt, 0.0);
+        assert!(
+            !serde_json::to_string(&whole)
+                .unwrap()
+                .contains("patternOffsetPt")
+        );
+
+        let piece = ShapeStyle {
+            pattern_offset_pt: 56.25,
+            ..whole.clone()
+        };
+        let json = serde_json::to_string(&piece).unwrap();
+        assert!(json.contains(r#""patternOffsetPt":56.25"#), "{json}");
+        assert_eq!(serde_json::from_str::<ShapeStyle>(&json).unwrap(), piece);
+        assert!(piece.validate().is_ok());
+        for bad in [-1.0, f64::NAN, crate::MAX_STROKE_TRIM_PT * 2.0] {
+            let invalid = ShapeStyle {
+                pattern_offset_pt: bad,
+                ..whole.clone()
+            };
+            assert!(invalid.validate().is_err(), "{bad}");
+        }
     }
 }

@@ -8,6 +8,12 @@
 import { invoke } from "@tauri-apps/api/core";
 
 import type { TypstCompileResult } from "../editor/typst";
+import type { PageBackground, PageGeometry } from "../model";
+
+/** Names only, from the compiler's existing bundled/system font book. */
+export function typstFontFamilies(): Promise<string[]> {
+  return invoke<string[]>("typst_font_families");
+}
 
 /**
  * Mirrors `CompileBlockRequest` in `src-tauri/src/typst.rs`, and deliberately carries no package
@@ -20,7 +26,13 @@ export type TypstCompileRequest = {
   sharedStyle?: string | null;
   widthPt: number;
   generation: number;
+  pageText?: { background: PageBackground; geometry: PageGeometry; snapBlocksToGrid: boolean };
 };
+
+export function compileCacheSource(request: TypstCompileRequest): string {
+  const source = `${request.sharedStyle ?? ""}\n${request.source}`;
+  return request.pageText ? `${JSON.stringify(request.pageText)}\n${source}` : source;
+}
 
 export function compileTypst(
   root: string,

@@ -14,6 +14,19 @@ use tauri::Manager;
 const MAX_SETTINGS_BYTES: usize = 64 * 1024;
 const MAX_RECENTS: usize = 30;
 
+/// The frontend may have an unsaved session choice. Only supported language IDs select copy.
+pub(crate) fn dialog_label<'a>(
+    language: Option<&str>,
+    english: &'a str,
+    german: &'a str,
+) -> &'a str {
+    if language == Some("de") {
+        german
+    } else {
+        english
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct LassoTargets {
@@ -39,6 +52,8 @@ impl Default for LassoTargets {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct AppSettings {
+    pub ui_language: String,
+    pub inline_text_font: String,
     pub pen_presets: Vec<PenPreset>,
     pub highlighter: PenPreset,
     /// Editable swatch rows. These are the palette the writer curates; a pen preset's `color`
@@ -109,6 +124,8 @@ pub struct AppSettings {
     pub eraser_returns: bool,
     /// What the eraser removes: "everything" or "highlighter" only.
     pub eraser_reach: String,
+    /// How the eraser removes it: "stroke" takes whole marks, "precise" only the ink it touches.
+    pub eraser_mode: String,
     /// Palette tiles the writer has taken off the bar. Their shortcuts keep working.
     pub hidden_tools: Vec<String>,
 }
@@ -196,6 +213,8 @@ pub enum UndoScope {
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
+            ui_language: "en".into(),
+            inline_text_font: String::new(),
             pen_presets: vec![
                 PenPreset {
                     taper_length_widths: default_taper_length_widths(),
@@ -268,6 +287,7 @@ impl Default for AppSettings {
             pen_side_button: "eraser".into(),
             eraser_returns: true,
             eraser_reach: "everything".into(),
+            eraser_mode: "stroke".into(),
             hidden_tools: Vec::new(),
         }
     }
@@ -338,6 +358,15 @@ fn sanitize_widths(widths: Vec<f64>, fallback: &[f64], minimum: f64, maximum: f6
 /// Settings come from an editable file, so every numeric field is clamped to the documented
 /// interaction bounds before it can reach the pen pipeline.
 fn sanitize(mut settings: AppSettings) -> AppSettings {
+    settings.inline_text_font = settings.inline_text_font.trim().to_owned();
+    if settings.inline_text_font.len() > 200
+        || settings.inline_text_font.chars().any(char::is_control)
+    {
+        settings.inline_text_font.clear();
+    }
+    if settings.ui_language != "de" {
+        settings.ui_language = "en".into();
+    }
     let defaults = AppSettings::default();
     settings.pen_presets.truncate(4);
     if settings.pen_presets.is_empty() {
@@ -467,6 +496,9 @@ fn sanitize(mut settings: AppSettings) -> AppSettings {
     if !matches!(settings.eraser_reach.as_str(), "everything" | "highlighter") {
         settings.eraser_reach = defaults.eraser_reach;
     }
+    if !matches!(settings.eraser_mode.as_str(), "stroke" | "precise") {
+        settings.eraser_mode = defaults.eraser_mode;
+    }
     settings.hidden_tools = sanitize_hidden_tools(settings.hidden_tools);
     settings
 }
@@ -510,11 +542,8 @@ fn read_config<T: Default + serde::de::DeserializeOwned>(
     if !path.is_file() {
         return Ok(T::default());
     }
-    let metadata = fs::metadata(&path).map_err(|error| error.to_string())?;
-    if metadata.len() > MAX_SETTINGS_BYTES as u64 {
-        return Err(format!("{name} exceeds {MAX_SETTINGS_BYTES} bytes"));
-    }
-    let bytes = fs::read(&path).map_err(|error| error.to_string())?;
+    let bytes = crate::store::read_bounded(&path, MAX_SETTINGS_BYTES)
+        .map_err(|error| format!("{name}: {error}"))?;
     // A corrupt preferences file must not block the application; fall back to defaults.
     Ok(serde_json::from_slice(&bytes).unwrap_or_default())
 }
@@ -795,6 +824,58 @@ pub fn seed_remote_packages(app: &tauri::AppHandle, policy: &RemotePackages) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ui_language_defaults_normalizes_and_round_trips_without_resetting_other_preferences() {
+        let legacy: super::AppSettings = serde_json::from_str(r#"{"touchGlide":1.5}"#).unwrap();
+        assert_eq!(super::sanitize(legacy).ui_language, "en");
+        for language in ["de", "en", "fr", "de-DE", "../../de"] {
+            let raw = format!(r#"{{"uiLanguage":"{language}","touchGlide":1.5}}"#);
+            let settings = super::sanitize(serde_json::from_str(&raw).unwrap());
+            assert_eq!(
+                settings.ui_language,
+                if language == "de" { "de" } else { "en" }
+            );
+            assert_eq!(settings.touch_glide, 1.5);
+            let stored = serde_json::to_string(&settings).unwrap();
+            let reloaded: super::AppSettings = serde_json::from_str(&stored).unwrap();
+            assert_eq!(reloaded.ui_language, settings.ui_language);
+        }
+    }
+
+    #[test]
+    fn native_labels_accept_only_supported_language_ids() {
+        assert_eq!(super::dialog_label(Some("de"), "Open", "Öffnen"), "Öffnen");
+        for language in [
+            None,
+            Some("en"),
+            Some("de-DE"),
+            Some("ar"),
+            Some("<script>"),
+        ] {
+            assert_eq!(super::dialog_label(language, "Open", "Öffnen"), "Open");
+        }
+    }
+
+    #[test]
+    fn inline_font_defaults_validates_and_round_trips() {
+        let legacy: super::AppSettings = serde_json::from_str("{}").unwrap();
+        assert!(legacy.inline_text_font.is_empty());
+        let settings = super::AppSettings {
+            inline_text_font: " Segoe Print ".into(),
+            ..Default::default()
+        };
+        let stored = serde_json::to_string(&super::sanitize(settings)).unwrap();
+        let loaded: super::AppSettings = serde_json::from_str(&stored).unwrap();
+        assert_eq!(loaded.inline_text_font, "Segoe Print");
+        for invalid in ["x".repeat(201), "Arial\n#set text(size: 99pt)".into()] {
+            let settings = super::AppSettings {
+                inline_text_font: invalid,
+                ..Default::default()
+            };
+            assert!(super::sanitize(settings).inline_text_font.is_empty());
+        }
+    }
+
     use std::path::PathBuf;
 
     use super::{AppSettings, RecentNotebooks, relocated_root, sanitize, session_roots};
@@ -814,6 +895,7 @@ mod tests {
         assert!(!settings.draw_with_finger);
         assert_eq!(settings.pen_side_button, "eraser");
         assert_eq!(settings.eraser_reach, "everything");
+        assert_eq!(settings.eraser_mode, "stroke");
         assert!(settings.hidden_tools.is_empty());
         assert!(!settings.highlighter_taper);
     }
@@ -826,12 +908,14 @@ mod tests {
                 .to_vec(),
             pen_side_button: "grab".into(),
             eraser_reach: "ink".into(),
+            eraser_mode: "pixel".into(),
             ..AppSettings::default()
         };
         let sanitized = sanitize(settings);
         assert_eq!(sanitized.hidden_tools, ["pen-2", "lasso"]);
         assert_eq!(sanitized.pen_side_button, "eraser");
         assert_eq!(sanitized.eraser_reach, "everything");
+        assert_eq!(sanitized.eraser_mode, "stroke");
     }
 
     #[test]

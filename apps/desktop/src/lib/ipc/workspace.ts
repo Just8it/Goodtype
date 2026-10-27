@@ -7,7 +7,7 @@
  * caller reaching for "record that this opened" should not have to know which module owns it.
  */
 import { invoke } from "@tauri-apps/api/core";
-import type { RecentNotebook } from "../settings";
+import type { AppSettings, RecentNotebook } from "../settings";
 
 export type NotebookSession = {
   openRoots: string[];
@@ -17,6 +17,15 @@ export type NotebookSession = {
 /** The default notebook directory, created if absent. Used when there are no recents. */
 export function defaultNotebookRoot(): Promise<string> {
   return invoke<string>("phase0_notebook_root");
+}
+
+export function loadAppSettings(): Promise<AppSettings> {
+  return invoke<AppSettings>("load_app_settings");
+}
+
+/** Rust clamps every field to its documented bounds and returns the sanitized value. */
+export function saveAppSettings(settings: AppSettings): Promise<AppSettings> {
+  return invoke<AppSettings>("save_app_settings", { settings });
 }
 
 export function listRecentNotebooks(): Promise<RecentNotebook[]> {

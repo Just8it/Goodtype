@@ -621,5 +621,138 @@
         0
       ]
     ]
+  },
+  {
+    "name": "a fragment cut deep inside a tapered stroke measures its taper from the original ends",
+    "points": [
+      [
+        0,
+        0,
+        1
+      ],
+      [
+        20,
+        0,
+        1
+      ]
+    ],
+    "width_pt": 6,
+    "pressure": false,
+    "taper": 0.5,
+    "trim": [
+      30,
+      30
+    ],
+    "expected": [
+      [
+        0,
+        2.5
+      ],
+      [
+        20,
+        2.5
+      ],
+      [
+        20,
+        -2.5
+      ],
+      [
+        0,
+        -2.5
+      ]
+    ]
+  },
+  {
+    "name": "a fragment that starts at the original tip keeps its taper there",
+    "points": [
+      [
+        0,
+        0,
+        1
+      ],
+      [
+        5,
+        0,
+        1
+      ],
+      [
+        10,
+        0,
+        1
+      ]
+    ],
+    "width_pt": 2,
+    "pressure": false,
+    "taper": 0.3,
+    "trim": [
+      0,
+      40
+    ],
+    "expected": [
+      [
+        0,
+        0
+      ],
+      [
+        5,
+        0.417
+      ],
+      [
+        10,
+        0.833
+      ],
+      [
+        10,
+        -0.833
+      ],
+      [
+        5,
+        -0.417
+      ],
+      [
+        0,
+        0
+      ]
+    ]
+  },
+  {
+    "name": "a tiny fragment keeps its real geometry instead of becoming a full-width dot",
+    "points": [
+      [
+        0,
+        0,
+        1
+      ],
+      [
+        0.5,
+        0,
+        1
+      ]
+    ],
+    "width_pt": 4,
+    "pressure": false,
+    "taper": 0,
+    "trim": [
+      10,
+      10
+    ],
+    "expected": [
+      [
+        0,
+        2
+      ],
+      [
+        0.5,
+        2
+      ],
+      [
+        0.5,
+        -2
+      ],
+      [
+        0,
+        -2
+      ]
+    ]
   }
 ]

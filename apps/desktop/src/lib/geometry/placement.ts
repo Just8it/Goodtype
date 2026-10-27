@@ -6,6 +6,7 @@
 
 /** How much of an object must stay on the page. Roughly a fingertip, so it is always grabbable. */
 export const MIN_VISIBLE_PT = 24;
+import { rotatedVector } from "./coordinates";
 
 export type PageBox = { widthPt: number; heightPt: number };
 export type ViewRect = {
@@ -29,7 +30,17 @@ export function keepOnPage(
   size: { widthPt: number; heightPt: number },
   page: PageBox,
   minimumVisiblePt = MIN_VISIBLE_PT,
+  rotation = 0,
 ): { x: number; y: number } {
+  if (rotation) {
+    const corners = [{ x: 0, y: 0 }, { x: size.widthPt, y: 0 },
+      { x: size.widthPt, y: size.heightPt }, { x: 0, y: size.heightPt }].map(point => rotatedVector(point, rotation));
+    const left = Math.min(...corners.map(point => point.x)), top = Math.min(...corners.map(point => point.y));
+    const width = Math.max(...corners.map(point => point.x)) - left;
+    const height = Math.max(...corners.map(point => point.y)) - top;
+    return { x: clampAxis(position.x + left, width, page.widthPt, minimumVisiblePt) - left,
+      y: clampAxis(position.y + top, height, page.heightPt, minimumVisiblePt) - top };
+  }
   return {
     x: clampAxis(position.x, size.widthPt, page.widthPt, minimumVisiblePt),
     y: clampAxis(position.y, size.heightPt, page.heightPt, minimumVisiblePt),

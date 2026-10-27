@@ -650,6 +650,7 @@ fn handwriting_layer(page_id: &str, strokes: usize, points_per_stroke: usize) ->
                 taper: if stroke % 11 == 0 { 0.12 } else { 0.0 },
                 opacity: if stroke % 19 == 0 { 0.32 } else { 1.0 },
                 group_id: None,
+                trim: None,
                 points: (0..points_per_stroke)
                     .map(|point| {
                         let step = (stroke * points_per_stroke + point) as f64;
