@@ -1,3 +1,5 @@
+import { get } from "svelte/store";
+import { locale } from "../i18n";
 /**
  * The notebook command surface, one function per Rust command.
  *
@@ -10,9 +12,11 @@
  * status text is the caller's decision, and swallowing it here would take that away.
  */
 import { invoke } from "@tauri-apps/api/core";
+import { knownAssets, pageDelta } from "./pageDelta";
 
 import type { PageBackground, PageGeometry, PagePosition } from "../model";
 import type { PresetChoice } from "../page/presets";
+import type { SearchHit } from "../settings";
 import type {
   HistoryCommand,
   HistoryResult,
@@ -41,11 +45,29 @@ export function focusPage(root: string, pageId: string): Promise<HistoryResult> 
   return invoke<HistoryResult>("focus_page", { root, pageId });
 }
 
-export function commitNotebook(
+export async function commitNotebook(
   root: string,
   snapshot: NotebookSnapshot,
+  base?: NotebookSnapshot | null,
 ): Promise<HistoryResult> {
-  return invoke<HistoryResult>("commit_notebook", { root, snapshot });
+  if (!base || base.page.id !== snapshot.page.id || base.page.revision !== snapshot.page.revision ||
+    base.manifest.id !== snapshot.manifest.id) return invoke<HistoryResult>("commit_notebook", { root, snapshot });
+  const delta = pageDelta(snapshot, base);
+  delta.knownAssets = await knownAssets(base.assets);
+  const result = await invoke<Omit<HistoryResult, "snapshot"> & {
+    snapshot: Omit<NotebookSnapshot, "inkLayers">;
+    assetPaths: string[];
+  }>("commit_notebook", { root, delta });
+  const assets = new Map([...base.assets, ...result.snapshot.assets].map(file => [file.path, file]));
+  const referenced = new Set(result.assetPaths);
+  return { ...result, snapshot: { ...result.snapshot,
+    assets: [...assets.values()].filter(file => referenced.has(file.path)),
+    inkLayers: snapshot.inkLayers.map(layer => ({ ...layer, schemaVersion: result.snapshot.page.schemaVersion })),
+  } };
+}
+
+export function searchNotebook(root: string, query: string): Promise<SearchHit[]> {
+  return invoke<SearchHit[]>("search_notebook", { root, query });
 }
 
 export function runHistory(
@@ -72,7 +94,7 @@ export function createPage(
 
 /** Choose a PDF and preserve its original bytes under `references/`. */
 export function pickPdfReference(root: string): Promise<string | null> {
-  return invoke<string | null>("pick_pdf_reference", { root });
+  return invoke<string | null>("pick_pdf_reference", { root, uiLanguage: get(locale) });
 }
 
 /** Read a contained PDF through Tauri's raw binary response path. */

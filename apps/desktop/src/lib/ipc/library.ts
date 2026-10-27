@@ -1,3 +1,5 @@
+import { get } from "svelte/store";
+import { locale } from "../i18n";
 /**
  * The library command surface, one function per Rust command.
  *
@@ -24,7 +26,7 @@ export function libraryRoot(): Promise<string | null> {
 
 /** Choose a library with the native dialog. Null when the dialog was dismissed. */
 export function pickLibraryRoot(): Promise<string | null> {
-  return invoke<string | null>("pick_library_root");
+  return invoke<string | null>("pick_library_root", { uiLanguage: get(locale) });
 }
 
 export function listLibrary(path: string): Promise<LibraryListing> {
@@ -38,7 +40,7 @@ export function openLibraryNotebook(path: string): Promise<string> {
 
 /** Pick a notebook from outside the library. Null when the dialog was dismissed. */
 export function pickNotebookRoot(): Promise<string | null> {
-  return invoke<string | null>("pick_notebook_root");
+  return invoke<string | null>("pick_notebook_root", { uiLanguage: get(locale) });
 }
 
 export function createLibraryFolder(parent: string, name: string): Promise<string> {
