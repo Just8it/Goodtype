@@ -20,7 +20,7 @@ fn main() {
         .manage(workspace::AllowedRoots::default())
         .manage(settings::RemotePackages::default())
         .manage(tinymist::Tinymist::default())
-        .manage(importer::Importer::default())
+        .manage(importer::Importers::default())
         .setup(|app| {
             let handle = app.handle().clone();
             let policy = app.state::<settings::RemotePackages>();
@@ -42,14 +42,14 @@ fn main() {
             library::library_favourites,
             library::set_library_favourite,
             library::list_library_favourites,
-            importer::goodnotes_importer_status,
-            importer::goodnotes_importer_install,
-            importer::goodnotes_importer_check_update,
-            importer::goodnotes_importer_update,
-            importer::goodnotes_importer_cancel,
-            importer::goodnotes_importer_dismiss,
-            importer::goodnotes_import_pick_source,
-            importer::goodnotes_import_start,
+            importer::importer_status,
+            importer::importer_install,
+            importer::importer_check_update,
+            importer::importer_update,
+            importer::importer_cancel,
+            importer::importer_dismiss,
+            importer::import_pick_source,
+            importer::import_start,
             workspace::phase0_notebook_root,
             workspace::pick_notebook_root,
             workspace::open_recent_root,

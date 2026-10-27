@@ -1,10 +1,12 @@
-//! The optional Goodnotes importer: fetch the pinned release, install it, run it, publish what it
-//! produced (ADR 0029).
+//! The optional Goodnotes and OneNote importers: fetch the pinned release, install it, run it,
+//! publish what it produced (ADR 0029, 0031, 0032).
 //!
-//! Everything about the importer lives here, behind a handful of commands. The frontend can ask
-//! for the status, start or cancel a download, pick a source with the native dialog, and start or
-//! cancel an import into the Library folder it is showing. It never sees a URL, an executable path
-//! or a process. Goodtype runs, and imported notebooks open, with none of this installed.
+//! Everything about the importers lives here, behind a handful of commands. The frontend names
+//! which importer it means and can ask for the status, start or cancel a download, pick a source
+//! with the native dialog, and start or cancel an import into the Library folder it is showing.
+//! It never sees a URL, an executable path or a process. Goodtype runs, and imported notebooks
+//! open, with none of this installed. Both importers share every check below; they differ only
+//! in the fixed facts of their [`Tool`].
 
 use std::{
     collections::HashSet,
@@ -25,7 +27,7 @@ use sha2::{Digest, Sha256};
 use tauri::Manager;
 use tauri_plugin_dialog::DialogExt;
 
-use crate::{library, workspace::AllowedRoots};
+use crate::{library, store::read_bounded, workspace::AllowedRoots};
 
 mod update;
 
@@ -44,29 +46,111 @@ pub struct PinnedRelease<'a> {
     pub decoder_commit: &'a str,
 }
 
-/// The release this build downloads. `None` means no release is published and tested; the
-/// Library then says the importer is not available yet and nothing is ever requested.
-///
+/// The fixed facts of one optional importer. Nothing here comes from the frontend or a download.
+#[derive(Debug)]
+pub struct Tool {
+    /// The name the frontend uses, and the install folder's suffix.
+    pub id: &'static str,
+    /// The name its `--version --json` reports; the executable is this plus `.exe`.
+    pub name: &'static str,
+    /// `goodtype-<source>-importer`: release ZIPs are `<package>-<version>-windows-x64.zip`.
+    pub package: &'static str,
+    /// The GitHub repository path, `/owner/name`, exactly as its release URLs spell it.
+    pub repository: &'static str,
+    /// Verifies signed update metadata. Private halves live only in each repository's publisher.
+    pub public_key: [u8; 32],
+    /// The release this build downloads. `None` means no release is published and tested; the
+    /// Library then says the importer is not available yet and nothing is ever requested.
+    pub pinned: Option<PinnedRelease<'static>>,
+    /// The native file dialog's filter.
+    pub source_filter: (&'static str, &'static [&'static str]),
+    /// `<batch> 2026-10-22` is the Library folder an import goes into.
+    pub batch: &'static str,
+}
+
+impl Tool {
+    fn executable(&self) -> String {
+        format!("{}.exe", self.name)
+    }
+
+    /// The release path every download starts at.
+    fn release_path(&self) -> String {
+        format!("{}/releases/download/", self.repository)
+    }
+
+    fn release_url(&self) -> String {
+        format!(
+            "https://github.com{}",
+            self.release_path().trim_end_matches('/')
+        )
+    }
+
+    /// The fixed latest-release update descriptor, only ever read by an explicit update check.
+    fn latest_descriptor(&self) -> String {
+        format!(
+            "https://github.com{}/releases/latest/download/importer-update.json",
+            self.repository
+        )
+    }
+}
+
 /// v0.1.1, published 2026-10-21 from commit bb93582f (clean tree). The hash was computed from an
 /// independent download and agrees with the release's `SHA256SUMS`, its descriptor JSON and
 /// GitHub's asset digest. The package then installed through `install_archive`, passed its own
 /// `--check`, and imported the private sample notebooks (see the opt-in test below). Re-pin only
 /// after repeating that.
-const PINNED: Option<PinnedRelease<'static>> = Some(PinnedRelease {
-    version: "0.1.1",
-    url: "https://github.com/Just8it/Goodtype-Goodnodes-importer/releases/download/v0.1.1/goodtype-goodnotes-importer-0.1.1-windows-x64.zip",
-    size: 14_881_982,
-    sha256: "ef8bfd150626eab885cf1479131e5945fcfd2a9da4152aab3a03311507db5742",
-    decoder_commit: "66028455fd7fc61b7931679915d811a25485e3ad",
-});
+pub static GOODNOTES: Tool = Tool {
+    id: "goodnotes",
+    name: "goodtype-goodnotes-import",
+    package: "goodtype-goodnotes-importer",
+    repository: "/Just8it/Goodtype-Goodnodes-importer",
+    // Matches that repository's release-public-key.pem.
+    public_key: [
+        0x42, 0x8c, 0xc6, 0x8f, 0x6d, 0x0b, 0x38, 0xea, 0xe7, 0x4d, 0xcb, 0x21, 0x1e, 0x48, 0x77,
+        0xc6, 0xeb, 0x51, 0x54, 0x8d, 0xaa, 0xbf, 0x24, 0xde, 0x64, 0xa1, 0x85, 0x88, 0x5c, 0x82,
+        0x5b, 0x3c,
+    ],
+    pinned: Some(PinnedRelease {
+        version: "0.1.1",
+        url: "https://github.com/Just8it/Goodtype-Goodnodes-importer/releases/download/v0.1.1/goodtype-goodnotes-importer-0.1.1-windows-x64.zip",
+        size: 14_881_982,
+        sha256: "ef8bfd150626eab885cf1479131e5945fcfd2a9da4152aab3a03311507db5742",
+        decoder_commit: "66028455fd7fc61b7931679915d811a25485e3ad",
+    }),
+    source_filter: ("Goodnotes", &["goodnotes", "zip"]),
+    batch: "Goodnotes Import",
+};
+
+/// v0.1.0, published 2026-10-22 from commit 9806bbd2 (clean tree). The hash was computed from an
+/// independent download and agrees with the release's `SHA256SUMS`, its signed descriptor and
+/// GitHub's asset digest; the package installed through `install_archive`, passed `--check` and
+/// imported OneNote sample sections (see the opt-in test below). Re-pin only after repeating that.
+pub static ONENOTE: Tool = Tool {
+    id: "onenote",
+    name: "goodtype-onenote-import",
+    package: "goodtype-onenote-importer",
+    repository: "/Just8it/Goodtype-OneNote-Importer",
+    // Matches that repository's release-public-key.pem; distinct from the Goodnotes key.
+    public_key: [
+        0x73, 0xbc, 0xe6, 0x98, 0x80, 0x1a, 0x59, 0xfe, 0x2d, 0x42, 0x3f, 0xd9, 0xc6, 0xdb, 0xa8,
+        0x68, 0x7f, 0xe3, 0xb9, 0x2f, 0x60, 0xbb, 0x9f, 0x27, 0x49, 0x9e, 0x72, 0x42, 0xc2, 0x33,
+        0x6c, 0x3b,
+    ],
+    pinned: Some(PinnedRelease {
+        version: "0.1.0",
+        url: "https://github.com/Just8it/Goodtype-OneNote-Importer/releases/download/v0.1.0/goodtype-onenote-importer-0.1.0-windows-x64.zip",
+        size: 1_927_930,
+        sha256: "a09f7899eef1280819a7da0b12e1355a76e2a71c774e738b0945e07bac9a63dc",
+        decoder_commit: "727389a674665dc07e0c31818cd4b54b64b9c684",
+    }),
+    source_filter: ("OneNote", &["one", "onetoc2", "onepkg", "zip"]),
+    batch: "OneNote Import",
+};
 
 const PROTOCOL_VERSION: u64 = 1;
-const TOOL_NAME: &str = "goodtype-goodnotes-import";
-const EXECUTABLE: &str = "goodtype-goodnotes-import.exe";
 const PACKAGE_MANIFEST: &str = "importer-manifest.json";
 const TARGET: &str = "x86_64-pc-windows-msvc";
-/// The release path every download starts at, and the only hosts it may be redirected to.
-const RELEASE_PATH: &str = "/Just8it/Goodtype-Goodnodes-importer/releases/download/";
+/// The only hosts a release download may be redirected to.
 const ASSET_HOSTS: [&str; 3] = [
     "objects.githubusercontent.com",
     "release-assets.githubusercontent.com",
@@ -79,7 +163,7 @@ const MAX_PACKAGE_BYTES: u64 = 256 * MIB;
 const MAX_ARCHIVE_ENTRIES: usize = 20_000;
 const MAX_UNPACKED_BYTES: u64 = 512 * MIB;
 const MAX_PATH_DEPTH: usize = 24;
-const MAX_JSON_BYTES: u64 = 4 * MIB;
+const MAX_JSON_BYTES: usize = 4 * MIB as usize;
 const MAX_REDIRECTS: usize = 5;
 const DOWNLOAD_DEADLINE: Duration = Duration::from_secs(15 * 60);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -109,13 +193,13 @@ fn https_parts(url: &str) -> Option<(String, &str)> {
     Some((host.to_ascii_lowercase(), path))
 }
 
-/// The first request must be the pinned release on github.com; redirects may also go to GitHub's
-/// release-asset hosts, and nowhere else.
-pub fn download_url_allowed(url: &str, redirected: bool) -> bool {
+/// The first request must be the tool's own releases on github.com; redirects may also go to
+/// GitHub's release-asset hosts, and nowhere else.
+pub fn download_url_allowed(tool: &Tool, url: &str, redirected: bool) -> bool {
     let Some((host, path)) = https_parts(url) else {
         return false;
     };
-    (host == "github.com" && path.starts_with(RELEASE_PATH))
+    (host == "github.com" && path.starts_with(&tool.release_path()))
         || (redirected && ASSET_HOSTS.contains(&host.as_str()))
 }
 
@@ -130,12 +214,16 @@ fn https_agent() -> Result<ureq::Agent, String> {
         .build())
 }
 
-fn github_asset(url: &str, allow_update_pointer: bool) -> Result<ureq::Response, String> {
+fn github_asset(
+    tool: &Tool,
+    url: &str,
+    allow_update_pointer: bool,
+) -> Result<ureq::Response, String> {
     let agent = https_agent()?;
     let mut url = url.to_owned();
     for redirects in 0..=MAX_REDIRECTS {
-        if !(download_url_allowed(&url, redirects > 0)
-            || allow_update_pointer && url == update::LATEST_DESCRIPTOR)
+        if !(download_url_allowed(tool, &url, redirects > 0)
+            || allow_update_pointer && url == tool.latest_descriptor())
         {
             return Err("refused an unexpected importer release URL".into());
         }
@@ -157,6 +245,7 @@ fn github_asset(url: &str, allow_update_pointer: bool) -> Result<ureq::Response,
 /// Streams the pinned archive to `into`, hashing as it goes. Returns the SHA-256; the caller
 /// compares it with the pin before anything is extracted.
 fn download(
+    tool: &Tool,
     release: &PinnedRelease,
     into: &Path,
     cancel: &AtomicBool,
@@ -166,7 +255,7 @@ fn download(
         return Err("the pinned importer package size is out of range".into());
     }
     let started = Instant::now();
-    let response = github_asset(release.url, false)?;
+    let response = github_asset(tool, release.url, false)?;
     if let Some(length) = response
         .header("content-length")
         .and_then(|value| value.parse::<u64>().ok())
@@ -242,8 +331,8 @@ const CANCELLED: &str = "cancelled";
 // ---------------------------------------------------------------------------------------------
 
 /// The package's one top-level folder for a version.
-fn package_folder(version: &str) -> String {
-    format!("goodtype-goodnotes-importer-{version}-windows-x64")
+fn package_folder(tool: &Tool, version: &str) -> String {
+    format!("{}-{version}-windows-x64", tool.package)
 }
 
 /// A relative path inside a package or report, as `/`-separated components that are safe on
@@ -346,18 +435,6 @@ pub struct PackageFile {
     pub sha256: String,
 }
 
-fn read_bounded(path: &Path, limit: u64) -> Result<Vec<u8>, String> {
-    let file = fs::File::open(path).map_err(|error| error.to_string())?;
-    let mut bytes = Vec::new();
-    file.take(limit + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|error| error.to_string())?;
-    if bytes.len() as u64 > limit {
-        return Err(format!("{} is too large", path.display()));
-    }
-    Ok(bytes)
-}
-
 fn sha256_file(path: &Path) -> Result<String, String> {
     let mut file = fs::File::open(path).map_err(|error| error.to_string())?;
     let mut hasher = Sha256::new();
@@ -408,7 +485,7 @@ fn is_bytecode_cache(relative: &str) -> bool {
 /// Checks an unpacked package against its own manifest: every listed file present with the
 /// listed size and hash, nothing unlisted apart from Python bytecode caches, which are removed.
 /// Returns the manifest.
-pub fn verify_package(dir: &Path) -> Result<PackageManifest, String> {
+pub fn verify_package(tool: &Tool, dir: &Path) -> Result<PackageManifest, String> {
     let manifest: PackageManifest =
         serde_json::from_slice(&read_bounded(&dir.join(PACKAGE_MANIFEST), MAX_JSON_BYTES)?)
             .map_err(|error| format!("the package manifest is malformed ({error})"))?;
@@ -445,7 +522,7 @@ pub fn verify_package(dir: &Path) -> Result<PackageManifest, String> {
         }
         return Err(format!("`{file}` is not listed in the package manifest"));
     }
-    if !listed.contains(EXECUTABLE) {
+    if !listed.contains(&tool.executable()) {
         return Err("the package has no importer executable".into());
     }
     Ok(manifest)
@@ -464,6 +541,7 @@ pub struct ToolVersion {
 /// Whether a package (and its own version report) is one this Goodtype can drive. With a pin,
 /// the version and decoder must be exactly the pinned ones.
 pub fn check_contract(
+    expected: &Tool,
     manifest: &PackageManifest,
     tool: Option<&ToolVersion>,
     pin: Option<&PinnedRelease>,
@@ -482,7 +560,7 @@ pub fn check_contract(
         ));
     }
     if let Some(tool) = tool
-        && (tool.name != TOOL_NAME
+        && (tool.name != expected.name
             || tool.version != manifest.version
             || tool.protocol_version != manifest.protocol_version
             || tool.notebook_schema_version != manifest.notebook_schema_version
@@ -510,9 +588,9 @@ struct Active {
     version: String,
 }
 
-/// `<app-local-data>/goodnotes-importer`: `versions/<version>/`, `active.json`, and transient
+/// `<app-local-data>/<tool>-importer`: `versions/<version>/`, `active.json`, and transient
 /// `staging-*` / `download-*.part` entries that a failed install leaves nothing else of.
-pub struct InstallDir(pub PathBuf);
+pub struct InstallDir(pub PathBuf, pub &'static Tool);
 
 impl InstallDir {
     fn versions(&self) -> PathBuf {
@@ -532,7 +610,7 @@ impl InstallDir {
         let bytes = read_bounded(&self.0.join("active.json"), 4096).ok()?;
         let active: Active = serde_json::from_slice(&bytes).ok()?;
         let dir = self.version_dir(&active.version).ok()?;
-        dir.join(EXECUTABLE)
+        dir.join(self.1.executable())
             .is_file()
             .then_some((active.version, dir))
     }
@@ -542,9 +620,7 @@ impl InstallDir {
             version: version.to_owned(),
         })
         .map_err(|error| error.to_string())?;
-        let temporary = self.0.join("active.json.tmp");
-        fs::write(&temporary, bytes).map_err(|error| error.to_string())?;
-        fs::rename(&temporary, self.0.join("active.json")).map_err(|error| error.to_string())
+        crate::store::write_atomic(&self.0.join("active.json"), &bytes)
     }
 
     fn scratch(&self, prefix: &str) -> PathBuf {
@@ -578,10 +654,10 @@ pub fn install_archive(
     let mut retired = None;
     let mut installed_target = None;
     let result = (|| {
-        extract_package(archive, &package_folder(release.version), &staging)?;
-        let manifest = verify_package(&staging)?;
+        extract_package(archive, &package_folder(dir.1, release.version), &staging)?;
+        let manifest = verify_package(dir.1, &staging)?;
         let tool = probe(&staging)?;
-        check_contract(&manifest, Some(&tool), Some(release))?;
+        check_contract(dir.1, &manifest, Some(&tool), Some(release))?;
         let target = dir.version_dir(release.version)?;
         if target.exists() {
             // Same version reinstalled: the verified copy replaces the old one.
@@ -640,8 +716,8 @@ fn prune_versions(dir: &InstallDir, active: &str) {
 }
 
 /// Asks the installed tool for its contract and runs its own decoder check.
-fn probe_tool(dir: &Path) -> Result<ToolVersion, String> {
-    let executable = dir.join(EXECUTABLE);
+fn probe_tool(tool: &Tool, dir: &Path) -> Result<ToolVersion, String> {
+    let executable = dir.join(tool.executable());
     let output = run_contained(
         Command::new(&executable)
             .args(["--version", "--json"])
@@ -932,7 +1008,7 @@ fn notebook_notes(dir: &Path) -> (Vec<String>, usize) {
         notes.extend(
             page.warnings
                 .iter()
-                .map(|warning| format!("Seite {}: {warning}", page.page)),
+                .map(|warning| format!("Page {}: {warning}", page.page)),
         );
     }
     notes.truncate(MAX_LISTED_WARNINGS);
@@ -1037,8 +1113,8 @@ pub fn publish(
 }
 
 /// `Goodnotes Import 2026-10-21`, or the first free ` (2)`, ` (3)`… beside it.
-fn batch_name(parent: &Path, today: &str) -> Result<String, String> {
-    let base = format!("Goodnotes Import {today}");
+fn batch_name(tool: &Tool, parent: &Path, today: &str) -> Result<String, String> {
+    let base = format!("{} {today}", tool.batch);
     (1..1000)
         .map(|number| {
             if number == 1 {
@@ -1135,7 +1211,7 @@ struct State {
     update_problem: Option<String>,
 }
 
-/// Managed by Tauri. One download or import at a time.
+/// One importer's job. One download or import at a time per importer.
 #[derive(Default)]
 pub struct Importer {
     state: Arc<Mutex<State>>,
@@ -1167,6 +1243,24 @@ impl Importer {
     }
 }
 
+/// Managed by Tauri: each importer keeps its own job, chosen source and update state.
+#[derive(Default)]
+pub struct Importers {
+    goodnotes: Importer,
+    onenote: Importer,
+}
+
+impl Importers {
+    /// The importer the frontend named. Only the fixed ids exist.
+    fn get(&self, id: &str) -> Result<(&Importer, &'static Tool), String> {
+        match id {
+            "goodnotes" => Ok((&self.goodnotes, &GOODNOTES)),
+            "onenote" => Ok((&self.onenote, &ONENOTE)),
+            _ => Err("unknown importer".into()),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReleaseView {
@@ -1192,14 +1286,14 @@ pub struct ImporterStatus {
     pub update_problem: Option<String>,
 }
 
-fn install_dir(app: &tauri::AppHandle) -> Result<InstallDir, String> {
+fn install_dir(app: &tauri::AppHandle, tool: &'static Tool) -> Result<InstallDir, String> {
     let base = app
         .path()
         .app_local_data_dir()
         .map_err(|error| error.to_string())?;
-    let dir = base.join("goodnotes-importer");
+    let dir = base.join(format!("{}-importer", tool.id));
     fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
-    Ok(InstallDir(dir))
+    Ok(InstallDir(dir, tool))
 }
 
 /// The installed copy if it is usable: files match its manifest, and its contract fits. Hashes
@@ -1209,8 +1303,8 @@ fn usable_installation(dir: &InstallDir) -> Result<Option<(String, PathBuf)>, St
     let Some((version, path)) = dir.active() else {
         return Ok(None);
     };
-    let manifest = verify_package(&path)?;
-    check_contract(&manifest, None, None)?;
+    let manifest = verify_package(dir.1, &path)?;
+    check_contract(dir.1, &manifest, None, None)?;
     Ok(Some((version, path)))
 }
 
@@ -1222,7 +1316,7 @@ fn installed_contract(dir: &InstallDir) -> Result<Option<(String, PathBuf)>, Str
     let manifest: PackageManifest =
         serde_json::from_slice(&read_bounded(&path.join(PACKAGE_MANIFEST), MAX_JSON_BYTES)?)
             .map_err(|error| format!("the installed importer's manifest is malformed ({error})"))?;
-    check_contract(&manifest, None, None)?;
+    check_contract(dir.1, &manifest, None, None)?;
     Ok(Some((version, path)))
 }
 
@@ -1234,10 +1328,12 @@ fn source_view(path: &Path) -> Option<SourceView> {
 }
 
 #[tauri::command]
-pub async fn goodnotes_importer_status(
+pub async fn importer_status(
     app: tauri::AppHandle,
-    importer: tauri::State<'_, Importer>,
+    importers: tauri::State<'_, Importers>,
+    tool: String,
 ) -> Result<ImporterStatus, String> {
+    let (importer, tool) = importers.get(&tool)?;
     let (activity, source, update, update_checked, update_problem) = {
         let state = importer.state.lock().unwrap();
         (
@@ -1249,7 +1345,7 @@ pub async fn goodnotes_importer_status(
         )
     };
     let (installed, installed_problem) = if platform_supported() {
-        match installed_contract(&install_dir(&app)?) {
+        match installed_contract(&install_dir(&app, tool)?) {
             Ok(found) => (found.map(|(version, _)| version), None),
             Err(problem) => (None, Some(problem)),
         }
@@ -1258,7 +1354,7 @@ pub async fn goodnotes_importer_status(
     };
     Ok(ImporterStatus {
         platform_supported: platform_supported(),
-        release: PINNED.map(|pin| ReleaseView {
+        release: tool.pinned.map(|pin| ReleaseView {
             version: pin.version.into(),
             size_bytes: pin.size,
         }),
@@ -1274,20 +1370,22 @@ pub async fn goodnotes_importer_status(
 
 /// Downloads and installs the pinned release. Only ever called from the user's explicit action.
 #[tauri::command]
-pub fn goodnotes_importer_install(
+pub fn importer_install(
     app: tauri::AppHandle,
-    importer: tauri::State<'_, Importer>,
+    importers: tauri::State<'_, Importers>,
+    tool: String,
 ) -> Result<(), String> {
+    let (importer, tool) = importers.get(&tool)?;
     if !platform_supported() {
-        return Err("the Goodnotes importer is available for Windows x64 only".into());
+        return Err("the importer is available for Windows x64 only".into());
     }
-    let Some(release) = PINNED else {
+    let Some(release) = tool.pinned else {
         return Err("no tested importer release is available yet".into());
     };
     if importer.busy() {
         return Err("the importer is busy".into());
     }
-    let dir = install_dir(&app)?;
+    let dir = install_dir(&app, tool)?;
     importer.begin(Activity::Downloading {
         received: 0,
         total: release.size,
@@ -1297,12 +1395,12 @@ pub fn goodnotes_importer_install(
     std::thread::spawn(move || {
         let set = |activity| state.lock().unwrap().activity = Some(activity);
         let archive = dir.scratch("download-").with_extension("part");
-        let result = download(&release, &archive, &cancel, &|received, total| {
+        let result = download(tool, &release, &archive, &cancel, &|received, total| {
             set(Activity::Downloading { received, total });
         })
         .and_then(|_| {
             set(Activity::Installing);
-            install_archive(&dir, &archive, &release, &probe_tool)
+            install_archive(&dir, &archive, &release, &|path| probe_tool(tool, path))
         });
         let _ = fs::remove_file(&archive);
         set(match result {
@@ -1314,19 +1412,21 @@ pub fn goodnotes_importer_install(
 }
 
 #[tauri::command]
-pub fn goodnotes_importer_check_update(
+pub fn importer_check_update(
     app: tauri::AppHandle,
-    importer: tauri::State<'_, Importer>,
+    importers: tauri::State<'_, Importers>,
+    tool: String,
 ) -> Result<(), String> {
+    let (importer, tool) = importers.get(&tool)?;
     if !platform_supported() || importer.busy() {
         return Err("the importer cannot check for updates right now".into());
     }
-    let dir = install_dir(&app)?;
+    let dir = install_dir(&app, tool)?;
     let installed = installed_contract(&dir)?.map(|(version, _)| version);
     importer.begin(Activity::Checking)?;
     let state = importer.state.clone();
     std::thread::spawn(move || {
-        let result = update::check(installed.as_deref());
+        let result = update::check(tool, installed.as_deref());
         let mut state = state.lock().unwrap();
         state.update_checked = true;
         state.update = None;
@@ -1341,14 +1441,16 @@ pub fn goodnotes_importer_check_update(
 }
 
 #[tauri::command]
-pub fn goodnotes_importer_update(
+pub fn importer_update(
     app: tauri::AppHandle,
-    importer: tauri::State<'_, Importer>,
+    importers: tauri::State<'_, Importers>,
+    tool: String,
 ) -> Result<(), String> {
+    let (importer, tool) = importers.get(&tool)?;
     if !platform_supported() || importer.busy() {
         return Err("the importer cannot update right now".into());
     }
-    let dir = install_dir(&app)?;
+    let dir = install_dir(&app, tool)?;
     let candidate = importer
         .state
         .lock()
@@ -1369,12 +1471,12 @@ pub fn goodnotes_importer_update(
         let set = |activity| state.lock().unwrap().activity = Some(activity);
         let archive = dir.scratch("download-").with_extension("part");
         let release = candidate.pin();
-        let result = download(&release, &archive, &cancel, &|received, total| {
+        let result = download(tool, &release, &archive, &cancel, &|received, total| {
             set(Activity::Downloading { received, total })
         })
         .and_then(|_| {
             set(Activity::Installing);
-            install_archive(&dir, &archive, &release, &probe_tool)
+            install_archive(&dir, &archive, &release, &|path| probe_tool(tool, path))
         });
         let _ = fs::remove_file(&archive);
         let mut state = state.lock().unwrap();
@@ -1391,39 +1493,70 @@ pub fn goodnotes_importer_update(
 
 /// Stops a download or an import. An import keeps every notebook it had finished.
 #[tauri::command]
-pub fn goodnotes_importer_cancel(importer: tauri::State<'_, Importer>) {
+pub fn importer_cancel(importers: tauri::State<'_, Importers>, tool: String) -> Result<(), String> {
+    let (importer, _) = importers.get(&tool)?;
     importer.cancel.store(true, Ordering::SeqCst);
     let mut state = importer.state.lock().unwrap();
     if let Some(Activity::Importing { cancelling, .. }) = state.activity.as_mut() {
         *cancelling = true;
     }
+    Ok(())
 }
 
 /// Clears a finished or failed result so the dialog can start over.
 #[tauri::command]
-pub fn goodnotes_importer_dismiss(importer: tauri::State<'_, Importer>) {
+pub fn importer_dismiss(
+    importers: tauri::State<'_, Importers>,
+    tool: String,
+) -> Result<(), String> {
+    let (importer, _) = importers.get(&tool)?;
     if !importer.busy() {
         importer.state.lock().unwrap().activity = Some(Activity::Idle);
     }
+    Ok(())
 }
 
-/// Native file picker for a `.goodnotes` document or a Goodnotes backup ZIP. The path stays here.
+/// Native file picker for the importer's source files. The path stays here.
 #[tauri::command]
-pub async fn goodnotes_import_pick_source(
+pub async fn import_pick_source(
     app: tauri::AppHandle,
-    importer: tauri::State<'_, Importer>,
+    importers: tauri::State<'_, Importers>,
+    tool: String,
+    ui_language: Option<String>,
 ) -> Result<Option<SourceView>, String> {
+    let (importer, tool) = importers.get(&tool)?;
+    let (filter, extensions) = tool.source_filter;
     let Some(picked) = app
         .dialog()
         .file()
-        .add_filter("Goodnotes", &["goodnotes", "zip"])
+        .set_title(crate::settings::dialog_label(
+            ui_language.as_deref(),
+            "Choose source file",
+            "Quelldatei auswählen",
+        ))
+        .add_filter(filter, extensions)
         .blocking_pick_file()
     else {
         return Ok(None);
     };
     let path = picked.into_path().map_err(|error| error.to_string())?;
-    if !path.is_file() {
-        return Err("choose a .goodnotes file or a backup .zip".into());
+    let accepted = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            extensions
+                .iter()
+                .any(|allowed| allowed.eq_ignore_ascii_case(extension))
+        });
+    if !path.is_file() || !accepted {
+        return Err(format!(
+            "choose a {filter} file ({})",
+            extensions
+                .iter()
+                .map(|extension| format!(".{extension}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
     }
     let view = source_view(&path).ok_or("that file cannot be read")?;
     importer.state.lock().unwrap().source = Some(path);
@@ -1433,19 +1566,21 @@ pub async fn goodnotes_import_pick_source(
 /// Imports the picked source into a new batch folder inside the Library folder `parent`, or,
 /// with `into`, adds what is missing to an earlier batch (a retry with vector artwork allowed).
 #[tauri::command]
-pub fn goodnotes_import_start(
+pub fn import_start(
     app: tauri::AppHandle,
     roots: tauri::State<'_, AllowedRoots>,
-    importer: tauri::State<'_, Importer>,
+    importers: tauri::State<'_, Importers>,
+    tool: String,
     parent: String,
     allow_derived: bool,
     into: Option<String>,
 ) -> Result<(), String> {
+    let (importer, tool) = importers.get(&tool)?;
     if importer.busy() {
         return Err("the importer is busy".into());
     }
-    let Some((_, tool)) = installed_contract(&install_dir(&app)?)? else {
-        return Err("the Goodnotes importer is not installed".into());
+    let Some((_, installed)) = installed_contract(&install_dir(&app, tool)?)? else {
+        return Err("the importer is not installed".into());
     };
     let source = importer
         .state
@@ -1453,7 +1588,7 @@ pub fn goodnotes_import_start(
         .unwrap()
         .source
         .clone()
-        .ok_or("choose a Goodnotes file first")?;
+        .ok_or("choose a file first")?;
     let root = library::current_root(&app, &roots)?;
     let parent_dir = library::resolve(&root, &parent)?;
     if library::is_notebook(&parent_dir) {
@@ -1470,7 +1605,7 @@ pub fn goodnotes_import_start(
             (folder, existing)
         }
         None => {
-            let name = batch_name(&parent_dir, &today())?;
+            let name = batch_name(tool, &parent_dir, &today())?;
             library::validate_name(&name)?;
             let relative = if parent.is_empty() {
                 name.clone()
@@ -1496,7 +1631,8 @@ pub fn goodnotes_import_start(
     let cancel = importer.cancel.clone();
     std::thread::spawn(move || {
         let result = run_import(
-            &tool,
+            tool,
+            &installed,
             &source,
             &staging,
             (&batch_dir, &batch_relative),
@@ -1513,8 +1649,10 @@ pub fn goodnotes_import_start(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_import(
-    tool: &Path,
+    tool: &Tool,
+    installed: &Path,
     source: &Path,
     staging: &Path,
     library_batch: (&Path, &str),
@@ -1523,12 +1661,12 @@ fn run_import(
     state: &Mutex<State>,
 ) -> Result<ImportResult, String> {
     // The files on disk are checked again right before they run.
-    verify_package(tool).map_err(|error| {
+    verify_package(tool, installed).map_err(|error| {
         format!("the installed importer is damaged ({error}); download it again")
     })?;
     let tool_batch = staging.join("batch");
     let report = tool_batch.join("import-report.json");
-    let mut command = Command::new(tool.join(EXECUTABLE));
+    let mut command = Command::new(installed.join(tool.executable()));
     command.arg(source).arg(&tool_batch).current_dir(staging);
     if allow_derived {
         command.arg("--allow-derived");
@@ -1596,6 +1734,8 @@ mod tests {
     use zip::write::SimpleFileOptions;
 
     const VERSION: &str = "9.9.9";
+    /// Every importer must pass every check below; they share one code path.
+    const TOOLS: [&Tool; 2] = [&GOODNOTES, &ONENOTE];
 
     fn zip_bytes(entries: &[(&str, &[u8])]) -> Vec<u8> {
         let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
@@ -1620,21 +1760,22 @@ mod tests {
 
     /// A small but complete package: the executable stand-in, a runtime file, and a manifest
     /// listing both with their hashes.
-    fn package(version: &str, tamper: bool, extra: Option<(&str, &[u8])>) -> Vec<u8> {
-        let top = package_folder(version);
+    fn package(tool: &Tool, version: &str, tamper: bool, extra: Option<(&str, &[u8])>) -> Vec<u8> {
+        let top = package_folder(tool, version);
+        let executable = tool.executable();
         let exe: &[u8] = b"not really an executable";
         let runtime: &[u8] = b"print('decoder')";
         let manifest = serde_json::json!({
             "version": version, "protocolVersion": 1, "notebookSchemaVersion": SCHEMA_VERSION,
             "target": TARGET, "decoderCommit": "abc",
             "files": [
-                {"path": EXECUTABLE, "sizeBytes": exe.len(), "sha256": sha(exe)},
+                {"path": executable, "sizeBytes": exe.len(), "sha256": sha(exe)},
                 {"path": "runtime/decode.py", "sizeBytes": runtime.len(), "sha256": if tamper { "00".repeat(32) } else { sha(runtime) }},
             ]
         })
         .to_string();
         let mut entries: Vec<(String, Vec<u8>)> = vec![
-            (format!("{top}/{EXECUTABLE}"), exe.to_vec()),
+            (format!("{top}/{executable}"), exe.to_vec()),
             (format!("{top}/runtime/decode.py"), runtime.to_vec()),
             (format!("{top}/{PACKAGE_MANIFEST}"), manifest.into_bytes()),
         ];
@@ -1648,19 +1789,19 @@ mod tests {
         zip_bytes(&borrowed)
     }
 
-    fn pin(bytes: &[u8]) -> PinnedRelease<'static> {
+    fn pin(tool: &Tool, bytes: &[u8]) -> PinnedRelease<'static> {
         PinnedRelease {
             version: VERSION,
-            url: "https://github.com/Just8it/Goodtype-Goodnodes-importer/releases/download/v9.9.9/x.zip",
+            url: Box::leak(format!("{}/v9.9.9/x.zip", tool.release_url()).into_boxed_str()),
             size: bytes.len() as u64,
             sha256: Box::leak(sha(bytes).into_boxed_str()),
             decoder_commit: "abc",
         }
     }
 
-    fn good_probe(_: &Path) -> Result<ToolVersion, String> {
+    fn good_probe(tool: &Tool) -> Result<ToolVersion, String> {
         Ok(ToolVersion {
-            name: TOOL_NAME.into(),
+            name: tool.name.into(),
             version: VERSION.into(),
             protocol_version: 1,
             notebook_schema_version: SCHEMA_VERSION,
@@ -1669,36 +1810,36 @@ mod tests {
     }
 
     #[test]
-    fn downloads_only_from_the_pinned_release_and_github_asset_hosts() {
-        let release =
-            "https://github.com/Just8it/Goodtype-Goodnodes-importer/releases/download/v0.1.0/a.zip";
-        assert!(download_url_allowed(release, false));
-        assert!(download_url_allowed(
-            "https://objects.githubusercontent.com/x?sig=1",
-            true
-        ));
-        assert!(!download_url_allowed(
-            "https://objects.githubusercontent.com/x",
-            false
-        ));
-        assert!(!download_url_allowed(
-            &release.replace("https", "http"),
-            false
-        ));
-        assert!(!download_url_allowed(
-            "https://github.com/someone/else/releases/download/a.zip",
-            false
-        ));
-        assert!(!download_url_allowed("https://evil.example/x", true));
-        assert!(!download_url_allowed(
-            "https://github.com@evil.example/Just8it/Goodtype-Goodnodes-importer/releases/download/a",
-            false
-        ));
-        assert!(!download_url_allowed(
-            "https://github.com:8443/Just8it/Goodtype-Goodnodes-importer/releases/download/a",
-            false
-        ));
-        assert!(!download_url_allowed("/relative/redirect", true));
+    fn downloads_only_from_the_tools_own_releases_and_github_asset_hosts() {
+        for tool in TOOLS {
+            let release = format!("{}/v0.1.0/a.zip", tool.release_url());
+            let repository = tool.repository;
+            assert!(download_url_allowed(tool, &release, false));
+            assert!(download_url_allowed(
+                tool,
+                "https://objects.githubusercontent.com/x?sig=1",
+                true
+            ));
+            for refused in [
+                "https://objects.githubusercontent.com/x".to_owned(),
+                release.replace("https", "http"),
+                "https://github.com/someone/else/releases/download/a.zip".to_owned(),
+                format!("https://github.com@evil.example{repository}/releases/download/a"),
+                format!("https://github.com:8443{repository}/releases/download/a"),
+                // The repository's other pages are not release downloads.
+                format!("https://github.com{repository}/archive/main.zip"),
+            ] {
+                assert!(!download_url_allowed(tool, &refused, false), "{refused}");
+            }
+            assert!(!download_url_allowed(tool, "https://evil.example/x", true));
+            assert!(!download_url_allowed(tool, "/relative/redirect", true));
+        }
+        // One importer's releases are never a permitted download for the other.
+        for (tool, other) in [(&GOODNOTES, &ONENOTE), (&ONENOTE, &GOODNOTES)] {
+            let release = format!("{}/v0.1.0/a.zip", other.release_url());
+            assert!(!download_url_allowed(tool, &release, false));
+            assert!(!download_url_allowed(tool, &release, true));
+        }
     }
 
     /// A stream that delivers some bytes and then fails, like a dropped connection.
@@ -1762,74 +1903,123 @@ mod tests {
 
     #[test]
     fn installs_a_verified_package_and_keeps_it_when_a_later_one_is_bad() {
-        let home = tempfile::tempdir().unwrap();
-        let dir = InstallDir(home.path().to_path_buf());
-        let good = package(VERSION, false, None);
-        let archive = home.path().join("good.zip");
-        fs::write(&archive, &good).unwrap();
-        assert_eq!(
-            install_archive(&dir, &archive, &pin(&good), &good_probe).unwrap(),
-            VERSION
-        );
-        assert_eq!(dir.active().unwrap().0, VERSION);
-        assert!(usable_installation(&dir).unwrap().is_some());
-
-        // Wrong checksum, tampered file, unlisted file, failing probe: each refused, the
-        // installed version untouched and no staging left behind.
-        let tampered = package(VERSION, true, None);
-        let unlisted = package(VERSION, false, Some(("runtime/extra.dll", b"surprise")));
-        type Probe<'a> = &'a dyn Fn(&Path) -> Result<ToolVersion, String>;
-        let cases: Vec<(Vec<u8>, PinnedRelease, Probe)> = vec![
-            (
-                good.clone(),
-                PinnedRelease {
-                    sha256: "00",
-                    ..pin(&good)
-                },
-                &good_probe,
-            ),
-            (tampered.clone(), pin(&tampered), &good_probe),
-            (unlisted.clone(), pin(&unlisted), &good_probe),
-            (good.clone(), pin(&good), &|_| {
-                Err("self-check failed".into())
-            }),
-        ];
-        for (bytes, release, probe) in cases {
-            fs::write(&archive, &bytes).unwrap();
-            assert!(install_archive(&dir, &archive, &release, probe).is_err());
+        for tool in TOOLS {
+            let home = tempfile::tempdir().unwrap();
+            let dir = InstallDir(home.path().to_path_buf(), tool);
+            let good = package(tool, VERSION, false, None);
+            let archive = home.path().join("good.zip");
+            fs::write(&archive, &good).unwrap();
+            let probe = |_: &Path| good_probe(tool);
+            assert_eq!(
+                install_archive(&dir, &archive, &pin(tool, &good), &probe).unwrap(),
+                VERSION
+            );
             assert_eq!(dir.active().unwrap().0, VERSION);
             assert!(usable_installation(&dir).unwrap().is_some());
-            let leftovers = fs::read_dir(home.path())
-                .unwrap()
-                .filter_map(Result::ok)
-                .filter(|entry| entry.file_name().to_string_lossy().starts_with("staging-"))
-                .count();
-            assert_eq!(leftovers, 0);
+
+            // Wrong checksum, tampered file, unlisted file, failing probe, the other importer's
+            // package or version report: each refused, the installed version untouched and no
+            // staging left behind.
+            let other = if tool.id == "goodnotes" {
+                &ONENOTE
+            } else {
+                &GOODNOTES
+            };
+            let tampered = package(tool, VERSION, true, None);
+            let unlisted = package(
+                tool,
+                VERSION,
+                false,
+                Some(("runtime/extra.dll", b"surprise")),
+            );
+            let foreign = package(other, VERSION, false, None);
+            let foreign_probe = |_: &Path| good_probe(other);
+            type Probe<'a> = &'a dyn Fn(&Path) -> Result<ToolVersion, String>;
+            let cases: Vec<(Vec<u8>, PinnedRelease, Probe)> = vec![
+                (
+                    good.clone(),
+                    PinnedRelease {
+                        sha256: "00",
+                        ..pin(tool, &good)
+                    },
+                    &probe,
+                ),
+                (tampered.clone(), pin(tool, &tampered), &probe),
+                (unlisted.clone(), pin(tool, &unlisted), &probe),
+                (foreign.clone(), pin(tool, &foreign), &probe),
+                (good.clone(), pin(tool, &good), &foreign_probe),
+                (good.clone(), pin(tool, &good), &|_| {
+                    Err("self-check failed".into())
+                }),
+            ];
+            for (bytes, release, probe) in cases {
+                fs::write(&archive, &bytes).unwrap();
+                assert!(install_archive(&dir, &archive, &release, probe).is_err());
+                assert_eq!(dir.active().unwrap().0, VERSION);
+                assert!(usable_installation(&dir).unwrap().is_some());
+                let leftovers = fs::read_dir(home.path())
+                    .unwrap()
+                    .filter_map(Result::ok)
+                    .filter(|entry| entry.file_name().to_string_lossy().starts_with("staging-"))
+                    .count();
+                assert_eq!(leftovers, 0);
+            }
         }
     }
 
     #[test]
     fn activation_failure_restores_same_version_and_success_cleans_inactive_versions() {
         let home = tempfile::tempdir().unwrap();
-        let dir = InstallDir(home.path().to_path_buf());
-        let good = package(VERSION, false, None);
+        let dir = InstallDir(home.path().to_path_buf(), &GOODNOTES);
+        let good = package(&GOODNOTES, VERSION, false, None);
         let archive = home.path().join("good.zip");
         fs::write(&archive, &good).unwrap();
-        install_archive(&dir, &archive, &pin(&good), &good_probe).unwrap();
+        install_archive(&dir, &archive, &pin(&GOODNOTES, &good), &|_| {
+            good_probe(&GOODNOTES)
+        })
+        .unwrap();
         let installed = dir.active().unwrap().1;
-        // Fail activation while its previous pointer remains readable.
-        fs::create_dir(home.path().join("active.json.tmp")).unwrap();
-        assert!(install_archive(&dir, &archive, &pin(&good), &good_probe).is_err());
+        // Refuse replacement while keeping the previous pointer readable.
+        let active = home.path().join("active.json");
+        #[cfg(windows)]
+        let active_lock = {
+            use std::os::windows::fs::OpenOptionsExt;
+            fs::OpenOptions::new()
+                .read(true)
+                .share_mode(1)
+                .open(&active)
+                .unwrap()
+        };
+        #[cfg(unix)]
+        {
+            fs::rename(&active, home.path().join("active-before.json")).unwrap();
+            std::os::unix::fs::symlink(home.path().join("active-before.json"), &active).unwrap();
+        }
+        assert!(
+            install_archive(&dir, &archive, &pin(&GOODNOTES, &good), &|_| good_probe(
+                &GOODNOTES
+            ))
+            .is_err()
+        );
         assert_eq!(dir.active().unwrap().1, installed);
         assert!(usable_installation(&dir).unwrap().is_some());
-        fs::remove_dir(home.path().join("active.json.tmp")).unwrap();
+        #[cfg(windows)]
+        drop(active_lock);
+        #[cfg(unix)]
+        {
+            fs::remove_file(&active).unwrap();
+            fs::rename(home.path().join("active-before.json"), &active).unwrap();
+        }
         let old = dir.version_dir("0.1.0").unwrap();
         fs::create_dir(&old).unwrap();
         fs::write(old.join("old.exe"), b"old importer only").unwrap();
         let notebook = home.path().join("notebooks");
         fs::create_dir(&notebook).unwrap();
         fs::write(notebook.join("goodtype.json"), b"preserve").unwrap();
-        install_archive(&dir, &archive, &pin(&good), &good_probe).unwrap();
+        install_archive(&dir, &archive, &pin(&GOODNOTES, &good), &|_| {
+            good_probe(&GOODNOTES)
+        })
+        .unwrap();
         assert!(!old.exists());
         assert!(installed.exists());
         assert!(notebook.join("goodtype.json").is_file());
@@ -1838,57 +2028,72 @@ mod tests {
     #[test]
     fn python_caches_are_cleared_but_other_additions_still_fail() {
         let home = tempfile::tempdir().unwrap();
-        let dir = InstallDir(home.path().to_path_buf());
-        let good = package(VERSION, false, None);
+        let dir = InstallDir(home.path().to_path_buf(), &GOODNOTES);
+        let good = package(&GOODNOTES, VERSION, false, None);
         let archive = home.path().join("good.zip");
         fs::write(&archive, &good).unwrap();
-        install_archive(&dir, &archive, &pin(&good), &good_probe).unwrap();
+        install_archive(&dir, &archive, &pin(&GOODNOTES, &good), &|_| {
+            good_probe(&GOODNOTES)
+        })
+        .unwrap();
         let installed = dir.active().unwrap().1;
         let cache = installed.join("runtime/__pycache__/decode.cpython-314.pyc");
         fs::create_dir_all(cache.parent().unwrap()).unwrap();
         fs::write(&cache, b"compiled, possibly tampered").unwrap();
-        assert!(verify_package(&installed).is_ok());
+        assert!(verify_package(&GOODNOTES, &installed).is_ok());
         assert!(!cache.exists(), "the cache must be removed, not trusted");
         fs::write(
             installed.join("runtime/__pycache__/sneaky.py"),
             b"import os",
         )
         .unwrap();
-        assert!(verify_package(&installed).is_err());
+        assert!(verify_package(&GOODNOTES, &installed).is_err());
     }
 
     #[test]
     fn refuses_unsafe_archives() {
-        let top = package_folder(VERSION);
-        let home = tempfile::tempdir().unwrap();
-        let cases: Vec<Vec<(String, &[u8])>> = vec![
-            vec![(format!("{top}/../escape.txt"), b"x")],
-            vec![("C:/Windows/evil.dll".into(), b"x")],
-            vec![("/abs.txt".into(), b"x")],
-            vec![(format!("{top}\\back\\slash.txt"), b"x")],
-            vec![("other-folder/a.txt".into(), b"x")],
-            vec![(format!("{top}/CON.txt"), b"x")],
-            vec![
-                (format!("{top}/a.txt"), b"x"),
-                (format!("{top}/A.TXT"), b"y"),
-            ],
-        ];
-        for (index, entries) in cases.iter().enumerate() {
-            let borrowed: Vec<(&str, &[u8])> =
-                entries.iter().map(|(n, b)| (n.as_str(), *b)).collect();
-            let archive = home.path().join(format!("{index}.zip"));
-            fs::write(&archive, zip_bytes(&borrowed)).unwrap();
-            let into = home.path().join(format!("out-{index}"));
-            assert!(
-                extract_package(&archive, &top, &into).is_err(),
-                "case {index} was accepted"
+        for tool in TOOLS {
+            let top = package_folder(tool, VERSION);
+            let other = package_folder(
+                if tool.id == "goodnotes" {
+                    &ONENOTE
+                } else {
+                    &GOODNOTES
+                },
+                VERSION,
             );
+            let home = tempfile::tempdir().unwrap();
+            let cases: Vec<Vec<(String, &[u8])>> = vec![
+                vec![(format!("{top}/../escape.txt"), b"x")],
+                vec![("C:/Windows/evil.dll".into(), b"x")],
+                vec![("/abs.txt".into(), b"x")],
+                vec![(format!("{top}\\back\\slash.txt"), b"x")],
+                vec![("other-folder/a.txt".into(), b"x")],
+                vec![(format!("{other}/a.txt"), b"x")],
+                vec![(format!("{top}/CON.txt"), b"x")],
+                vec![
+                    (format!("{top}/a.txt"), b"x"),
+                    (format!("{top}/A.TXT"), b"y"),
+                ],
+            ];
+            for (index, entries) in cases.iter().enumerate() {
+                let borrowed: Vec<(&str, &[u8])> =
+                    entries.iter().map(|(n, b)| (n.as_str(), *b)).collect();
+                let archive = home.path().join(format!("{index}.zip"));
+                fs::write(&archive, zip_bytes(&borrowed)).unwrap();
+                let into = home.path().join(format!("out-{index}"));
+                assert!(
+                    extract_package(&archive, &top, &into).is_err(),
+                    "{} case {index} was accepted",
+                    tool.id
+                );
+            }
         }
     }
 
     #[test]
     fn refuses_links_and_decompression_beyond_the_budget() {
-        let top = package_folder(VERSION);
+        let top = package_folder(&GOODNOTES, VERSION);
         let home = tempfile::tempdir().unwrap();
         let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
         writer
@@ -1932,31 +2137,39 @@ mod tests {
             decoder_commit: "abc".into(),
             files: Vec::new(),
         };
-        let release = pin(b"x");
-        assert!(
-            check_contract(
-                &manifest(1, SCHEMA_VERSION),
-                Some(&good_probe(Path::new("")).unwrap()),
-                Some(&release)
-            )
-            .is_ok()
-        );
-        assert!(check_contract(&manifest(2, SCHEMA_VERSION), None, None).is_err());
-        assert!(check_contract(&manifest(1, SCHEMA_VERSION + 1), None, None).is_err());
-        assert!(
-            check_contract(
-                &manifest(1, SCHEMA_VERSION),
-                None,
-                Some(&PinnedRelease {
-                    version: "1.0.0",
-                    ..release
-                })
-            )
-            .is_err()
-        );
-        let mut lying = good_probe(Path::new("")).unwrap();
-        lying.version = "0.0.1".into();
-        assert!(check_contract(&manifest(1, SCHEMA_VERSION), Some(&lying), None).is_err());
+        for tool in TOOLS {
+            let release = pin(tool, b"x");
+            let check = |manifest: &PackageManifest, version, pin| {
+                check_contract(tool, manifest, version, pin)
+            };
+            let reported = good_probe(tool).unwrap();
+            assert!(
+                check(
+                    &manifest(1, SCHEMA_VERSION),
+                    Some(&reported),
+                    Some(&release)
+                )
+                .is_ok()
+            );
+            assert!(check(&manifest(2, SCHEMA_VERSION), None, None).is_err());
+            assert!(check(&manifest(1, SCHEMA_VERSION + 1), None, None).is_err());
+            let other_release = PinnedRelease {
+                version: "1.0.0",
+                ..release
+            };
+            assert!(check(&manifest(1, SCHEMA_VERSION), None, Some(&other_release)).is_err());
+            let mut lying = good_probe(tool).unwrap();
+            lying.version = "0.0.1".into();
+            assert!(check(&manifest(1, SCHEMA_VERSION), Some(&lying), None).is_err());
+            // A package whose executable reports the other importer's name is not this one.
+            let other = if tool.id == "goodnotes" {
+                &ONENOTE
+            } else {
+                &GOODNOTES
+            };
+            let impostor = good_probe(other).unwrap();
+            assert!(check(&manifest(1, SCHEMA_VERSION), Some(&impostor), None).is_err());
+        }
     }
 
     fn fixture_notebook(into: &Path) {
@@ -2074,7 +2287,7 @@ mod tests {
         let path = home.path().join("import-report.json");
         fs::write(&path, b"{not json").unwrap();
         assert!(read_report(&path).is_err());
-        fs::write(&path, vec![b' '; (MAX_JSON_BYTES + 1) as usize]).unwrap();
+        fs::write(&path, vec![b' '; MAX_JSON_BYTES + 1]).unwrap();
         assert!(read_report(&path).is_err());
         fs::write(
             &path,
@@ -2104,11 +2317,14 @@ mod tests {
             decoder_commit: "66028455fd7fc61b7931679915d811a25485e3ad",
         };
         let home = tempfile::tempdir().unwrap();
-        let dir = InstallDir(home.path().join("installed"));
+        let dir = InstallDir(home.path().join("installed"), &GOODNOTES);
         fs::create_dir_all(&dir.0).unwrap();
         let started = Instant::now();
         assert_eq!(
-            install_archive(&dir, &archive, &release, &probe_tool).unwrap(),
+            install_archive(&dir, &archive, &release, &|path| probe_tool(
+                &GOODNOTES, path
+            ))
+            .unwrap(),
             "0.1.0"
         );
         println!("installed and self-checked in {:?}", started.elapsed());
@@ -2123,6 +2339,7 @@ mod tests {
             let folder = library.join(batch);
             let started = Instant::now();
             let result = run_import(
+                &GOODNOTES,
                 &tool,
                 Path::new(source),
                 &staging,
@@ -2209,32 +2426,89 @@ mod tests {
         println!("edited, saved, moved and reopened without the importer installed");
     }
 
+    /// Opt-in: the pinned OneNote release, installed and run exactly as the app does it, on a
+    /// OneNote export that never belongs in the repository:
+    ///
+    /// ```text
+    /// ONENOTE_RELEASE_ZIP=…zip ONENOTE_EXPORT=….onepkg cargo test real_onenote -- --ignored --nocapture
+    /// ```
     #[test]
-    fn the_pinned_release_is_a_permitted_download() {
-        let pin = PINNED.expect("a tested release is pinned");
-        assert!(download_url_allowed(pin.url, false));
-        assert!(pin.size > 0 && pin.size <= MAX_PACKAGE_BYTES);
-        assert_eq!(pin.sha256.len(), 64);
-        assert!(
-            pin.url
-                .ends_with(&format!("{}.zip", package_folder(pin.version)))
-        );
+    #[ignore = "needs the downloaded OneNote release package and a OneNote export"]
+    fn real_onenote_release_installs_and_imports() {
+        let env = |name: &str| std::env::var(name).unwrap_or_else(|_| panic!("set {name}"));
+        let archive = PathBuf::from(env("ONENOTE_RELEASE_ZIP"));
+        let release = ONENOTE.pinned.expect("a pinned OneNote release");
+        let home = tempfile::tempdir().unwrap();
+        let dir = InstallDir(home.path().join("installed"), &ONENOTE);
+        fs::create_dir_all(&dir.0).unwrap();
+        install_archive(&dir, &archive, &release, &|path| probe_tool(&ONENOTE, path)).unwrap();
+        let (_, installed) = usable_installation(&dir).unwrap().unwrap();
+
+        let library = home.path().join("Library");
+        let staging = library.join(".goodtype-import-test");
+        fs::create_dir_all(&staging).unwrap();
+        let name = batch_name(&ONENOTE, &library, &today()).unwrap();
+        let folder = library.join(&name);
+        let state = Mutex::new(State::default());
+        let result = run_import(
+            &ONENOTE,
+            &installed,
+            Path::new(&env("ONENOTE_EXPORT")),
+            &staging,
+            (&folder, &name),
+            false,
+            &AtomicBool::new(false),
+            &state,
+        )
+        .unwrap();
+        fs::remove_dir_all(&staging).unwrap();
+        println!("{result:#?}");
+        assert!(result.problem.is_none());
+        assert!(!result.notebooks.is_empty());
+        for notebook in &result.notebooks {
+            assert_eq!(notebook.status, "imported", "{notebook:?}");
+            let path = library.join(notebook.path.as_ref().unwrap());
+            validate_notebook(&path).unwrap();
+            assert!(path.join("originals/source.one").is_file());
+        }
+    }
+
+    #[test]
+    fn the_pinned_releases_are_permitted_downloads() {
+        for tool in TOOLS {
+            let pin = tool.pinned.expect("a tested release is pinned");
+            assert!(download_url_allowed(tool, pin.url, false), "{}", tool.id);
+            assert!(pin.size > 0 && pin.size <= MAX_PACKAGE_BYTES);
+            assert_eq!(pin.sha256.len(), 64);
+            assert_eq!(pin.decoder_commit.len(), 40);
+            assert!(
+                pin.url
+                    .ends_with(&format!("{}.zip", package_folder(tool, pin.version)))
+            );
+        }
+        assert_ne!(GOODNOTES.id, ONENOTE.id);
+        assert_ne!(GOODNOTES.repository, ONENOTE.repository);
     }
 
     #[test]
     fn batch_folders_never_reuse_a_name() {
         let home = tempfile::tempdir().unwrap();
         assert_eq!(
-            batch_name(home.path(), "2026-10-21").unwrap(),
+            batch_name(&GOODNOTES, home.path(), "2026-10-21").unwrap(),
             "Goodnotes Import 2026-10-21"
         );
         fs::create_dir(home.path().join("Goodnotes Import 2026-10-21")).unwrap();
         assert_eq!(
-            batch_name(home.path(), "2026-10-21").unwrap(),
+            batch_name(&GOODNOTES, home.path(), "2026-10-21").unwrap(),
             "Goodnotes Import 2026-10-21 (2)"
+        );
+        assert_eq!(
+            batch_name(&ONENOTE, home.path(), "2026-10-21").unwrap(),
+            "OneNote Import 2026-10-21"
         );
         assert_eq!(today().len(), 10);
         library::validate_name("Goodnotes Import 2026-10-21 (2)").unwrap();
+        library::validate_name("OneNote Import 2026-10-21").unwrap();
     }
 
     #[test]
@@ -2269,5 +2543,15 @@ mod tests {
         );
         importer.set(Activity::Idle);
         assert!(importer.begin(Activity::Installing).is_ok());
+        // The other importer keeps its own job; only the fixed ids exist.
+        let importers = Importers::default();
+        let (goodnotes, tool) = importers.get("goodnotes").unwrap();
+        assert_eq!(tool.id, "goodnotes");
+        goodnotes.begin(Activity::Installing).unwrap();
+        let (onenote, tool) = importers.get("onenote").unwrap();
+        assert_eq!(tool.id, "onenote");
+        assert!(onenote.begin(Activity::Installing).is_ok());
+        assert!(importers.get("../goodnotes").is_err());
+        assert!(importers.get("").is_err());
     }
 }

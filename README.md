@@ -47,11 +47,15 @@ Goodtype keeps your notebooks as plain files on your own disk. No account, no sy
   sizes from A6 to Tabloid in either orientation, previewed before the page exists.
 - **Images and PDF material** placed and scaled on the page, or a PDF brought in a page at a time
   as pages of its own.
-- **Goodnotes import** from `.goodnotes` files or backup ZIPs into a folder of ordinary notebooks.
-  Open **New → Import from Goodnotes…** in the Library to download the optional
-  [importer](https://github.com/Just8it/Goodtype-Goodnodes-importer). Conversion runs locally,
-  preserves the originals, and brings across editable handwriting and supported shapes, with
-  cropped vector artwork for other supported content. Some Goodnotes features are not supported.
+- **Goodnotes and OneNote import** into a folder of ordinary notebooks. Open
+  **New → Import notebooks…** in the Library and pick the source. Goodnotes `.goodnotes` files and
+  backup ZIPs bring across editable handwriting and supported shapes, with cropped vector artwork
+  for other supported content. OneNote sections, `.onepkg` packages and web exports bring across
+  typed text as Typst (equations as Typst math), handwriting as ink, and pictures; tall pages are
+  split at clear gaps. Each source uses an optional importer
+  ([Goodnotes](https://github.com/Just8it/Goodtype-Goodnodes-importer),
+  [OneNote](https://github.com/Just8it/Goodtype-OneNote-Importer)) downloaded when you ask.
+  Conversion runs locally and preserves the originals; some features of each app are not supported.
 - **Mixed selection** with lasso filters for handwriting, highlighting, shapes, images and Typst
   blocks, so you can move, resize, duplicate or delete them together.
 - **Multi-page notebooks** that scroll continuously, with pages you can reorder, duplicate, clear
@@ -70,10 +74,10 @@ readable. The supplied ink decoder prints binary layers as JSON; see the
 [wire format](./formats/ink-v1.md). Nothing about the format requires Goodtype to be running.
 
 Typst packages download only on a cache miss, and package downloads can be switched off. The
-optional Goodnotes importer downloads from GitHub when you request it; update checks and
-downloads are explicit, with signed release metadata verified before an update is installed.
-Your notebooks stay on your device. Once installed, the importer works offline, and Goodtype's
-core workflows work without it.
+optional Goodnotes and OneNote importers download from GitHub when you request them; update
+checks and downloads are explicit, with signed release metadata verified before an update is
+installed. Your notebooks stay on your device. Once installed, the importers work offline, and
+Goodtype's core workflows work without them.
 
 ## Build
 
