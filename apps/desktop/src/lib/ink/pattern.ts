@@ -55,15 +55,17 @@ function pointAt(path: MeasuredPoint[], distance: number, cursor: { segment: num
 export const MIN_PATTERN_SPACING = 0.5;
 export const MAX_PATTERN_SPACING = 3;
 
-function dashedRuns(path: MeasuredPoint[], widthPt: number, spacing: number): OutlinePoint[][] {
+function dashedRuns(path: MeasuredPoint[], widthPt: number, spacing: number, offset: number): OutlinePoint[][] {
   const total = path[path.length - 1].distance;
   const dash = Math.max(widthPt * 4, 6);
   const gap = Math.max(widthPt * 2.5, 3.5) * spacing;
   const cursor = { segment: 0 };
   const runs: OutlinePoint[][] = [];
-  for (let start = 0; start < total; start += dash + gap) {
+  // A fragment continues its original's dashes, so the first one may already be under way.
+  for (let start = offset > 0 ? -(offset % (dash + gap)) : 0; start < total; start += dash + gap) {
     const end = Math.min(start + dash, total);
-    const run = [pointAt(path, start, cursor)];
+    if (end <= 0) continue;
+    const run = [pointAt(path, Math.max(start, 0), cursor)];
     let inside = cursor.segment + 1;
     while (inside < path.length && path[inside].distance < end) {
       run.push(path[inside].point);
@@ -84,7 +86,7 @@ function dashedRuns(path: MeasuredPoint[], widthPt: number, spacing: number): Ou
   return runs;
 }
 
-function dottedRuns(path: MeasuredPoint[], widthPt: number, factor: number): OutlinePoint[][] {
+function dottedRuns(path: MeasuredPoint[], widthPt: number, factor: number, offset: number): OutlinePoint[][] {
   const total = path[path.length - 1].distance;
   const cursor = { segment: 0 };
   // Centre to centre. Even at the smallest factor this stays above one width, so dots never merge.
@@ -92,28 +94,34 @@ function dottedRuns(path: MeasuredPoint[], widthPt: number, factor: number): Out
   const runs: OutlinePoint[][] = [];
 
   // Keep the phase fixed at the stroke origin. Redistributing dots across the
-  // current length makes every existing dot drift whenever a sample arrives.
-  for (let distance = 0; distance <= total; distance += spacing) {
+  // current length makes every existing dot drift whenever a sample arrives. A fragment's first
+  // dot is the next one its original would have drawn.
+  const first = offset > 0 ? (spacing - (offset % spacing)) % spacing : 0;
+  for (let distance = first; distance <= total; distance += spacing) {
     runs.push([pointAt(path, distance, cursor)]);
   }
 
   return runs;
 }
 
-/** Centreline runs for the chosen pattern. */
+/**
+ * Centreline runs for the chosen pattern. `offset` is how far along its original stroke a fragment
+ * begins; the phase continues from it.
+ */
 export function patternRuns(
   points: OutlinePoint[],
   widthPt: number,
   pattern: StrokePattern,
   spacing = 1,
+  offset = 0,
 ): OutlinePoint[][] {
   if (points.length === 0) return [];
   if (pattern === "solid") return [points];
   const path = measured(points);
   if (path.length === 1) return [[path[0].point]];
   return pattern === "dashed"
-    ? dashedRuns(path, widthPt, spacing)
-    : dottedRuns(path, widthPt, spacing);
+    ? dashedRuns(path, widthPt, spacing, offset)
+    : dottedRuns(path, widthPt, spacing, offset);
 }
 
 /** Fillable polygons for the complete patterned stroke. */
@@ -124,7 +132,7 @@ export function patternedOutlinePoints(
   spacing = 1,
   round = false,
 ): InkPolygon[] {
-  const runs = patternRuns(points, options.widthPt, pattern, spacing);
+  const runs = patternRuns(points, options.widthPt, pattern, spacing, options.trim?.start ?? 0);
   if (pattern === "solid") {
     return runs.flatMap((run) => round ? roundedOutlinePoints(run, options) : [outlinePoints(run, options)])
       .filter((polygon) => polygon.length > 0);
@@ -133,7 +141,7 @@ export function patternedOutlinePoints(
     return runs.map(([point]) => outlineDot(point, outlineWidthAt(point, options) / 2));
   }
 
-  const segmentOptions = { ...options, taper: 0 };
+  const segmentOptions = { ...options, taper: 0, trim: undefined };
   return runs.flatMap((run) => {
     const first = run[0];
     const last = run[run.length - 1];

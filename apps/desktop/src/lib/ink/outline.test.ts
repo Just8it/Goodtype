@@ -9,8 +9,12 @@ type Case = {
   width_pt: number;
   pressure: boolean;
   taper: number;
+  /** Lineage of a precise-eraser fragment, `[start, end]` (ADR 0037). */
+  trim?: [number, number];
   expected: [number, number][];
 };
+
+const trimOf = (trim?: number[]) => (trim ? { start: trim[0], end: trim[1] } : undefined);
 
 // The same fixture `crates/goodtype-core/src/outline.rs` asserts against. Live drawing happens
 // here and export happens in Rust; without this the two silently drift and the PDF stops
@@ -27,6 +31,7 @@ describe("outline geometry matches the shared fixture", () => {
         widthPt: testCase.width_pt,
         pressure: testCase.pressure,
         taper: testCase.taper,
+        trim: trimOf(testCase.trim),
       });
       expect(produced.map((vertex) => [vertex.x, vertex.y])).toEqual(testCase.expected);
     });
@@ -37,7 +42,8 @@ describe("outlinePath", () => {
   it("matches the Rust rounded-pen fixtures", () => {
     for (const testCase of roundedCases) {
       const points = testCase.points.map(([x, y, pressure]) => ({ x, y, pressure }));
-      const produced = roundedOutlinePoints(points, { widthPt: testCase.width_pt, pressure: testCase.pressure, taper: testCase.taper });
+      const produced = roundedOutlinePoints(points, { widthPt: testCase.width_pt, pressure: testCase.pressure,
+        taper: testCase.taper, trim: trimOf((testCase as { trim?: number[] }).trim) });
       expect(produced.map((polygon) => polygon.map((p) => [p.x, p.y]))).toEqual(testCase.expected);
     }
   });

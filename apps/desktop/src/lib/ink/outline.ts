@@ -21,7 +21,15 @@ export type OutlineOptions = {
   pressure: boolean;
   /** Fraction of the stroke length over which the ends taper to a point, 0 disables. */
   taper: number;
+  /**
+   * For a fragment left by the precise eraser: how much of the original stroke lies before and
+   * after it, in the same units as the points. Absent for a stroke drawn whole.
+   */
+  trim?: OutlineTrim;
 };
+
+/** Arc length of the original stroke cut away before and after a fragment (ADR 0037). */
+export type OutlineTrim = { start: number; end: number };
 
 /** Narrowest a pressure-varying stroke gets, as a fraction of its nominal width. */
 const MIN_PRESSURE_SCALE = 0.25;
@@ -101,12 +109,18 @@ function outlineSamples(
     if (span(point, previous) > MIN_SAMPLE_SPACING_PT) path.push(point);
   }
 
-  if (path.every((point) => span(point, path[0]) <= options.widthPt / 2)) {
+  // A fragment keeps its real geometry, however short: a full-width dot would be fatter than the
+  // ink it stands for and could reach back into the area the eraser just cleared.
+  if (!options.trim && path.every((point) => span(point, path[0]) <= options.widthPt / 2)) {
     return [{ point: path[0], radius: options.widthPt / 2 }];
   }
 
-  // Two tapered endpoints have zero width; retain a middle section even without a move sample.
-  if (path.length === 2 && options.taper > 0) {
+  const before = options.trim?.start ?? 0;
+  const after = options.trim?.end ?? 0;
+
+  // Two tapered endpoints have zero width; retain a middle section even without a move sample. A
+  // cut end keeps its width, so a fragment only needs this when both of its ends are original tips.
+  if (path.length === 2 && options.taper > 0 && before === 0 && after === 0) {
     const [first, last] = path;
     path.splice(1, 0, {
       x: (first.x + last.x) / 2,
@@ -123,16 +137,45 @@ function outlineSamples(
     cumulative.push(cumulative[index - 1] + Math.hypot(dx, dy));
   }
   const total = cumulative[cumulative.length - 1];
+  // The taper belongs to the original stroke: a fragment measures it from the original ends.
   const taperLength =
     options.taper > 0
-      ? Math.min(total * options.taper, options.widthPt * TAPER_MAX_NIB_WIDTHS)
+      ? Math.min((before + total + after) * options.taper, options.widthPt * TAPER_MAX_NIB_WIDTHS)
       : 0;
 
   return path.map((point, index) => {
     const ramp = taperLength > 0
-      ? Math.min(1, cumulative[index] / taperLength, (total - cumulative[index]) / taperLength)
+      ? Math.min(1, (before + cumulative[index]) / taperLength,
+        (after + total - cumulative[index]) / taperLength)
       : 1;
     return { point, radius: outlineWidthAt(point, options) / 2 * ramp };
+  });
+}
+
+/**
+ * The drawn half-width at every sample, resolved exactly as `outlineSamples` resolves it, but
+ * aligned with the input instead of filtered. The precise eraser measures contact with this, so
+ * what it removes and what is drawn cannot disagree. Arc length runs over every sample; the
+ * renderer's dedup of near-coincident samples shortens it by less than 0.05 pt per dropped one.
+ */
+export function inkRadii(points: OutlinePoint[], options: OutlineOptions): number[] {
+  const before = options.trim?.start ?? 0;
+  const after = options.trim?.end ?? 0;
+  const cumulative = [0];
+  for (let index = 1; index < points.length; index += 1) {
+    cumulative.push(cumulative[index - 1] + span(points[index], points[index - 1]));
+  }
+  const total = cumulative[cumulative.length - 1];
+  const taperLength =
+    options.taper > 0
+      ? Math.min((before + total + after) * options.taper, options.widthPt * TAPER_MAX_NIB_WIDTHS)
+      : 0;
+  return points.map((point, index) => {
+    const ramp = taperLength > 0
+      ? Math.min(1, (before + cumulative[index]) / taperLength,
+        (after + total - cumulative[index]) / taperLength)
+      : 1;
+    return outlineWidthAt(point, options) / 2 * ramp;
   });
 }
 
