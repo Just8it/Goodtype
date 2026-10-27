@@ -1,3 +1,8 @@
+param(
+    [ValidateSet("local", "dev", "stable")]
+    [string]$Channel = "local"
+)
+
 $ErrorActionPreference = "Stop"
 
 $repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
@@ -6,13 +11,22 @@ $repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 
 Push-Location $repositoryRoot
 try {
+    & node scripts/release.mjs prepare $Channel
+    if ($LASTEXITCODE -ne 0) { throw "Release metadata validation failed." }
+    $metadata = Get-Content -LiteralPath "target/release-metadata.json" -Raw | ConvertFrom-Json
+    $demoDirectory = Join-Path $repositoryRoot "target\$($metadata.packageName)"
+    $zipPath = "$demoDirectory.zip"
+    if ((Test-Path -LiteralPath $demoDirectory) -or (Test-Path -LiteralPath $zipPath)) {
+        throw "This package already exists. Never replace an existing build: $demoDirectory"
+    }
+
     & pnpm.cmd install --frozen-lockfile
     if ($LASTEXITCODE -ne 0) { throw "pnpm install failed." }
 
-    & pnpm.cmd tauri build
+    & pnpm.cmd tauri build --config (Join-Path $repositoryRoot "target/release-config.json") -- --locked
     if ($LASTEXITCODE -ne 0) { throw "Goodtype release build failed." }
 
-    & cargo build --release -p goodtype-core --bin goodtype-ink
+    & cargo build --release --locked -p goodtype-core --bin goodtype-ink
     if ($LASTEXITCODE -ne 0) { throw "Ink decoder release build failed." }
 }
 finally {
@@ -32,15 +46,14 @@ foreach ($requiredFile in @($sidecar, $decoder)) {
     }
 }
 
-$packageName = "Goodtype-Windows-" + (Get-Date -Format "yyyyMMdd-HHmmss")
-$demoDirectory = Join-Path $repositoryRoot "target\$packageName"
-$zipPath = "$demoDirectory.zip"
-
 New-Item -ItemType Directory -Path $demoDirectory | Out-Null
 Copy-Item -LiteralPath $releaseExecutable -Destination (Join-Path $demoDirectory "Goodtype.exe")
 Copy-Item -LiteralPath $sidecar -Destination (Join-Path $demoDirectory "tinymist.exe")
 Copy-Item -LiteralPath $decoder -Destination (Join-Path $demoDirectory "goodtype-ink.exe")
 Copy-Item -LiteralPath (Join-Path $repositoryRoot "formats\ink-v1.md") -Destination $demoDirectory
+foreach ($notice in @("LICENSE", "NOTICE")) {
+    Copy-Item -LiteralPath (Join-Path $repositoryRoot $notice) -Destination $demoDirectory
+}
 
 @'
 Goodtype for Windows x64
@@ -68,6 +81,15 @@ for ($archiveAttempt = 1; $archiveAttempt -le 3; $archiveAttempt++) {
         if ($archiveAttempt -eq 3) { throw }
         Start-Sleep -Seconds 1
     }
+}
+Push-Location $repositoryRoot
+try {
+    & node scripts/release.mjs manifest
+    if ($LASTEXITCODE -ne 0) { throw "Release manifest creation failed." }
+    & (Join-Path $PSScriptRoot "test-windows-package.ps1") -Manifest "$demoDirectory.json"
+}
+finally {
+    Pop-Location
 }
 Write-Host "Created $demoDirectory"
 Write-Host "Created $zipPath"

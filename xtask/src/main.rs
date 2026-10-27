@@ -89,6 +89,11 @@ fn verify() -> Result<(), String> {
         ),
         ("Rust tests", "cargo", &["test", "--workspace"]),
         (
+            "Release workflow tests",
+            "node",
+            &["--test", "scripts/release.test.mjs"],
+        ),
+        (
             "Frontend unit tests",
             pnpm_command(),
             &["--filter", "@goodtype/desktop", "test"],
