@@ -10,7 +10,7 @@
 import type { Point } from "../geometry/coordinates";
 import { selectionBounds } from "../ink/selection";
 import type { Stroke } from "../model";
-import { shapeBounds } from "../shape/geometry";
+import { boxOutline, shapeLassoItem } from "./lasso";
 import type { ShapeView } from "./pageView";
 
 /** How far a paste moves its contents, in page points. */
@@ -24,6 +24,7 @@ export type ClipboardBlock = {
   /** Rendered height before `scale`, as measured when copied; it only centres a paste. */
   heightPt: number;
   scale: number;
+  rotation?: number;
 };
 
 export type ClipboardImage = {
@@ -35,6 +36,7 @@ export type ClipboardImage = {
   widthPt: number;
   heightPt: number;
   scale: number;
+  rotation?: number;
 };
 
 export type ClipboardBundle = {
@@ -74,45 +76,19 @@ export function pasteOffset(bundle: ClipboardBundle, pageId: string, nth: number
   return { dx: step, dy: step };
 }
 
-/**
- * The middle of everything in the bundle, in page points, or null for an empty bundle. Shapes use
- * their unrotated box, which is close enough to centre a paste under the pointer.
- */
+/** The middle of the transformed selection in page points, or null for an empty bundle. */
 export function bundleCenter(bundle: ClipboardBundle): Point | null {
-  const boxes: { left: number; top: number; right: number; bottom: number }[] = [];
-  const ink = selectionBounds(bundle.strokes, bundle.strokes.map((stroke) => stroke.id));
-  if (ink) boxes.push(ink);
-  for (const shape of bundle.shapes) {
-    const box = shapeBounds(shape.geometry);
-    boxes.push({
-      left: shape.x + box.left * shape.scale,
-      top: shape.y + box.top * shape.scale,
-      right: shape.x + box.right * shape.scale,
-      bottom: shape.y + box.bottom * shape.scale,
-    });
-  }
-  for (const block of bundle.blocks) {
-    boxes.push({
-      left: block.x,
-      top: block.y,
-      right: block.x + block.layoutWidthPt * block.scale,
-      bottom: block.y + block.heightPt * block.scale,
-    });
-  }
-  for (const image of bundle.images) {
-    boxes.push({
-      left: image.x,
-      top: image.y,
-      right: image.x + image.widthPt * image.scale,
-      bottom: image.y + image.heightPt * image.scale,
-    });
-  }
-  if (boxes.length === 0) return null;
-  const left = Math.min(...boxes.map((box) => box.left));
-  const top = Math.min(...boxes.map((box) => box.top));
-  const right = Math.max(...boxes.map((box) => box.right));
-  const bottom = Math.max(...boxes.map((box) => box.bottom));
-  return { x: (left + right) / 2, y: (top + bottom) / 2 };
+  const points: Point[] = [];
+  const ink = selectionBounds(bundle.strokes, bundle.strokes.map(stroke => stroke.id));
+  if (ink) points.push({ x: ink.left, y: ink.top }, { x: ink.right, y: ink.bottom });
+  for (const shape of bundle.shapes) points.push(...shapeLassoItem(shape).outline);
+  for (const block of bundle.blocks) points.push(...boxOutline(block.x, block.y,
+    block.layoutWidthPt * block.scale, block.heightPt * block.scale, block.rotation));
+  for (const image of bundle.images) points.push(...boxOutline(image.x, image.y,
+    image.widthPt * image.scale, image.heightPt * image.scale, image.rotation));
+  if (!points.length) return null;
+  return { x: (Math.min(...points.map(p => p.x)) + Math.max(...points.map(p => p.x))) / 2,
+    y: (Math.min(...points.map(p => p.y)) + Math.max(...points.map(p => p.y))) / 2 };
 }
 
 /** The shift that puts the bundle's middle on `point`. */

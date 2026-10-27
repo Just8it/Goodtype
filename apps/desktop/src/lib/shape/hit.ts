@@ -42,7 +42,7 @@ export function topmostShapeAt(
 
 /// A page point in the shape's own coordinates: the inverse of the transform every renderer
 /// applies, `translate(x y) rotate(rotation) scale(scale)`.
-function toLocalPoint(shape: ShapeView, page: Point): ShapePoint {
+export function toLocalPoint(shape: ShapeView, page: Point): ShapePoint {
   const angle = (-shape.rotation * Math.PI) / 180;
   const x = page.x - shape.x;
   const y = page.y - shape.y;

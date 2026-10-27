@@ -1,3 +1,4 @@
+import { translate, type Translator } from "../i18n";
 export type PaletteDock = "top" | "right" | "bottom" | "left";
 
 export type PaletteCommand =
@@ -37,19 +38,20 @@ export function paletteWidthIndex(widths: readonly number[], activeWidth: number
 
 // Presentation metadata only. Input behavior stays explicit in PagePrototype because a tool must
 // not gain pen, filesystem, or notebook authority merely by appearing in this list.
-export const PALETTE_TOOLS: readonly PaletteTool[] = [
-  { id: "pen-1", label: "Pen 1", title: "Pen 1 (1) — press again for settings", group: "marking", context: "ink" },
-  { id: "pen-2", label: "Pen 2", title: "Pen 2 (2) — press again for settings", group: "marking", context: "ink" },
-  { id: "highlighter", label: "Highlighter", title: "Highlighter (3) — press again for settings", group: "marking", context: "ink" },
-  { id: "eraser", label: "Eraser", title: "Erase ink and shapes (4) — press again for settings", group: "marking", context: "eraser" },
+export function paletteTools(t: Translator = translate): readonly PaletteTool[] { return [
+  { id: "pen-1", label: t("workspace.pen3"), title: t("workspace.penPressAgainForSettings"), group: "marking", context: "ink" },
+  { id: "pen-2", label: t("workspace.pen4"), title: t("workspace.penPressAgainForSettings2"), group: "marking", context: "ink" },
+  { id: "highlighter", label: t("workspace.highlighter"), title: t("workspace.highlighterPressAgainForSettings"), group: "marking", context: "ink" },
+  { id: "eraser", label: t("workspace.eraser"), title: t("workspace.eraseInkAndShapesPressAgainFor"), group: "marking", context: "eraser" },
   // Freehand marking above, deliberate construction below: the lasso and the shape tool both act
   // on the page rather than laying ink down on it. This also puts the tiles in the order their
   // number keys are in.
-  { id: "lasso", label: "Lasso select", title: "Lasso select (5) — press again for settings", group: "page", context: "lasso" },
-  { id: "shape", label: "Shapes", title: "Shapes (6) — press again to choose a shape", group: "page", context: "shape" },
-  { id: "page-text", label: "Page text", title: "Page text", group: "content" },
-  { id: "typst-block", label: "New Typst block", title: "New Typst block (T)", group: "content", action: true },
-];
+  { id: "lasso", label: t("workspace.lassoSelect"), title: t("workspace.lassoSelectPressAgainForSettings"), group: "page", context: "lasso" },
+  { id: "shape", label: t("workspace.shapes"), title: t("workspace.shapesPressAgainToChooseAShape"), group: "page", context: "shape" },
+  { id: "page-text", label: t("workspace.pageText"), title: t("workspace.pageText"), group: "content" },
+  { id: "typst-block", label: t("workspace.newTypstBlock"), title: t("workspace.newTypstBlockT"), group: "content", action: true },
+]; }
+export const PALETTE_TOOLS = paletteTools();
 
 /**
  * The tiles the writer kept on the bar, each marked with whether a divider leads it.
@@ -60,8 +62,9 @@ export const PALETTE_TOOLS: readonly PaletteTool[] = [
  */
 export function visiblePaletteTools(
   hidden: readonly PaletteCommand[],
+  t: Translator = translate,
 ): { tool: PaletteTool; dividerBefore: boolean }[] {
-  const shown = PALETTE_TOOLS.filter((tool) => !hidden.includes(tool.id));
+  const shown = paletteTools(t).filter((tool) => !hidden.includes(tool.id));
   return shown.map((tool, index) => ({
     tool,
     dividerBefore: index > 0 && shown[index - 1].group !== tool.group,

@@ -1,3 +1,4 @@
+import { notice, type UiText } from "../i18n";
 import type { Stroke } from "../model";
 import { createCommitTimer } from "./commitTimer";
 
@@ -13,7 +14,7 @@ export { INK_SAVE_DEBOUNCE_MS, INK_SAVE_MAXIMUM_MS } from "./commitTimer";
  */
 export type InkCommitter = {
   /** Record new strokes and (re)arm the debounce. */
-  commit(strokes: Stroke[], label: string): void;
+  commit(strokes: Stroke[], label: UiText): void;
   /** Force any pending strokes to save now; resolves once the save queue drains. */
   flush(): Promise<void>;
   /** Whether a save is currently scheduled. */
@@ -23,21 +24,22 @@ export type InkCommitter = {
 };
 
 export function createInkCommitter(options: {
-  save: (strokes: Stroke[], label: string) => Promise<void>;
+  save: (strokes: Stroke[], label: UiText) => Promise<void>;
   debounceMs?: number;
   maximumMs?: number;
 }): InkCommitter {
   let queue: Promise<void> = Promise.resolve();
   let strokes: Stroke[] = [];
-  let label = "Updated ink";
+  let label: UiText = notice("workspace.updatedInk");
 
   // Saves are chained rather than run concurrently: two commits of the same page racing would
-  // let the older one land last.
+  // let the older one land last. `save` reports its own failures; a rejection must not skip
+  // every later save chained behind it.
   const timer = createCommitTimer(
     () => {
       const committed = strokes;
       const committedLabel = label;
-      queue = queue.then(() => options.save(committed, committedLabel));
+      queue = queue.then(() => options.save(committed, committedLabel)).catch(() => {});
     },
     { debounceMs: options.debounceMs, maximumMs: options.maximumMs },
   );

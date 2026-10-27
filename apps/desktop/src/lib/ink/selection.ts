@@ -9,6 +9,8 @@ export type Bounds = {
   bottom: number;
 };
 
+const boundsCache = new WeakMap<Stroke, Bounds | null>();
+
 export function transformedPoint(stroke: Stroke, point: StrokePoint): Point {
   const scaledX = point.x * stroke.transform.scaleX;
   const scaledY = point.y * stroke.transform.scaleY;
@@ -26,8 +28,10 @@ export function transformedPoint(stroke: Stroke, point: StrokePoint): Point {
 }
 
 export function strokeBounds(stroke: Stroke): Bounds | null {
-  if (stroke.points.length === 0) return null;
-  return pointsBounds(stroke.points.map((point) => transformedPoint(stroke, point)));
+  if (boundsCache.has(stroke)) return boundsCache.get(stroke)!;
+  const bounds = stroke.points.length === 0 ? null : pointsBounds(stroke.points.map((point) => transformedPoint(stroke, point)));
+  boundsCache.set(stroke, bounds);
+  return bounds;
 }
 
 export function selectionBounds(strokes: Stroke[], selectedIds: string[]): Bounds | null {
@@ -66,9 +70,12 @@ export function hitStroke(
   for (let strokeIndex = strokes.length - 1; strokeIndex >= 0; strokeIndex -= 1) {
     const stroke = strokes[strokeIndex];
     if (!reaches(stroke)) continue;
-    const points = stroke.points.map((sample) => transformedPoint(stroke, sample));
     const hitRadius =
       Math.max(radius, (stroke.widthPt * Math.max(stroke.transform.scaleX, stroke.transform.scaleY)) / 2);
+    const bounds = strokeBounds(stroke);
+    if (!bounds || point.x < bounds.left - hitRadius || point.x > bounds.right + hitRadius ||
+      point.y < bounds.top - hitRadius || point.y > bounds.bottom + hitRadius) continue;
+    const points = stroke.points.map((sample) => transformedPoint(stroke, sample));
     if (
       points.some((sample, index) =>
         index === 0
@@ -180,12 +187,14 @@ export function scaleSelected(
 }
 
 function pointsBounds(points: Point[]): Bounds {
-  return {
-    left: Math.min(...points.map((point) => point.x)),
-    top: Math.min(...points.map((point) => point.y)),
-    right: Math.max(...points.map((point) => point.x)),
-    bottom: Math.max(...points.map((point) => point.y)),
-  };
+  const bounds = { left: Infinity, top: Infinity, right: -Infinity, bottom: -Infinity };
+  for (const point of points) {
+    bounds.left = Math.min(bounds.left, point.x);
+    bounds.top = Math.min(bounds.top, point.y);
+    bounds.right = Math.max(bounds.right, point.x);
+    bounds.bottom = Math.max(bounds.bottom, point.y);
+  }
+  return bounds;
 }
 
 export function pointInPolygon(point: Point, polygon: Point[]): boolean {
@@ -225,7 +234,7 @@ export function polylineInLasso(points: Point[], polygon: Point[], closed = fals
   return false;
 }
 
-function distanceToSegment(point: Point, start: Point, end: Point): number {
+export function distanceToSegment(point: Point, start: Point, end: Point): number {
   const dx = end.x - start.x;
   const dy = end.y - start.y;
   if (dx === 0 && dy === 0) return Math.hypot(point.x - start.x, point.y - start.y);

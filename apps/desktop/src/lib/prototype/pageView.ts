@@ -1,4 +1,4 @@
-import type { PageObject, ShapeGeometry, ShapeStyle, Stroke } from "../model";
+import type { InkLayer, PageObject, ShapeGeometry, ShapeStyle, Stroke } from "../model";
 
 // One view model for a page, shared by every renderer. Before this existed, the active page and
 // its neighbours each derived objects, sources, and asset URLs their own way, which is what let
@@ -12,12 +12,13 @@ export type BlockView = {
   x: number;
   y: number;
   layoutWidthPt: number;
+  rotation?: number;
   scale: number;
   zIndex: number;
   readingOrder: number;
 };
 
-export type TypstTransform = Pick<BlockView, "x" | "y" | "layoutWidthPt" | "scale">;
+export type TypstTransform = Pick<BlockView, "x" | "y" | "layoutWidthPt" | "scale" | "rotation">;
 
 export type PageTypstView = {
   id: string;
@@ -36,6 +37,7 @@ export type ImageView = {
   y: number;
   widthPt: number;
   heightPt: number;
+  rotation?: number;
   scale: number;
   zIndex: number;
   readingOrder: number;
@@ -92,6 +94,7 @@ export function blockViewsFromSnapshot(snapshot: SnapshotLike): BlockView[] {
       x: object.x,
       y: object.y,
       layoutWidthPt: object.layoutWidthPt,
+      rotation: object.rotation,
       scale: object.scale,
       zIndex: object.zIndex,
       readingOrder: object.readingOrder,
@@ -138,6 +141,7 @@ export function imageViewsFromSnapshot(
           y: object.y,
           widthPt: object.widthPt,
           heightPt: object.heightPt,
+          rotation: object.rotation,
           scale: object.scale,
           zIndex: object.zIndex,
           readingOrder: object.readingOrder,
@@ -165,8 +169,39 @@ export function shapeViewsFromSnapshot(snapshot: SnapshotLike): ShapeView[] {
     }));
 }
 
-export function strokesFromSnapshot(snapshot: SnapshotLike): Stroke[] {
+export function strokesFromSnapshot(snapshot: Pick<SnapshotLike, "inkLayers">): Stroke[] {
+  if (snapshot.inkLayers.length === 1) return snapshot.inkLayers[0].strokes;
   return snapshot.inkLayers.flatMap((layer) => layer.strokes);
+}
+
+/** Rendered ink is flat; saving restores existing ownership and puts new IDs in the drawing layer. */
+export function inkLayersWithStrokes(layers: InkLayer[], strokes: Stroke[], drawingLayerId: string): InkLayer[] {
+  const owners = new Map(layers.flatMap(layer => layer.strokes.map(stroke => [stroke.id, layer.id] as const)));
+  const grouped = new Map(layers.map(layer => [layer.id, [] as Stroke[]]));
+  for (const stroke of strokes) grouped.get(owners.get(stroke.id) ?? drawingLayerId)?.push(stroke);
+  return layers.map(layer => ({ ...layer, strokes: grouped.get(layer.id)! }));
+}
+
+/** Keep display caches when a fresh Rust confirmation contains exactly the same ink. */
+export function reuseStrokeObjects(incoming: Stroke[], previous: Stroke[]): Stroke[] {
+  if (!previous.length || incoming === previous) return incoming;
+  const known = new Map(previous.map(stroke => [stroke.id, stroke]));
+  const sameFields = (a: object, b: object, skip: string[] = []) => {
+    const keys = Object.keys(a).filter(key => !skip.includes(key));
+    return keys.length === Object.keys(b).filter(key => !skip.includes(key)).length &&
+      keys.every(key => Object.prototype.hasOwnProperty.call(b, key) && Object.is(Reflect.get(a, key), Reflect.get(b, key)));
+  };
+  return incoming.map(stroke => {
+    const old = known.get(stroke.id);
+    if (!old || old.points.length !== stroke.points.length ||
+      !sameFields(old, stroke, ["points", "transform"]) || !sameFields(old.transform, stroke.transform)) return stroke;
+    for (let i = 0; i < stroke.points.length; i += 1) {
+      const a = old.points[i], b = stroke.points[i];
+      if (!Object.is(a.x, b.x) || !Object.is(a.y, b.y) || !Object.is(a.pressure, b.pressure) ||
+        !Object.is(a.timeMs, b.timeMs) || !Object.is(a.tiltX, b.tiltX) || !Object.is(a.tiltY, b.tiltY)) return stroke;
+    }
+    return old;
+  });
 }
 
 export function mimeForPath(path: string): string {

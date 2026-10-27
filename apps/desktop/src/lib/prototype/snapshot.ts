@@ -11,6 +11,7 @@ import {
 } from "../model";
 import type { NotebookSnapshot } from "../ipc/types";
 import type { BlockView, ImageView, PageTypstView, ShapeView } from "./pageView";
+import { inkLayersWithStrokes } from "./pageView";
 
 export type EditableTypst = BlockView & {
   measuredWidthPt: number;
@@ -65,6 +66,11 @@ export function projectSnapshot(input: Projection): NotebookSnapshot {
   const oldById = new Map(oldObjects.map((object) => [object.id, object]));
   const emitted = new Set<string>();
   const objects: PageObject[] = [];
+  const baseSources = new Map(input.base?.blocks.map((file) => [file.path, file.bytes]) ?? []);
+  const sourceChanged = (path: string, source: string) => {
+    const old = baseSources.get(path);
+    return !old || new TextDecoder().decode(new Uint8Array(old)) !== source;
+  };
 
   for (const object of oldObjects) {
     if (input.mixedGroup && object.id === input.mixedGroup.inkGroupId) continue;
@@ -74,27 +80,29 @@ export function projectSnapshot(input: Projection): NotebookSnapshot {
       const block = typstById.get(object.id);
       if (!block) continue;
       emitted.add(object.id);
-      objects.push(patchTypst(object, block, input.mixedGroup, input.now));
+      objects.push(touched(object, patchTypst(object, block, input.mixedGroup, input.now), input.now,
+        sourceChanged(block.path, block.source)));
       continue;
     }
     if (object.type === "page_typst") {
       if (!input.pageTypst || input.pageTypst.id !== object.id) continue;
       emitted.add(object.id);
-      objects.push(patchPageTypst(object, input.pageTypst, input.now));
+      objects.push(touched(object, patchPageTypst(object, input.pageTypst, input.now), input.now,
+        sourceChanged(input.pageTypst.path, input.pageTypst.source)));
       continue;
     }
     if (object.type === "image") {
       const image = imageById.get(object.id);
       if (!image) continue;
       emitted.add(object.id);
-      objects.push(patchImage(object, image, input.now));
+      objects.push(touched(object, patchImage(object, image, input.now), input.now));
       continue;
     }
     if (object.type === "shape") {
       const shape = shapeById.get(object.id);
       if (!shape) continue;
       emitted.add(object.id);
-      objects.push(patchShape(object, shape, input.now));
+      objects.push(touched(object, patchShape(object, shape, input.now), input.now));
       continue;
     }
 
@@ -265,6 +273,18 @@ export function projectSnapshot(input: Projection): NotebookSnapshot {
   };
 }
 
+/**
+ * `modifiedAt` records when an object last changed, not when its page was last saved: a stroke
+ * elsewhere on the page must not restamp every untouched object. Typst source lives in its block
+ * file, so a source edit counts as a change of the object that owns it.
+ */
+function touched<T extends PageObject>(object: T, next: T, now: string, contentChanged = false): T {
+  const { modifiedAt: _before, ...before } = object;
+  const { modifiedAt: _after, ...after } = next;
+  const changed = contentChanged || JSON.stringify(before) !== JSON.stringify(after);
+  return { ...next, modifiedAt: changed ? now : object.modifiedAt };
+}
+
 function patchTypst(
   object: Extract<PageObject, { type: "typst" }>,
   block: EditableTypst,
@@ -281,6 +301,7 @@ function patchTypst(
     ...object,
     x: block.x,
     y: block.y,
+    rotation: block.rotation ?? object.rotation,
     scale: block.scale,
     zIndex: block.zIndex,
     readingOrder: block.readingOrder,
@@ -321,6 +342,7 @@ function patchImage(
     ...object,
     x: image.x,
     y: image.y,
+    rotation: image.rotation ?? object.rotation,
     scale: image.scale,
     zIndex: image.zIndex,
     readingOrder: image.readingOrder,
@@ -367,6 +389,7 @@ function newTypst(
     type: "typst",
     x: block.x,
     y: block.y,
+    rotation: block.rotation ?? 0,
     scale: block.scale,
     sourcePath: block.path,
     layoutWidthPt: block.layoutWidthPt,
@@ -399,6 +422,7 @@ function newImage(
     type: "image",
     x: image.x,
     y: image.y,
+    rotation: image.rotation ?? 0,
     scale: image.scale,
     sourcePath: image.path,
     widthPt: image.widthPt,
@@ -451,9 +475,8 @@ function mergeInkLayers(
   if (existing.length === 0) {
     return [{ schemaVersion, id: activeId, pageId, strokes }];
   }
-  return existing.map((layer) => ({
+  return inkLayersWithStrokes(existing, strokes, activeId).map((layer) => ({
     ...layer,
     schemaVersion,
-    ...(layer.id === activeId ? { strokes } : {}),
   }));
 }

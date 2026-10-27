@@ -1,3 +1,4 @@
+import { translate, type Translator } from "../i18n";
 import type { Point } from "../geometry/coordinates";
 import type {
   BezierNode,
@@ -400,16 +401,16 @@ export function moveShapeGeometry(geometry: ShapeGeometry, delta: Point): ShapeG
   return geometry;
 }
 
-export function describeShape(geometry: ShapeGeometry): string {
+export function describeShape(geometry: ShapeGeometry, t: Translator = translate): string {
   switch (geometry.kind) {
     case "line":
-      return `Line, ${Math.round(distance(geometry.start, geometry.end))} points long`;
+      return t("shape.linePointsLong", { "value1": Math.round(distance(geometry.start, geometry.end)) });
     case "rectangle":
-      return `Rectangle, ${Math.round(geometry.widthPt)} by ${Math.round(geometry.heightPt)} points`;
+      return t("shape.rectangleByPoints", { "value1": Math.round(geometry.widthPt), "value2": Math.round(geometry.heightPt) });
     case "ellipse":
-      return `${Math.abs(geometry.widthPt - geometry.heightPt) < 0.5 ? "Circle" : "Ellipse"}, ${Math.round(geometry.widthPt)} by ${Math.round(geometry.heightPt)} points`;
+      return t("shape.byPoints", { "value1": Math.abs(geometry.widthPt - geometry.heightPt) < 0.5 ? t("shape.circle") : t("workspace.ellipse"), "value2": Math.round(geometry.widthPt), "value3": Math.round(geometry.heightPt) });
     case "spline":
-      return `Spline with ${geometry.nodes.length} anchor points`;
+      return t("shape.splineWithAnchorPoints", { "length": geometry.nodes.length });
   }
 }
 

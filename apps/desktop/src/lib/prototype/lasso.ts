@@ -1,4 +1,6 @@
+import { translate, type Translator } from "../i18n";
 import type { Point } from "../geometry/coordinates";
+import { rotatedVector } from "../geometry/coordinates";
 import type { Bounds } from "../ink/selection";
 import { polylineInLasso } from "../ink/selection";
 import { shapeBounds, splinePolyline } from "../shape/geometry";
@@ -6,17 +8,19 @@ import type { ShapeView } from "./pageView";
 
 export type LassoTargets = { handwriting: boolean; highlighter: boolean; shapes: boolean; images: boolean; text: boolean };
 export const DEFAULT_LASSO_TARGETS: LassoTargets = { handwriting: true, highlighter: true, shapes: true, images: true, text: true };
-export const LASSO_OPTIONS = [
-  { key: "handwriting", label: "Handwriting" },
-  { key: "highlighter", label: "Highlighter" },
-  { key: "shapes", label: "Shapes" },
-  { key: "images", label: "Images" },
-  { key: "text", label: "Text blocks" },
-] as const;
+export function lassoOptions(t: Translator = translate) { return [
+  { key: "handwriting", label: t("workspace.handwriting") },
+  { key: "highlighter", label: t("workspace.highlighter") },
+  { key: "shapes", label: t("workspace.shapes") },
+  { key: "images", label: t("workspace.images") },
+  { key: "text", label: t("workspace.textBlocks") },
+] as const; }
+export const LASSO_OPTIONS = lassoOptions();
 export type LassoItem = { id: string; kind: "shapes" | "images" | "text"; outline: Point[]; closed: boolean };
 
-export function boxOutline(x: number, y: number, width: number, height: number): Point[] {
-  return [{ x, y }, { x: x + width, y }, { x: x + width, y: y + height }, { x, y: y + height }];
+export function boxOutline(x: number, y: number, width: number, height: number, rotation = 0): Point[] {
+  return [{ x: 0, y: 0 }, { x: width, y: 0 }, { x: width, y: height }, { x: 0, y: height }]
+    .map(point => { const local = rotatedVector(point, rotation); return { x: x + local.x, y: y + local.y }; });
 }
 
 export function shapeLassoItem(shape: ShapeView): LassoItem {

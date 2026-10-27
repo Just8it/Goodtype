@@ -5,6 +5,14 @@ const page = { widthPt: 595, heightPt: 842 };
 const block = { widthPt: 240, heightPt: 100 };
 
 describe("keepOnPage", () => {
+  it("keeps a rotated object's actual bounds reachable", () => {
+    const size = { widthPt: 100, heightPt: 40 };
+    const atLeft = keepOnPage({ x: -999, y: 80 }, size, page, 24, 90);
+    expect(atLeft.x).toBeCloseTo(24);
+    const atRight = keepOnPage({ x: 999, y: 80 }, size, page, 24, 90);
+    expect(atRight.x).toBeCloseTo(page.widthPt + 40 - 24);
+    expect(atRight.y).toBeCloseTo(80);
+  });
   it("keeps every object reachable without moving valid positions", () => {
     expect(keepOnPage({ x: 72, y: 96 }, block, page)).toEqual({ x: 72, y: 96 });
     expect(keepOnPage({ x: -9999, y: -9999 }, block, page)).toEqual({

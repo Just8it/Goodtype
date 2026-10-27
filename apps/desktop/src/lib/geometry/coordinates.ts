@@ -1,6 +1,38 @@
 export type Point = { x: number; y: number };
 export type Size = { width: number; height: number };
 
+export function rotatedVector(point: Point, degrees: number): Point {
+  const angle = degrees * Math.PI / 180;
+  return { x: point.x * Math.cos(angle) - point.y * Math.sin(angle),
+    y: point.x * Math.sin(angle) + point.y * Math.cos(angle) };
+}
+
+type ScreenBox = { left: number; top: number; right: number; bottom: number };
+
+/** The visible page nearest the viewport center, including pages larger than the viewport. */
+export function pageAtViewportCenter(
+  pages: { id: string; bounds: ScreenBox }[],
+  viewport: ScreenBox,
+): string | null {
+  const center = { x: (viewport.left + viewport.right) / 2, y: (viewport.top + viewport.bottom) / 2 };
+  let best: string | null = null;
+  let bestDistance = Infinity;
+  let bestArea = 0;
+  for (const { id, bounds } of pages) {
+    const left = Math.max(bounds.left, viewport.left), right = Math.min(bounds.right, viewport.right);
+    const top = Math.max(bounds.top, viewport.top), bottom = Math.min(bounds.bottom, viewport.bottom);
+    if (right <= left || bottom <= top) continue;
+    const distance = Math.hypot(Math.max(left - center.x, 0, center.x - right), Math.max(top - center.y, 0, center.y - bottom));
+    const area = (right - left) * (bottom - top);
+    if (distance < bestDistance || (distance === bestDistance && area > bestArea)) {
+      best = id;
+      bestDistance = distance;
+      bestArea = area;
+    }
+  }
+  return best;
+}
+
 export type ScreenViewport = {
   left: number;
   top: number;
