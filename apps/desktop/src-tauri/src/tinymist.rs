@@ -21,6 +21,32 @@ const EDITOR_FILE: &str = "__goodtype_editor.typ";
 type Pending = Arc<Mutex<HashMap<u64, mpsc::Sender<Result<Value, String>>>>>;
 type PublishedDiagnostics = Arc<(Mutex<DiagnosticState>, Condvar)>;
 
+fn wait_diagnostics(
+    published: &PublishedDiagnostics,
+    source: &str,
+    uri: &str,
+    version: u64,
+) -> Result<Vec<Diagnostic>, String> {
+    let (slot, ready) = &**published;
+    let diagnostics = slot
+        .lock()
+        .map_err(|_| "Tinymist diagnostic state is unavailable")?;
+    let (diagnostics, _) = ready
+        .wait_timeout_while(diagnostics, Duration::from_secs(1), |value| {
+            value.document_uri == uri && value.version == version && value.published.is_none()
+        })
+        .map_err(|_| "Tinymist diagnostic state is unavailable")?;
+    if diagnostics.document_uri != uri || diagnostics.version != version {
+        return Ok(Vec::new());
+    }
+    diagnostics
+        .published
+        .as_ref()
+        .map(|params| parse_diagnostics(source, params))
+        .transpose()
+        .map(Option::unwrap_or_default)
+}
+
 struct DiagnosticState {
     document_uri: String,
     version: u64,
@@ -42,7 +68,7 @@ impl DiagnosticState {
 }
 
 #[derive(Clone, Default)]
-pub struct Tinymist(Arc<Mutex<Option<Client>>>);
+pub struct Tinymist(Arc<Mutex<Option<Client>>>, Arc<AtomicU64>);
 
 #[derive(Debug, Serialize)]
 pub struct Highlight {
@@ -98,6 +124,7 @@ impl Default for Analysis {
 
 impl Tinymist {
     pub fn reset(&self) {
+        self.1.fetch_add(1, Ordering::Relaxed);
         if let Ok(mut slot) = self.0.lock() {
             slot.take();
         }
@@ -154,40 +181,58 @@ impl Tinymist {
     }
 
     pub fn analyze(&self, root: &Path, source: &str) -> Result<Analysis, String> {
-        self.run(root, source, |client| {
-            client.sync(source)?;
-            // Tinymist answers `null` until it has analysed the latest revision. Asking again
-            // shortly is the cheap path; restarting the sidecar on the first `null` is what
-            // flashed a console window on every edit.
-            let mut response = Value::Null;
+        let generation = self.1.fetch_add(1, Ordering::Relaxed) + 1;
+        // Retries and diagnostic waits release the client between requests, so completion can
+        // run while a cold semantic analysis is still warming up.
+        for _ in 0..2 {
             for attempt in 0..SEMANTIC_TOKEN_ATTEMPTS {
                 if attempt > 0 {
                     std::thread::sleep(SEMANTIC_TOKEN_RETRY * attempt);
                 }
-                response = client.request(
-                    "textDocument/semanticTokens/full",
-                    json!({ "textDocument": { "uri": client.document_uri } }),
-                )?;
-                if !response.is_null() {
-                    break;
+                if self.1.load(Ordering::Relaxed) != generation {
+                    return Ok(Analysis::unavailable());
+                }
+                let result = self.run(root, source, |client| {
+                    client.sync(source)?;
+                    let response = client.request(
+                        "textDocument/semanticTokens/full",
+                        json!({ "textDocument": { "uri": client.document_uri } }),
+                    )?;
+                    if response.is_null() {
+                        return Ok(None);
+                    }
+                    Ok(Some((
+                        parse_semantic_tokens(
+                            source,
+                            &client.semantic_legend,
+                            &client.semantic_modifiers,
+                            response,
+                        )?,
+                        client.diagnostics.clone(),
+                        client.document_uri.clone(),
+                        client.version,
+                    )))
+                })?;
+                if let Some((highlights, published, uri, version)) = result {
+                    return Ok(Analysis {
+                        highlights,
+                        diagnostics: wait_diagnostics(&published, source, &uri, version)?,
+                        available: true,
+                    });
                 }
             }
-            // Still nothing after the whole window means this instance is not going to answer;
-            // `run` starts a fresh process on this error, now without a console to flash.
-            if response.is_null() {
-                return Err("Tinymist produced no semantic tokens for this revision".into());
+            let mut slot = self.0.lock().map_err(|_| "Tinymist state is unavailable")?;
+            if self.1.load(Ordering::Relaxed) != generation {
+                return Ok(Analysis::unavailable());
             }
-            Ok(Analysis {
-                highlights: parse_semantic_tokens(
-                    source,
-                    &client.semantic_legend,
-                    &client.semantic_modifiers,
-                    response,
-                )?,
-                diagnostics: client.diagnostics(source)?,
-                available: true,
-            })
-        })
+            if slot
+                .as_ref()
+                .is_some_and(|client| client.root == root && client.source == source)
+            {
+                slot.take();
+            }
+        }
+        Err("Tinymist produced no semantic tokens for this revision".into())
     }
 
     fn run<T>(
@@ -427,25 +472,8 @@ impl Client {
         diagnostics.version = self.version;
         diagnostics.document_uri.clone_from(&self.document_uri);
         diagnostics.published = None;
+        self.diagnostics.1.notify_all();
         Ok(())
-    }
-
-    fn diagnostics(&self, source: &str) -> Result<Vec<Diagnostic>, String> {
-        let (slot, ready) = &*self.diagnostics;
-        let diagnostics = slot
-            .lock()
-            .map_err(|_| "Tinymist diagnostic state is unavailable")?;
-        let (diagnostics, _) = ready
-            .wait_timeout_while(diagnostics, Duration::from_secs(1), |value| {
-                value.published.is_none()
-            })
-            .map_err(|_| "Tinymist diagnostic state is unavailable")?;
-        diagnostics
-            .published
-            .as_ref()
-            .map(|params| parse_diagnostics(source, params))
-            .transpose()
-            .map(Option::unwrap_or_default)
     }
 
     fn request(&self, method: &str, params: Value) -> Result<Value, String> {
@@ -1003,6 +1031,29 @@ fn verified_binary() -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn diagnostic_wait_discards_a_replaced_document_without_holding_the_client() {
+        let published = Arc::new((
+            Mutex::new(DiagnosticState {
+                document_uri: "file:///old.typ".into(),
+                version: 1,
+                published: None,
+            }),
+            Condvar::new(),
+        ));
+        let waiting = published.clone();
+        let thread =
+            std::thread::spawn(move || wait_diagnostics(&waiting, "old", "file:///old.typ", 1));
+        {
+            let mut state = published.0.lock().unwrap();
+            state.document_uri = "file:///new.typ".into();
+            state.version = 2;
+            state.published = Some(json!({ "diagnostics": [{ "message": "new document" }] }));
+            published.1.notify_all();
+        }
+        assert!(thread.join().unwrap().unwrap().is_empty());
+    }
 
     #[test]
     fn diagnostics_only_accept_the_expected_document_version() {

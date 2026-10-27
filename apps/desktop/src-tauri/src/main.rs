@@ -95,6 +95,7 @@ fn main() {
             preset::read_typst_preset,
             preset::save_typst_preset,
             typst::compile_typst,
+            typst::typst_font_families,
             typst::complete_typst,
             typst::hover_typst,
             typst::format_typst,
