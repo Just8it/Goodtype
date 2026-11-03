@@ -384,6 +384,7 @@ fn encode_recovery_intent(
             .collect::<Result<Vec<_>, _>>()?;
         Ok(BinaryRecoverySnapshot {
             snapshot: NotebookSnapshot {
+                calculations: snapshot.calculations.clone(),
                 manifest: snapshot.manifest.clone(),
                 page: snapshot.page.clone(),
                 blocks: snapshot.blocks.clone(),
@@ -571,6 +572,7 @@ fn print_help() {
 
 fn snapshot(layer: InkLayer) -> NotebookSnapshot {
     NotebookSnapshot {
+        calculations: Vec::new(),
         manifest: NotebookManifest {
             schema_version: SCHEMA_VERSION,
             id: "benchmark-notebook".into(),
@@ -591,6 +593,7 @@ fn snapshot(layer: InkLayer) -> NotebookSnapshot {
             modified_at: "2026-09-07T00:00:00Z".into(),
         },
         page: Page {
+            calculation: None,
             schema_version: SCHEMA_VERSION,
             id: "page-001".into(),
             revision: 1,

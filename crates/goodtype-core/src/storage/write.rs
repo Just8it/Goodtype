@@ -41,6 +41,11 @@ impl<'a> FileSet<'a> {
                 .map(|path| (path, SourceRole::Block.max_bytes())),
         );
         files.extend(
+            referenced_paths(&snapshot.manifest, &snapshot.page, SourceRole::Calculation)
+                .into_iter()
+                .map(|path| (path, SourceRole::Calculation.max_bytes())),
+        );
+        files.extend(
             snapshot
                 .page
                 .ink_layers
@@ -155,6 +160,20 @@ pub(crate) fn save_and_return(
         SourceRole::Block.max_bytes(),
     )?;
     candidate.blocks.extend(existing);
+    let missing = referenced_paths(
+        &candidate.manifest,
+        &candidate.page,
+        SourceRole::Calculation,
+    )
+    .into_iter()
+    .filter(|path| !candidate.calculations.iter().any(|file| file.path == *path))
+    .map(str::to_owned)
+    .collect::<Vec<_>>();
+    candidate.calculations.extend(read_stored_files(
+        root,
+        &missing.iter().map(String::as_str).collect::<Vec<_>>(),
+        SourceRole::Calculation.max_bytes(),
+    )?);
     prepare_binary_ink_write(root, previous, &mut candidate)?;
     let fingerprint = save_transactional(root, previous, &candidate)?;
     let assets = read_stored_files(
@@ -227,7 +246,7 @@ fn prepare_binary_ink_write(
     Ok(())
 }
 
-fn save_transactional(
+pub(super) fn save_transactional(
     root: &Path,
     previous: &NotebookSnapshot,
     candidate: &NotebookSnapshot,
@@ -484,7 +503,18 @@ fn save_to_root_inner(
         }
     }
 
-    for file in &snapshot.blocks {
+    for path in referenced_paths(&snapshot.manifest, &snapshot.page, SourceRole::Calculation) {
+        if !snapshot.calculations.iter().any(|file| file.path == path) {
+            written.insert(
+                path.to_owned(),
+                read_limited(
+                    resolve_existing(root, path)?,
+                    SourceRole::Calculation.max_bytes(),
+                )?,
+            );
+        }
+    }
+    for file in snapshot.blocks.iter().chain(&snapshot.calculations) {
         write_atomic(root, &file.path, &file.bytes)?;
         written.insert(file.path.clone(), file.bytes.clone());
     }

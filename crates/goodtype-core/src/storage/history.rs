@@ -143,6 +143,11 @@ pub fn commit_notebook(
 ) -> Result<HistoryResult, StorageError> {
     let root = canonical_root(selected_root)?;
     let current = open_page(selected_root, &snapshot.page.id)?;
+    if current.page.calculation.is_some() {
+        return Err(invalid_error(
+            "computational pages use calculation transactions",
+        ));
+    }
     ensure_current(&root, history, &current, snapshot.page.revision)?;
     commit_current(&root, history, current, snapshot)
 }
@@ -197,6 +202,9 @@ fn restore_notebook(
         .clone()
         .ok_or_else(|| invalid_error("page must be observed before undo or redo"))?;
     let current = open_page(&root, &page_id)?;
+    if current.page.calculation.is_some() {
+        return Err(invalid_error("computational pages use calculation history"));
+    }
     ensure_current(
         &root,
         history,
@@ -300,7 +308,12 @@ fn retained_payload_bytes(snapshot: &NotebookSnapshot) -> Result<usize, StorageE
     bytes = bytes
         .checked_add(serde_json::to_vec(&snapshot.page)?.len())
         .ok_or_else(|| invalid_error("history payload size overflow"))?;
-    for file in snapshot.blocks.iter().chain(&snapshot.assets) {
+    for file in snapshot
+        .blocks
+        .iter()
+        .chain(&snapshot.assets)
+        .chain(&snapshot.calculations)
+    {
         bytes = bytes
             .checked_add(file.path.len())
             .and_then(|value| value.checked_add(file.bytes.len()))
@@ -333,6 +346,46 @@ mod tests {
         storage::{fixtures::*, *},
     };
     use std::fs;
+
+    #[test]
+    fn computational_page_history_cannot_replace_a_shared_document() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path();
+        create_notebook(root, &snapshot()).unwrap();
+        let calculation = create_calculation_page(
+            root,
+            "2026-11-02T12:00:00Z",
+            &PagePosition::Last,
+            "Task",
+            None,
+        )
+        .unwrap();
+        let mut history = NotebookHistory::default();
+        let observed = observe_page(root, &calculation.page.id, &mut history).unwrap();
+        assert!(
+            commit_notebook(root, &mut history, observed.clone())
+                .unwrap_err()
+                .to_string()
+                .contains("calculation transactions")
+        );
+        push_history_bounded(
+            &mut history.undo,
+            &mut history.undo_bytes,
+            observed.clone(),
+            usize::MAX,
+        );
+        let before = fs::read(root.join(&observed.calculations[0].path)).unwrap();
+        assert!(
+            undo_notebook(root, &mut history)
+                .unwrap_err()
+                .to_string()
+                .contains("calculation history")
+        );
+        assert_eq!(
+            fs::read(root.join(&observed.calculations[0].path)).unwrap(),
+            before
+        );
+    }
 
     #[test]
     fn history_evicts_old_snapshots_at_its_byte_budget() {
@@ -490,8 +543,11 @@ mod tests {
             .unwrap()
             .snapshot;
 
-        assert_eq!(second.manifest.schema_version, crate::SCHEMA_VERSION);
-        assert_eq!(second.page.schema_version, crate::SCHEMA_VERSION);
+        assert_eq!(
+            second.manifest.schema_version,
+            crate::BINARY_INK_SCHEMA_VERSION
+        );
+        assert_eq!(second.page.schema_version, crate::BINARY_INK_SCHEMA_VERSION);
         assert!(second.page.ink_layers[0].path.ends_with(".ink"));
     }
 
@@ -506,8 +562,11 @@ mod tests {
         commit_notebook(&root, &mut history, candidate).unwrap();
 
         let undone = undo_notebook(&root, &mut history).unwrap().snapshot;
-        assert_eq!(undone.manifest.schema_version, crate::SCHEMA_VERSION);
-        assert_eq!(undone.page.schema_version, crate::SCHEMA_VERSION);
+        assert_eq!(
+            undone.manifest.schema_version,
+            crate::BINARY_INK_SCHEMA_VERSION
+        );
+        assert_eq!(undone.page.schema_version, crate::BINARY_INK_SCHEMA_VERSION);
         assert!(undone.page.ink_layers[0].path.ends_with(".ink"));
         assert_eq!(undone.ink_layers[0].strokes[0].points[0].x, 80.0);
         assert!(root.join("ink/page-001-layer-001.json").is_file());

@@ -70,6 +70,73 @@ pub fn open_page(selected_root: &Path, page_id: &str) -> Result<NotebookSnapshot
     load_page(&root, manifest, page_id)
 }
 
+/// A calculation owns cell order. Only parts still referenced by the manifest participate.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CalculationStep {
+    pub page_id: String,
+    pub cell_id: String,
+    pub part_id: String,
+}
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CalculationExecutionPlan {
+    pub revision: u64,
+    pub steps: Vec<CalculationStep>,
+}
+
+pub fn calculation_execution_plan(
+    selected_root: &Path,
+    page_id: &str,
+) -> Result<CalculationExecutionPlan, StorageError> {
+    use crate::calculation::Calculation;
+    let snapshot = open_page(selected_root, page_id)?;
+    let reference = snapshot
+        .page
+        .calculation
+        .as_ref()
+        .ok_or_else(|| invalid_error("page is not computational"))?;
+    let root = canonical_root(selected_root)?;
+    let file = snapshot
+        .calculations
+        .iter()
+        .find(|file| file.path == reference.source_path)
+        .ok_or_else(|| invalid_error("calculation source is missing"))?;
+    let document = Calculation::parse(&file.bytes)?;
+    let mut parts = HashMap::new();
+    for entry in &snapshot.manifest.pages {
+        let page: Page = read_json(&root, &entry.path)?;
+        if page.id != entry.id {
+            return Err(invalid_error("manifest and page identities disagree"));
+        }
+        if let Some(part) = page.calculation.filter(|part| part.id == reference.id)
+            && (part.source_path != reference.source_path
+                || parts.insert(part.part_id, page.id).is_some())
+        {
+            return Err(invalid_error(
+                "calculation parts must have one source and one page each",
+            ));
+        }
+    }
+    let steps = document
+        .cells
+        .iter()
+        .filter(|cell| cell.cell_type == "code")
+        .filter_map(|cell| {
+            let part = cell.part_id()?;
+            parts.get(part).map(|page| CalculationStep {
+                page_id: page.clone(),
+                cell_id: cell.id.clone(),
+                part_id: part.to_owned(),
+            })
+        })
+        .collect();
+    Ok(CalculationExecutionPlan {
+        revision: document.revision(),
+        steps,
+    })
+}
+
 fn load_page(
     root: &Path,
     manifest: NotebookManifest,
@@ -87,7 +154,13 @@ fn load_page(
     let asset_paths = referenced_paths(&manifest, &page, SourceRole::Asset);
     let blocks = read_stored_files(root, &block_paths, SourceRole::Block.max_bytes())?;
     let assets = read_stored_files(root, &asset_paths, MAX_IMAGE_BYTES)?;
+    let calculations = read_stored_files(
+        root,
+        &referenced_paths(&manifest, &page, SourceRole::Calculation),
+        SourceRole::Calculation.max_bytes(),
+    )?;
     let snapshot = NotebookSnapshot {
+        calculations,
         manifest,
         page,
         blocks,
@@ -244,6 +317,7 @@ pub fn create_page(
     );
     manifest.modified_at = modified_at.to_owned();
     let page = Page {
+        calculation: None,
         schema_version,
         id: id.clone(),
         revision: 1,
@@ -257,6 +331,7 @@ pub fn create_page(
         }],
     };
     let snapshot = NotebookSnapshot {
+        calculations: Vec::new(),
         manifest: guard.manifest.clone(),
         page,
         blocks: Vec::new(),
@@ -271,6 +346,174 @@ pub fn create_page(
     validate_snapshot(&root, &snapshot)?;
     guard.commit_snapshot(&snapshot, "adding a page")?;
     open_page(&root, &snapshot.page.id)
+}
+
+/// Create an independent calculation, or add an explicit part to an existing calculation.
+pub fn create_calculation_page(
+    selected_root: &Path,
+    modified_at: &str,
+    position: &PagePosition,
+    title: &str,
+    continue_page_id: Option<&str>,
+) -> Result<NotebookSnapshot, StorageError> {
+    create_calculation_page_inner(
+        selected_root,
+        modified_at,
+        position,
+        title,
+        continue_page_id,
+        None,
+    )
+}
+
+pub fn import_calculation_page(
+    selected_root: &Path,
+    modified_at: &str,
+    position: &PagePosition,
+    title: &str,
+    bytes: &[u8],
+) -> Result<NotebookSnapshot, StorageError> {
+    let document = super::calculation_import::prepare(bytes, title)?;
+    create_calculation_page_inner(
+        selected_root,
+        modified_at,
+        position,
+        title,
+        None,
+        Some(document),
+    )
+}
+
+fn create_calculation_page_inner(
+    selected_root: &Path,
+    modified_at: &str,
+    position: &PagePosition,
+    title: &str,
+    continue_page_id: Option<&str>,
+    imported: Option<crate::calculation::Calculation>,
+) -> Result<NotebookSnapshot, StorageError> {
+    use crate::calculation::{
+        A4_WIDTH_PT, Calculation, CalculationPart, CalculationReference, Cell,
+    };
+    let mut guard = ManifestGuard::open_resolved(selected_root, modified_at)?;
+    let root = guard.root().to_path_buf();
+    let fresh = fresh_page_identifiers(&root, &guard.manifest, crate::CALCULATION_SCHEMA_VERSION);
+    let part_id = format!("part-{}", fresh.id);
+    let previous = continue_page_id
+        .map(|page_id| open_page(&root, page_id))
+        .transpose()?;
+    let (source_path, document) = if let Some(previous) = &previous {
+        let reference = previous
+            .page
+            .calculation
+            .as_ref()
+            .ok_or_else(|| invalid_error("continuation requires a computational page"))?;
+        let file = previous
+            .calculations
+            .iter()
+            .find(|file| file.path == reference.source_path)
+            .ok_or_else(|| invalid_error("calculation source is missing"))?;
+        let mut document = Calculation::parse(&file.bytes)?;
+        let mut parts = document.parts()?;
+        parts.push(CalculationPart {
+            id: part_id.clone(),
+            title: title.to_owned(),
+        });
+        document
+            .goodtype_mut()
+            .insert("parts".into(), serde_json::to_value(parts)?);
+        document
+            .cells
+            .push(Cell::new(format!("cell-{part_id}"), &part_id, "code"));
+        document.advance_revision()?;
+        (reference.source_path.clone(), document)
+    } else {
+        let id = (0..1000)
+            .map(|suffix| format!("calc-{}-{suffix}", fresh.id))
+            .find(|id| !root.join(format!("calculations/{id}.ipynb")).exists())
+            .ok_or_else(|| invalid_error("no unused calculation path is available"))?;
+        let document = if let Some(mut imported) = imported {
+            imported
+                .goodtype_mut()
+                .insert("id".into(), serde_json::json!(id));
+            imported.goodtype_mut().insert(
+                "parts".into(),
+                serde_json::json!([{"id":part_id,"title":title}]),
+            );
+            for (index, cell) in imported.cells.iter_mut().enumerate() {
+                cell.id = format!("cell-{}-{index}", fresh.id);
+                cell.metadata["goodtype"]["partId"] = serde_json::json!(part_id);
+            }
+            imported
+        } else {
+            Calculation::new(&id, &part_id, title)
+        };
+        (format!("calculations/{id}.ipynb"), document)
+    };
+    let insert_at = match position {
+        PagePosition::Last => guard.manifest.pages.len(),
+        PagePosition::Before { page_id } => neighbour_index(&guard.manifest, page_id)?,
+        PagePosition::After { page_id } => neighbour_index(&guard.manifest, page_id)? + 1,
+    };
+    let geometry = PageGeometry {
+        width_pt: A4_WIDTH_PT,
+        height_pt: 84.0,
+    };
+    guard.manifest.schema_version = crate::CALCULATION_SCHEMA_VERSION;
+    guard.manifest.modified_at = modified_at.to_owned();
+    guard.manifest.pages.insert(
+        insert_at,
+        PageReference {
+            id: fresh.id.clone(),
+            path: fresh.page_path.clone(),
+            geometry: geometry.clone(),
+        },
+    );
+    let snapshot = NotebookSnapshot {
+        manifest: guard.manifest.clone(),
+        page: Page {
+            calculation: Some(CalculationReference {
+                id: document.id().to_owned(),
+                source_path: source_path.clone(),
+                part_id,
+            }),
+            schema_version: crate::CALCULATION_SCHEMA_VERSION,
+            id: fresh.id.clone(),
+            revision: 1,
+            geometry,
+            background: PageBackground::Plain {
+                color: "#ffffff".into(),
+            },
+            objects: Vec::new(),
+            reading_order: Vec::new(),
+            ink_layers: Vec::new(),
+        },
+        calculations: vec![StoredFile {
+            path: source_path,
+            bytes: document.bytes()?,
+        }],
+        blocks: Vec::new(),
+        assets: Vec::new(),
+        ink_layers: Vec::new(),
+    };
+    validate_snapshot(&root, &snapshot)?;
+    guard.ensure_unchanged("adding a computational page")?;
+    if let Some(previous) = previous {
+        // The new view is unreferenced until the existing recovery transaction publishes the manifest.
+        write_json(&root, &fresh.page_path, &snapshot.page)?;
+        let mut candidate = previous.clone();
+        candidate.manifest = snapshot.manifest.clone();
+        candidate.calculations = snapshot.calculations.clone();
+        candidate.page.revision = candidate
+            .page
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| invalid_error("page revision overflow"))?;
+        super::write::save_transactional(&root, &previous, &candidate)?;
+    } else {
+        guard.commit_snapshot(&snapshot, "adding a computational page")?;
+    }
+    open_page(&root, &fresh.id)
 }
 
 /// Add every source page from one preserved PDF as consecutive notebook pages.
@@ -314,6 +557,7 @@ pub fn import_pdf_pages(
             },
         );
         let page = Page {
+            calculation: None,
             schema_version,
             id: id.clone(),
             revision: 1,
@@ -347,6 +591,7 @@ pub fn import_pdf_pages(
         validate_snapshot(
             &root,
             &NotebookSnapshot {
+                calculations: Vec::new(),
                 manifest: guard.manifest.clone(),
                 page: page.clone(),
                 blocks: Vec::new(),
@@ -492,7 +737,47 @@ pub fn duplicate_page(
         .collect::<Result<Vec<_>, &'static str>>()
         .map_err(invalid_error)?;
 
+    // A copied part is independent. Preserve its saved results with explicit provenance.
+    let (calculation, calculations) = if let Some(reference) = &source.page.calculation {
+        use crate::calculation::{Calculation, CalculationReference};
+        let original = Calculation::parse(&source.calculations[0].bytes)?;
+        let id = format!("calc-{new_id}");
+        let part = format!("part-{new_id}");
+        let path = format!("calculations/{id}.ipynb");
+        if root.join(&path).exists() {
+            return Err(invalid_error("copied calculation path already exists"));
+        }
+        let title = original.metadata["goodtype"]["title"]
+            .as_str()
+            .unwrap_or("");
+        let mut copy = Calculation::new(&id, &part, title);
+        copy.cells = original
+            .cells
+            .into_iter()
+            .filter(|cell| cell.part_id() == Some(&reference.part_id))
+            .collect();
+        for (index, cell) in copy.cells.iter_mut().enumerate() {
+            cell.id = format!("cell-{new_id}-{index}");
+            cell.metadata["goodtype"]["partId"] = serde_json::json!(part);
+            cell.metadata["goodtype"]["copiedFrom"] =
+                serde_json::json!({"calculationId":reference.id,"partId":reference.part_id});
+        }
+        (
+            Some(CalculationReference {
+                id,
+                part_id: part,
+                source_path: path.clone(),
+            }),
+            vec![StoredFile {
+                path,
+                bytes: copy.bytes()?,
+            }],
+        )
+    } else {
+        (None, Vec::new())
+    };
     let page = Page {
+        calculation,
         schema_version: source.page.schema_version,
         id: new_id.clone(),
         revision: 1,
@@ -551,6 +836,7 @@ pub fn duplicate_page(
         .collect();
 
     let snapshot = NotebookSnapshot {
+        calculations,
         manifest: guard.manifest.clone(),
         page,
         blocks,
@@ -789,8 +1075,8 @@ fn structure_result(
 #[cfg(test)]
 mod tests {
     use crate::{
-        MIN_SUPPORTED_SCHEMA_VERSION, PageBackground, PageGeometry, PageObject, SCHEMA_VERSION,
-        ShapeGeometry, ShapePoint, ShapeStyle, StrokePattern,
+        BINARY_INK_SCHEMA_VERSION as SCHEMA_VERSION, MIN_SUPPORTED_SCHEMA_VERSION, PageBackground,
+        PageGeometry, PageObject, ShapeGeometry, ShapePoint, ShapeStyle, StrokePattern,
         storage::{fixtures::*, *},
     };
     use std::path::Path;
@@ -1499,5 +1785,45 @@ mod tests {
         assert_eq!(redone.snapshot.page.id, "page-002");
         assert_eq!(redone.snapshot.manifest.pages.len(), 2);
         assert!(redone.can_undo && !redone.can_redo);
+    }
+    #[test]
+    fn calculation_plan_keeps_cell_order_and_excludes_detached_parts() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        create_notebook(root, &snapshot()).unwrap();
+        let first = create_calculation_page(
+            root,
+            "2026-11-02T12:00:00Z",
+            &PagePosition::Last,
+            "Task A",
+            None,
+        )
+        .unwrap();
+        let second = create_calculation_page(
+            root,
+            "2026-11-02T12:00:01Z",
+            &PagePosition::Last,
+            "Part 2",
+            Some(&first.page.id),
+        )
+        .unwrap();
+        let order = vec![
+            "page-001".to_owned(),
+            second.page.id.clone(),
+            first.page.id.clone(),
+        ];
+        reorder_pages(root, &order, "2026-11-02T12:00:02Z", &second.page.id).unwrap();
+        let plan = calculation_execution_plan(root, &second.page.id).unwrap();
+        assert_eq!(
+            plan.steps
+                .iter()
+                .map(|step| &step.page_id)
+                .collect::<Vec<_>>(),
+            vec![&first.page.id, &second.page.id]
+        );
+        delete_page(root, &first.page.id, "2026-11-02T12:00:03Z").unwrap();
+        let plan = calculation_execution_plan(root, &second.page.id).unwrap();
+        assert_eq!(plan.steps.len(), 1);
+        assert_eq!(plan.steps[0].page_id, second.page.id);
     }
 }

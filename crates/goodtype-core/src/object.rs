@@ -17,6 +17,8 @@ use crate::{ShapeGeometry, ShapeStyle, nonnegative, positive};
 /// rewritten, and whether it takes part in the change fingerprint.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SourceRole {
+    /// Ordinary nbformat JSON, rewritten only through validated calculation transactions.
+    Calculation,
     /// Typst source. The store rewrites it on every commit, so it is fingerprinted.
     Block,
     /// Pasted bytes. Written once and shared by reference from then on — rewriting one would
@@ -40,6 +42,7 @@ impl SourceRole {
     /// The one directory a file in this role may live in.
     pub fn directory(self) -> &'static str {
         match self {
+            Self::Calculation => "calculations",
             Self::Block => "blocks",
             Self::Asset => "assets",
             Self::Reference => "references",
@@ -53,6 +56,7 @@ impl SourceRole {
     /// that can never be read back.
     pub const fn max_bytes(self) -> usize {
         match self {
+            Self::Calculation => crate::calculation::MAX_CALCULATION_BYTES,
             Self::Block => MAX_BLOCK_BYTES,
             Self::Asset => MAX_IMAGE_BYTES,
             Self::Reference => MAX_PDF_BYTES,
@@ -62,7 +66,7 @@ impl SourceRole {
     /// Whether the store writes files in this role at all, or only reads what is already there.
     pub fn is_written(self) -> bool {
         match self {
-            Self::Block | Self::Asset => true,
+            Self::Calculation | Self::Block | Self::Asset => true,
             Self::Reference => false,
         }
     }
@@ -70,7 +74,7 @@ impl SourceRole {
     /// Whether an existing file in this role may be replaced.
     pub fn is_rewritable(self) -> bool {
         match self {
-            Self::Block => true,
+            Self::Calculation | Self::Block => true,
             Self::Asset | Self::Reference => false,
         }
     }
@@ -79,7 +83,7 @@ impl SourceRole {
     /// files the store itself rewrites qualify: write-once content cannot change under a reader.
     pub fn is_fingerprinted(self) -> bool {
         match self {
-            Self::Block => true,
+            Self::Calculation | Self::Block => true,
             Self::Asset | Self::Reference => false,
         }
     }
