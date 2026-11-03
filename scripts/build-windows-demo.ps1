@@ -33,13 +33,22 @@ finally {
     Pop-Location
 }
 
-$releaseExecutable = Join-Path $repositoryRoot "target\release\goodtype-desktop.exe"
+$buildTargetRoot = if ($env:CARGO_TARGET_DIR) {
+    if ([IO.Path]::IsPathRooted($env:CARGO_TARGET_DIR)) {
+        [IO.Path]::GetFullPath($env:CARGO_TARGET_DIR)
+    } else {
+        [IO.Path]::GetFullPath((Join-Path $repositoryRoot $env:CARGO_TARGET_DIR))
+    }
+} else {
+    Join-Path $repositoryRoot "target"
+}
+$releaseExecutable = Join-Path $buildTargetRoot "release\goodtype-desktop.exe"
 if (-not (Test-Path -LiteralPath $releaseExecutable)) {
-    throw "The release executable was not created at target\release\goodtype-desktop.exe."
+    throw "The release executable was not created at $releaseExecutable."
 }
 
-$sidecar = Join-Path $repositoryRoot "target\release\tinymist.exe"
-$decoder = Join-Path $repositoryRoot "target\release\goodtype-ink.exe"
+$sidecar = Join-Path $buildTargetRoot "release\tinymist.exe"
+$decoder = Join-Path $buildTargetRoot "release\goodtype-ink.exe"
 foreach ($requiredFile in @($sidecar, $decoder)) {
     if (-not (Test-Path -LiteralPath $requiredFile -PathType Leaf)) {
         throw "Required release binary is missing: $requiredFile"
@@ -62,8 +71,9 @@ Extract this entire ZIP to a folder, then open Goodtype.exe.
 Keep tinymist.exe beside Goodtype.exe for editor intelligence.
 Microsoft Edge WebView2 Runtime is required by the desktop app.
 
-This development build writes schema-3 notebooks. Older Goodtype versions
-cannot open that schema. Legacy ink originals are retained during migration.
+This build supports schema-4 notebooks with computational pages. Older
+Goodtype versions cannot open schema 4. Normal notebooks retain schema 3
+until computational content is added. Legacy ink originals are preserved.
 
 To decode an ink file to JSON from PowerShell in this folder:
   .\goodtype-ink.exe decode "C:\path\layer.ink"
