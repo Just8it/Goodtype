@@ -1425,6 +1425,28 @@ export function createSession(env: SessionEnvironment) {
 
   function addTypstBlock() {
     if (activeSnapshot?.page.calculation) return;
+    insertTypstBlock("= New block\n\nType here", {
+      x: 150 + (typstBlocks.length % 4) * 20,
+      y: 220 + (typstBlocks.length % 6) * 28,
+      layoutWidthPt: 230,
+    });
+    status = notice("workspace.createdANewTypstBlock");
+    queueCommit(notice("workspace.createdTypstBlock"));
+  }
+
+  /**
+   * A confirmed handwriting transcription (ADR 0040): an ordinary new block beside the ink. The
+   * ink stays, so undoing this one commit returns the page exactly as it was.
+   */
+  function addTranscribedBlock(source: string, placement: { x: number; y: number; layoutWidthPt: number }, label: UiText) {
+    if (activeSnapshot?.page.calculation) return;
+    insertTypstBlock(source, placement);
+    env.selection.updateInkSelection([]);
+    status = label;
+    queueCommit(notice("transcription.inserted"));
+  }
+
+  function insertTypstBlock(source: string, placement: { x: number; y: number; layoutWidthPt: number }) {
     let number = typstBlocks.length + 1;
     while (typstBlocks.some((block) => block.id === `typst-${String(number).padStart(3, "0")}`)) number += 1;
     const id = `typst-${String(number).padStart(3, "0")}`;
@@ -1433,13 +1455,8 @@ export function createSession(env: SessionEnvironment) {
       {
         id,
         path: `blocks/${activePageId}-${id}.typ`,
-        source: withBlockFont("= New block\n\nType here", env.settings.inlineTextFont),
-        transform: {
-          x: 150 + (typstBlocks.length % 4) * 20,
-          y: 220 + (typstBlocks.length % 6) * 28,
-          layoutWidthPt: 230,
-          scale: 1,
-        },
+        source: withBlockFont(source, env.settings.inlineTextFont),
+        transform: { ...placement, scale: 1 },
         result: null,
         zIndex: nextVisualZIndex(),
         readingOrder: nextReadingOrder(),
@@ -1449,8 +1466,6 @@ export function createSession(env: SessionEnvironment) {
     env.selection.selectedImageId = null;
     env.selection.selectedShapeId = null;
     env.selection.editingShapeId = null;
-    status = notice("workspace.createdANewTypstBlock");
-    queueCommit(notice("workspace.createdTypstBlock"));
   }
 
   function nextVisualZIndex(): number {
@@ -2132,6 +2147,7 @@ export function createSession(env: SessionEnvironment) {
     updateTypstSource,
     updateSharedStyle,
     addTypstBlock,
+    addTranscribedBlock,
     nextVisualZIndex,
     nextReadingOrder,
     scheduleInkCommit,

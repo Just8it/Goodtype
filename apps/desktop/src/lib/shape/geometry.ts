@@ -229,6 +229,34 @@ function cubicAt(
   };
 }
 
+/**
+ * The drawn outline as one polyline in the shape's own coordinates, closed shapes ending where
+ * they began. Rounded rectangle corners are drawn square: close enough for a recognizer, which
+ * is the only reader.
+ */
+export function shapeOutline(geometry: ShapeGeometry): ShapePoint[] {
+  switch (geometry.kind) {
+    case "line":
+      return [geometry.start, geometry.end];
+    case "rectangle": {
+      const { widthPt: w, heightPt: h } = geometry;
+      return [{ x: 0, y: 0 }, { x: w, y: 0 }, { x: w, y: h }, { x: 0, y: h }, { x: 0, y: 0 }];
+    }
+    case "ellipse": {
+      const rx = geometry.widthPt / 2;
+      const ry = geometry.heightPt / 2;
+      return Array.from({ length: 33 }, (_, index) => {
+        const angle = (index / 32) * 2 * Math.PI;
+        return { x: rx + rx * Math.cos(angle), y: ry + ry * Math.sin(angle) };
+      });
+    }
+    case "spline": {
+      const points = splinePolyline(geometry.nodes, geometry.closed);
+      return geometry.closed && points.length > 1 ? [...points, points[0]] : points;
+    }
+  }
+}
+
 export function shapeBounds(geometry: ShapeGeometry): ShapeBounds {
   if (geometry.kind === "rectangle" || geometry.kind === "ellipse") {
     return { left: 0, top: 0, right: geometry.widthPt, bottom: geometry.heightPt };

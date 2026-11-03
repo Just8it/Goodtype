@@ -58,6 +58,13 @@ Goodtype keeps your notebooks as plain files on your own disk. No account, no sy
   Conversion runs locally and preserves the originals; some features of each app are not supported.
 - **Mixed selection** with lasso filters for handwriting, highlighting, shapes, images and Typst
   blocks, so you can move, resize, duplicate or delete them together.
+- **Handwriting transcription on Windows.** Select handwriting and choose **Transcribe** in the
+  selection bar or right-click menu. Choose an installed Windows text recognizer, review and
+  correct the proposal beside the original ink, then insert it as an editable Typst block.
+  The original ink stays intact, and insertion can be undone. Selected shape outlines are
+  included too, so straightened fraction bars stay with the handwriting.
+  Math transcription supports an optional local TexTeller add-on, but its download is not yet
+  available in this build because no tested public release is pinned.
 - **Multi-page notebooks** that scroll continuously, with pages you can reorder, duplicate, clear
   or delete, and undo scoped either to the page in view or to the whole notebook.
 - **Several notebooks open at once** in tabs, with search across a notebook's typed content.
@@ -78,6 +85,10 @@ optional Goodnotes and OneNote importers download from GitHub when you request t
 checks and downloads are explicit, with signed release metadata verified before an update is
 installed. Your notebooks stay on your device. Once installed, the importers work offline, and
 Goodtype's core workflows work without them.
+
+Handwriting transcription uses installed Windows recognizers locally and sends no notebook
+content to a server. The optional math helper also runs locally; its model is not bundled with
+Goodtype. When a tested release is available, its download will require an explicit action.
 
 ## Build
 
