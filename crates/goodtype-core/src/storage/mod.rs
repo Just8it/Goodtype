@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{InkLayer, NotebookManifest, Page};
 
+mod calculation_import;
+mod calculations;
 mod delta;
 pub mod files;
 mod history;
@@ -26,15 +28,21 @@ mod write;
 mod fixtures;
 
 pub use crate::object::{MAX_IMAGE_BYTES, MAX_PDF_BYTES};
+pub use calculations::{
+    CalculationHistory, CalculationResult, CellOperation, calculation_history,
+    commit_calculation_outputs, edit_calculation, read_calculation,
+};
 pub use delta::{PageDelta, commit_page_delta};
 pub use history::{
     HistoryResult, NotebookHistory, commit_notebook, focus_page, observe_notebook, observe_page,
     redo_notebook, undo_notebook,
 };
 pub use pages::{
-    NotebookStructureHistory, PagePosition, StructureHistoryResult, advance_structure,
-    create_notebook, create_page, delete_page, duplicate_page, import_pdf_pages, observe_structure,
-    open_notebook, open_page, redo_structure, reorder_pages, save_notebook, undo_structure,
+    CalculationExecutionPlan, CalculationStep, NotebookStructureHistory, PagePosition,
+    StructureHistoryResult, advance_structure, calculation_execution_plan, create_calculation_page,
+    create_notebook, create_page, delete_page, duplicate_page, import_calculation_page,
+    import_pdf_pages, observe_structure, open_notebook, open_page, redo_structure, reorder_pages,
+    save_notebook, undo_structure,
 };
 pub use recovery::{
     RecoveryCandidate, discard_recovery_candidate, list_recovery_candidates,
@@ -73,6 +81,8 @@ pub struct StoredFile {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NotebookSnapshot {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub calculations: Vec<StoredFile>,
     pub manifest: NotebookManifest,
     pub page: Page,
     pub blocks: Vec<StoredFile>,

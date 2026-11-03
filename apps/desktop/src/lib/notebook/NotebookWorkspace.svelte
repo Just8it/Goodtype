@@ -29,6 +29,9 @@
   import EraserPanel from "./EraserPanel.svelte";
   import ToolCard from "./ToolCard.svelte";
   import ShapeCard from "./ShapeCard.svelte";
+  import PythonInstall from "../calculation/PythonInstall.svelte";
+  import CalculationPage from "../calculation/CalculationPage.svelte";
+  import { createCalculationWorkspace } from "../calculation/calculationWorkspace.svelte";
   import PageSurface from "./PageSurface.svelte";
   import OverflowMenu from "../workspace/OverflowMenu.svelte";
   import { populated, type MenuSection } from "../workspace/menu";
@@ -67,6 +70,13 @@
   import { DEFAULT_SETTINGS, loadSettings, saveSettings, ERASER_RADIUS_PT, HIGHLIGHTER_TAPER, MAX_SWATCHES, MAX_WIDTHS, MM_PER_PT, colorName, penType, withRecentColor, type AppSettings, type PenPreset } from "../settings";
 
   const session = createSession({
+    flushCalculations: () => calculations.flush(),
+    calculationRunning: () => calculations.runningIn(session.root),
+    forgetCalculations: (root) => calculations.forgetRoot(root),
+    calculationHistory: (undo, pageScope) => session.activeCalculation
+      ? calculations.history({ root: session.root, pageId: session.activePageId, reference: session.activeCalculation }, undo, pageScope)
+      : Promise.resolve(false),
+    calculationHistoryFlags: () => session.activeCalculation ? calculations.historyFor(session.root, session.activeCalculation) : { canUndo: false, canRedo: false },
     get addPageOpen() { return addPageOpen; },
     set addPageOpen(value) { addPageOpen = value; },
     get collectMetrics() { return collectMetrics; },
@@ -96,6 +106,8 @@
 
   const observePage = session.observePage;
 
+  const calculations = createCalculationWorkspace((pageId, document, action, root) => session.calculationSaved(pageId, document, action, root), (pageId, value, root) => session.calculationHeight(pageId, value, root));
+  const mountCalculationEditor = calculations.mountEditor;
   const selection = createSelection({
     get activeInkLayerId() { return session.activeInkLayerId; },
     set activeInkLayerId(value) { session.activeInkLayerId = value; },
@@ -262,6 +274,7 @@
   async function openSideEditor(blockId?: string) {
     if (!(await closeTemplate())) return;
     sideEditorStyle = false;
+    if (session.activeCalculation) { await calculations.preparePlacement(); sideEditorOpen = true; return; }
     // An explicit canvas edit still wins. The generic button/shortcut starts with the sustained
     // Page text surface, then falls back to the same movable-block choices as before.
     const remembered = session.typstBlocks.some((block) => block.id === sideEditorBlockId)
@@ -372,6 +385,7 @@
 
   async function closeSideEditor() {
     if (!(await closeTemplate())) return;
+    if (session.activeCalculation) await calculations.preparePlacement();
     sideEditorOpen = false;
   }
 
@@ -660,6 +674,7 @@
   onDestroy(() => {
     destroyed = true;
     clearTimeout(settingsSaveTimer);
+    calculations.dispose();
     templateEditor.dispose();
     previews.dispose();
     session.dispose();
@@ -825,6 +840,11 @@
       ];
     }
     return populated([
+      {
+        title: $t("workspace.exportPDF"),
+        entries: [{ kind: "action", id: "export-a4", label: $t("calculation.exportA4"),
+          icon: "M5 3h14v18H5zM5 12h14", disabled: session.busy, onSelect: () => void session.exportPdf(true) }],
+      },
       ...(selected
         ? [
             {
@@ -917,7 +937,23 @@
         lane: "import",
         sources: [
           {
-            id: "pdf",
+            id: "calculation", kind: "calculation",
+            label: $t("calculation.newPage"),
+            detail: $t("calculation.independent"),
+            compact: true,
+            disabled: !tauriAvailable,
+            onSelect: (position) => void session.addCalculation(position),
+          },
+          ...(session.activeCalculation ? [{
+            id: "calculation-part", kind: "calculation" as const, label: $t("calculation.continuePage"), detail: $t("calculation.shared"),
+            compact: true, onSelect: (position: PagePosition) => void session.addCalculation(position, true),
+          }] : []),
+          {
+            id: "jupyter-import", kind: "calculation-import", label: $t("calculation.import"), detail: $t("calculation.importHint"),
+            compact: true, disabled: !tauriAvailable, onSelect: (position) => void session.importCalculation(position),
+          },
+          {
+            id: "pdf", kind: "pdf",
             label: $t("workspace.importPDF"),
             detail: $t("workspace.bringsInEveryPage"),
             disabled: !tauriAvailable,
@@ -1664,7 +1700,7 @@
     {#snippet actions()}
     <div class="command-actions">
       {#if session.pageOpen}
-        <button class="icon-button" type="button" aria-label={$t("workspace.exportPDF")} title={$t("workspace.exportPDF")} onclick={session.exportPdf} disabled={session.busy}>
+        <button class="icon-button" type="button" aria-label={$t("workspace.exportPDF")} title={$t("workspace.exportPDF")} onclick={() => void session.exportPdf()} disabled={session.busy}>
           <!-- Arrow up and out of the tray: the page leaves Goodtype. Down read as "download",
                which is the one thing this button never does. -->
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15V4m0 0-4 4m4-4 4 4M5 17v2a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-2" /></svg>
@@ -1723,10 +1759,18 @@
     />
   {/if}
 
+  <PythonInstall workspace={calculations} />
   {#if session.pageOpen}
     <div class="workspace-split" class:panel-right={settings.sideEditorDock === "right"} inert={session.pageInputLocked}>
     {#if sideEditorOpen}
+      {#snippet calculationEditor()}
+        {#if calculations.selected?.pageId === session.activePageId}
+          <div use:mountCalculationEditor></div>
+        {:else}<p>{$t("calculation.selectCell")}</p>{/if}
+      {/snippet}
       <SideEditor
+        customEditor={session.activeCalculation ? calculationEditor : undefined}
+        customTitle={session.activeCalculation ? $t("calculation.page") : undefined}
         bind:this={sideEditor}
         mode={sideEditorMode}
         source={templateEditor.draft ? templateEditor.draft.source : sideEditorStyle ? session.sharedStyleSource : (sideEditorBlock?.source ?? "")}
@@ -1799,6 +1843,7 @@
           {@const box = active ? session.activeGeometry : (entry.snapshot?.page.geometry ?? entry.geometry)}
           <article
             class:active-page={active}
+            class:calculation-stack-item={Boolean(entry.snapshot?.page.calculation)}
             class="page-stack-item"
             data-page-id={entry.id}
             aria-label={$t("workspace.page4", { "value1": index + 1 })}
@@ -1830,8 +1875,12 @@
               {/if}
             </div>
             <div class="page-frame" use:trackActiveFrame={active} style:--page-width={`${box.widthPt}px`} style:--page-height={`${box.heightPt}px`} style:width="calc(var(--page-width) * var(--page-zoom))" style:height="calc(var(--page-height) * var(--page-zoom))">
-              <div class="page" style:width={`${box.widthPt}px`} style:height={`${box.heightPt}px`} style:transform="scale(var(--page-zoom))">
-                {#if active || entry.snapshot}
+              <div class="page" class:computational={Boolean(entry.snapshot?.page.calculation)} style:width={`${box.widthPt}px`} style:height={`${box.heightPt}px`} style:transform="scale(var(--page-zoom))">
+                {#if entry.snapshot?.page.calculation}
+                  <CalculationPage root={session.root} pageId={entry.id} snapshot={entry.snapshot}
+                    workspace={calculations} {active} sideOpen={sideEditorOpen}
+                    activate={() => session.activatePage(entry.id)} openSide={() => void openSideEditor()} />
+                {:else if active || entry.snapshot}
                   <PageSurface
                     blocks={active ? activeBlockViews : blockViewsFromSnapshot(entry.snapshot!)}
                     pageTypst={active
@@ -2005,6 +2054,7 @@
         </div>
       {/if}
 
+      {#if !session.activeCalculation}
       <NotebookPalette {workspace} {settings} {changeSettings} onStatus={next => { session.status = next; }}
         bind:paletteDock bind:paletteElement bind:paletteDragging {closeToolCard}
         onUndo={session.undo} onRedo={session.redo}
@@ -2241,6 +2291,7 @@
       {/if}
 
       </NotebookPalette>
+      {/if}
     </section>
     </div>
   {:else}
@@ -2310,7 +2361,7 @@
       selectedBlockFont={selection.selectedTypstId ? blockFont(session.typstBlocks.find(block => block.id === selection.selectedTypstId)?.source ?? "") : null}
       onFontChange={changeInlineFont}
       {settings}
-      actions={{ openMetrics: () => (metricsOpen = true) }}
+      actions={{ openMetrics: () => (metricsOpen = true), changePython: () => { settingsOpen = false; void calculations.changePython(); } }}
       onChange={changeSettings}
       onClose={() => (settingsOpen = false)}
     />
@@ -2511,6 +2562,10 @@
     gap: 46px;
   }
   .page-stack-item { position: relative; flex: none; }
+  .calculation-stack-item {
+    margin-top: calc(var(--calculation-top-space, 32px) * var(--page-zoom));
+    margin-bottom: calc(var(--calculation-bottom-space, 30px) * var(--page-zoom));
+  }
   /* Springs back when a pull is let go; follows the finger without lag while it lasts. */
   .page-pan-field { transition: transform 220ms cubic-bezier(0.2, 0.9, 0.3, 1.2); }
   .page-pan-field.pulling { transition: none; }
@@ -2606,6 +2661,7 @@
     box-shadow: 0 2px 6px rgb(0 0 0 / 30%), 0 24px 60px rgb(0 0 0 / 45%);
     transform-origin: top left;
   }
+  .page.computational { overflow: visible; background: var(--charcoal, #16181d); }
   .page-loading { display: grid; height: 100%; color: #8d949d; font-size: var(--text-md); place-items: center; }
 
   /* The object and ink layer rules now live with the renderer, in PageSurface.svelte. */

@@ -24,7 +24,7 @@ import { paletteTools, type PaletteCommand } from "../notebook/palette";
  * diagnostic belongs in Settings rather than one tap from the page, but it is not a preference,
  * so it needs somewhere to send the request.
  */
-export type SettingActions = { openMetrics: () => void };
+export type SettingActions = { openMetrics: () => void; changePython: () => void };
 
 export type SettingControl =
   | {
@@ -295,6 +295,25 @@ export function settingGroups(t: Translator = translate, fonts: string[] = []): 
         },
       },
     ],
+  },
+  {
+    id: "python",
+    title: "Python",
+    icon: "M4 5h16M4 12h16M4 19h16",
+    items: [{
+      id: "pythonRuntime",
+      label: t("calculation.pythonRuntime"),
+      hint: t("calculation.pythonRuntimeHint"),
+      keywords: [t("calculation.pythonRuntimeSearch")],
+      control: { kind: "action", buttonLabel: t("calculation.changePython"), run: actions => actions.changePython() },
+    }, {
+      id: "pythonPackageDownloads",
+      label: t("calculation.downloadPackages"),
+      hint: t("calculation.downloadHint"),
+      keywords: [t("calculation.downloadSearch")],
+      control: { kind: "toggle", read: settings => settings.pythonPackageDownloads,
+        write: (settings, value) => ({ ...settings, pythonPackageDownloads: value }) },
+    }],
   },
   {
     id: "motion",

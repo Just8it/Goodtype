@@ -4,9 +4,9 @@
 //! one concern still fails if another regresses underneath it.
 
 use crate::{
-    InkLayer, InkLayerReference, NotebookManifest, ObjectFields, Page, PageBackground,
-    PageDefaults, PageGeometry, PageObject, PageReference, SCHEMA_VERSION, Stroke, StrokePattern,
-    StrokePoint, StrokeTool, Transform,
+    BINARY_INK_SCHEMA_VERSION as SCHEMA_VERSION, InkLayer, InkLayerReference, NotebookManifest,
+    ObjectFields, Page, PageBackground, PageDefaults, PageGeometry, PageObject, PageReference,
+    Stroke, StrokePattern, StrokePoint, StrokeTool, Transform,
 };
 
 use super::{NotebookSnapshot, StoredFile};
@@ -31,6 +31,7 @@ pub(super) fn fields(id: &str, reading_order: u32) -> ObjectFields {
 
 pub(super) fn snapshot() -> NotebookSnapshot {
     NotebookSnapshot {
+        calculations: Vec::new(),
         manifest: NotebookManifest {
             schema_version: SCHEMA_VERSION,
             id: "notebook-phase0b".into(),
@@ -57,6 +58,7 @@ pub(super) fn snapshot() -> NotebookSnapshot {
             modified_at: "2026-07-23T00:00:00Z".into(),
         },
         page: Page {
+            calculation: None,
             schema_version: SCHEMA_VERSION,
             id: "page-001".into(),
             revision: 1,

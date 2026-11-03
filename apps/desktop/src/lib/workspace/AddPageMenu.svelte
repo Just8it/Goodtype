@@ -1,7 +1,7 @@
 <script lang="ts">
   import { t, formatNumber, displayLocale } from "../i18n";
   import { dismissable } from "./dismiss";
-  import { resolvePosition, type AddPageGroup, type AddPageSource, type AddPageWhere } from "./addPage";
+  import { sourceBehavior, resolvePosition, type AddPageGroup, type AddPageSource, type AddPageWhere } from "./addPage";
 
   /**
    * The add-page panel: three columns instead of one long scroll.
@@ -104,13 +104,16 @@
       everySource.find((source) => source.id === "next") ??
       everySource[0],
   );
-  const importing = $derived(Boolean(selected && importSources.some((source) => source.id === selected.id)));
+  const behavior = $derived(sourceBehavior(selected));
+  const importing = $derived(behavior.importFile);
+  const effectiveCount = $derived(behavior.single ? 1 : count);
 
   const shelves = $derived(
     category === "all" ? paperGroups : paperGroups.filter((group) => group.id === category),
   );
 
   const readout = $derived.by(() => {
+    if (behavior.calculation) return $t("calculation.geometry");
     const inches = sizes.find((size) => size.id === sizeId)?.detail.includes("in");
     const width = geometry.widthPt * MM_PER_PT;
     const height = geometry.heightPt * MM_PER_PT;
@@ -132,23 +135,27 @@
   );
 
   const addLabel = $derived(
-    importing ? $t("workspace.importPDF") : count > 1 ? $t("workspace.addPages", { "count": count }) : $t("workspace.addPage"),
+    behavior.pdf ? $t("workspace.importPDF")
+      : behavior.kind === "calculation-import" ? $t("calculation.import")
+      : behavior.calculation ? (selected?.id === "calculation-part" ? $t("calculation.continuePage") : $t("calculation.addPage"))
+      : count > 1 ? $t("workspace.addPages", { count }) : $t("workspace.addPage"),
   );
 
   const summary = $derived([
     {
       key: "size",
-      value: `${sizes.find((size) => size.id === sizeId)?.name ?? ""} ${orientation} · ${readout}`,
+      label: $t("workspace.size"),
+      value: behavior.calculation ? $t("calculation.geometry") : behavior.pdf ? $t("calculation.fromPDF") : `${sizes.find((size) => size.id === sizeId)?.name ?? ""} ${orientation === "portrait" ? $t("library.portrait") : $t("library.landscape")} · ${readout}`,
     },
-    { key: "paper", value: tones.find((tone) => tone.id === toneId)?.name ?? "" },
-    { key: "ruling", value: importing ? "from the PDF" : (selected?.label ?? "") },
-    { key: "where", value: canPlaceRelative ? where : "last" },
+    { key: "paper", label: $t("workspace.paper"), value: behavior.paper ? tones.find((tone) => tone.id === toneId)?.name ?? "" : behavior.calculation ? $t("calculation.cellContent") : $t("calculation.fromPDF") },
+    { key: "ruling", label: $t("calculation.source"), value: behavior.pdf ? $t("calculation.fromPDF") : (selected?.label ?? "") },
+    { key: "where", label: $t("workspace.where"), value: CHOICES.find(choice => choice.value === (canPlaceRelative ? where : "last"))?.label ?? "" },
   ]);
 
   function commit(keepOpen: boolean) {
     if (!selected || selected.disabled) return;
-    selected.onSelect(resolvePosition(canPlaceRelative ? where : "last", currentPageId), count);
-    if (keepOpen) added += importing ? 1 : count;
+    selected.onSelect(resolvePosition(canPlaceRelative ? where : "last", currentPageId), effectiveCount);
+    if (keepOpen) added += effectiveCount;
     else onClose();
   }
 
@@ -237,9 +244,9 @@
 
     <div class="run" role="group" aria-label={$t("workspace.howManyPages")}>
       <span class="run-label">{$t("workspace.pages")}</span>
-      <button type="button" aria-label={$t("workspace.oneFewerPage")} disabled={count <= 1} onclick={() => step(-1)}>−</button>
-      <output aria-live="polite">{count}</output>
-      <button type="button" aria-label={$t("workspace.oneMorePage")} disabled={count >= MAX_RUN} onclick={() => step(1)}>+</button>
+      <button type="button" aria-label={$t("workspace.oneFewerPage")} disabled={behavior.single || count <= 1} onclick={() => step(-1)}>−</button>
+      <output aria-live="polite">{effectiveCount}</output>
+      <button type="button" aria-label={$t("workspace.oneMorePage")} disabled={behavior.single || count >= MAX_RUN} onclick={() => step(1)}>+</button>
     </div>
 
     <button type="button" class="close" aria-label={$t("library.close")} onclick={onClose}>
@@ -270,7 +277,7 @@
         </div>
       </section>
 
-      <section>
+      <section inert={!behavior.paper} class:muted={!behavior.paper}>
         <div class="eyebrow spread">
           <span>{$t("workspace.size")}</span>
           <span class="readout">{readout}</span>
@@ -292,7 +299,7 @@
         </div>
       </section>
 
-      <div class="row" role="radiogroup" aria-label={$t("library.orientation")}>
+      <div class="row" inert={!behavior.paper} class:muted={!behavior.paper} role="radiogroup" aria-label={$t("library.orientation")}>
         {#each ORIENTATIONS as choice (choice.value)}
           <button
             type="button"
@@ -311,7 +318,7 @@
         {/each}
       </div>
 
-      <section>
+      <section inert={!behavior.paper} class:muted={!behavior.paper}>
         <div class="eyebrow">{$t("workspace.paper")}</div>
         <div class="row" role="radiogroup" aria-label={$t("library.paperColour")}>
           {#each tones as tone (tone.id)}
@@ -365,12 +372,15 @@
             class:on={selected?.id === source.id}
             disabled={source.disabled}
             aria-pressed={selected?.id === source.id}
+            title={source.detail ? `${source.label} ? ${source.detail}` : source.label}
             onkeydown={(event) => moveWithin(event)}
             onclick={() => (selectedId = source.id)}
           >
             <span class="sheet" aria-hidden="true">
-              {#if importSources.some((entry) => entry.id === source.id)}
+              {#if sourceBehavior(source).pdf}
                 <span class="badge">PDF</span>
+              {:else if sourceBehavior(source).calculation}
+                <svg viewBox="0 0 48 56" fill="none" aria-hidden="true"><path d="M7 4h34v48H7z" stroke="#7a91a0"/><rect x="12" y="12" width="24" height="12" rx="2" stroke="#4e8297"/><path d="m19 15-3 3 3 3m10-6 3 3-3 3M13 32h22M13 38h17" stroke="#4e8297" stroke-width="2"/></svg>
               {:else if source.preview}
                 {@html source.preview}
               {/if}
@@ -386,7 +396,7 @@
 
       <!-- Dimmed while the PDF is selected: the file brings its own pages, so none of this
            applies to what the button is about to do. -->
-      <div class="papers" class:muted={importing}>
+      <div class="papers" class:muted={!behavior.paper}>
         {#each shelves as group (group.id)}
           <div class="shelf">
             <div class="eyebrow">{group.title}</div>
@@ -420,9 +430,11 @@
     <div class="preview">
       <div class="eyebrow">{$t("workspace.preview")}</div>
       <div class="stage">
-        <div class="sheet-preview" class:pdf={importing} style:aspect-ratio={previewAspect} style:--ratio={previewAspect}>
-          {#if importing}
+        <div class="sheet-preview" class:pdf={behavior.pdf} style:aspect-ratio={behavior.calculation ? 1.45 : previewAspect} style:--ratio={behavior.calculation ? 1.45 : previewAspect}>
+          {#if behavior.pdf}
             <span class="badge big">PDF</span>
+          {:else if behavior.calculation}
+            <div class="calculation-preview" aria-hidden="true"><span class="code-line"></span><span class="code-line short"></span><svg viewBox="0 0 100 45"><path d="M5 4v35h90" stroke="#aebac2" fill="none"/><path d="M8 28C24 2 35 1 47 23s28 24 45-10" stroke="#4e8297" stroke-width="2" fill="none"/></svg></div>
           {:else if selected?.preview}
             {@html selected.preview}
           {/if}
@@ -432,7 +444,7 @@
       <dl class="summary">
         {#each summary as row (row.key)}
           <div>
-            <dt>{row.key}</dt>
+            <dt>{row.label}</dt>
             <dd>{row.value}</dd>
           </div>
         {/each}
@@ -459,6 +471,11 @@
 </div>
 
 <style>
+  .muted { opacity: .45; }
+  .calculation-preview { box-sizing: border-box; padding: 18%; width: 100%; }
+  .code-line { display: block; width: 85%; height: 4px; background: #8d9da8; margin-bottom: 7px; }
+  .code-line.short { width: 55%; }
+  .calculation-preview svg { display: block; width: 100%; margin-top: 16px; }
   /* Centred on the window, not hung off the button that opened it. `right: 0` against a 36px
      button sitting ~150px in from the window edge made `100vw` a lie about the space to its left,
      so the panel walked off-screen by that offset — invisible while maximised, obvious the moment

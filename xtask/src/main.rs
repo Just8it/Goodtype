@@ -73,6 +73,28 @@ fn check_tool(name: &str, command: &str, expected: Option<&str>, required: bool)
 
 fn verify() -> Result<(), String> {
     let root = workspace_root();
+    let options = env::args().skip(2).collect::<Vec<_>>();
+    let with_computation = match options.as_slice() {
+        [] => false,
+        [option] if option == "--with-computation-spike" => true,
+        _ => return Err("usage: cargo xtask verify [--with-computation-spike]".to_owned()),
+    };
+    let runtime = if with_computation {
+        if !cfg!(windows) {
+            return Err("The computation isolation experiment requires Windows.".to_owned());
+        }
+        let path = env::var_os("GOODTYPE_COMPUTATION_SPIKE_RUNTIME")
+            .ok_or("Set GOODTYPE_COMPUTATION_SPIKE_RUNTIME to a prepared experiment directory. Verification never downloads it.")?;
+        let path = Path::new(&path)
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        if !path.join("runtime-manifest.json").is_file() {
+            return Err("The prepared computation experiment has no runtime manifest.".to_owned());
+        }
+        Some(path)
+    } else {
+        None
+    };
     let commands: &[(&str, &str, &[&str])] = &[
         ("Rust format", "cargo", &["fmt", "--all", "--", "--check"]),
         (
@@ -118,6 +140,76 @@ fn verify() -> Result<(), String> {
         }
     }
 
+    if let Some(runtime) = runtime {
+        let manifest = "tools/computation-spike/Cargo.toml";
+        let commands: &[&[&str]] = &[
+            &["fmt", "--manifest-path", manifest, "--", "--check"],
+            &[
+                "clippy",
+                "--manifest-path",
+                manifest,
+                "--offline",
+                "--locked",
+                "--all-targets",
+                "--",
+                "-D",
+                "warnings",
+            ],
+            &[
+                "run",
+                "--manifest-path",
+                manifest,
+                "--offline",
+                "--locked",
+                "--",
+                runtime
+                    .to_str()
+                    .ok_or("The experiment path is not valid Unicode.")?,
+            ],
+        ];
+        for args in commands {
+            let status = platform_command("cargo")
+                .args(*args)
+                .current_dir(&root)
+                .status()
+                .map_err(|error| error.to_string())?;
+            if !status.success() {
+                return Err(format!("Computation experiment failed: {status}"));
+            }
+        }
+        let output = root
+            .join("output/computation-layout")
+            .join(format!("verify-{}", std::process::id()));
+        let status = platform_command("cargo")
+            .args([
+                "test",
+                "-p",
+                "goodtype-typst",
+                "computational_layout_artifacts",
+                "--",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("GOODTYPE_COMPUTATION_LAYOUT_OUTPUT", &output)
+            .current_dir(&root)
+            .status()
+            .map_err(|error| error.to_string())?;
+        if !status.success() {
+            return Err(format!("Computation layout experiment failed: {status}"));
+        }
+        let status = platform_command("node")
+            .arg("tools/computation-spike/pdf_probe.mjs")
+            .arg(root.join("apps/desktop/node_modules/pdfjs-dist"))
+            .arg(output)
+            .current_dir(&root)
+            .status()
+            .map_err(|error| error.to_string())?;
+        if !status.success() {
+            return Err(format!(
+                "Computation PDF parser experiment failed: {status}"
+            ));
+        }
+    }
     println!("\nVerification passed.");
     Ok(())
 }

@@ -110,6 +110,7 @@ pub struct AppSettings {
     /// Allow downloading Typst Universe packages on a cache miss. Cached packages
     /// keep working either way.
     pub remote_packages: bool,
+    pub python_package_downloads: bool,
     /// Scrolling on past the last page, against resistance, adds a page in the notebook paper.
     pub pull_to_add_page: bool,
     /// Whether one finger draws with the active tool. Off keeps touch for navigation only.
@@ -280,6 +281,7 @@ impl Default for AppSettings {
             page_text_baseline_grid: true,
             page_text_line_wrap: true,
             remote_packages: true,
+            python_package_downloads: true,
             pull_to_add_page: true,
             draw_with_finger: false,
             touch_history: true,
@@ -563,12 +565,17 @@ pub fn load_app_settings(app: tauri::AppHandle) -> Result<AppSettings, String> {
 pub fn save_app_settings(
     app: tauri::AppHandle,
     packages: tauri::State<'_, RemotePackages>,
+    python: tauri::State<'_, crate::computation::RuntimeState>,
     settings: AppSettings,
 ) -> Result<AppSettings, String> {
     let settings = sanitize(settings);
     write_config(&app, "settings.json", &settings)?;
     // Keep the compile path's in-memory policy in step with what was just stored.
     packages.set(settings.remote_packages);
+    python.downloads.store(
+        settings.python_package_downloads,
+        std::sync::atomic::Ordering::SeqCst,
+    );
     Ok(settings)
 }
 

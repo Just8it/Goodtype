@@ -51,6 +51,7 @@ pub fn commit_page_delta(
     let current = open_page(&root, &delta.page.id)?;
     super::history::ensure_current(&root, history, &current, delta.page.revision)?;
     let mut candidate = super::NotebookSnapshot {
+        calculations: current.calculations.clone(),
         manifest: current.manifest.clone(),
         page: current.page.clone(),
         blocks: current.blocks.clone(),

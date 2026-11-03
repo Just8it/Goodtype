@@ -17,6 +17,7 @@ export type AddPageWhere = "before" | "after" | "last";
 export type AddPageSource = {
   /** Stable identity for the keyed each block. */
   id: string;
+  kind?: "paper" | "pdf" | "calculation" | "calculation-import";
   label: string;
   /** Second line: what the source is, or why it cannot be used yet. */
   detail?: string;
@@ -65,4 +66,14 @@ export type AddPageGroup = {
 export function resolvePosition(where: AddPageWhere, currentPageId: string): PagePosition {
   if (where === "last" || !currentPageId) return { kind: "last" };
   return { kind: where, pageId: currentPageId };
+}
+
+/** Layout placement does not decide behavior: computational sources can share the pinned shelf. */
+export function sourceBehavior(source: Pick<AddPageSource, "kind"> | undefined) {
+  const kind = source?.kind ?? "paper";
+  return {
+    kind, paper: kind === "paper", pdf: kind === "pdf",
+    calculation: kind === "calculation" || kind === "calculation-import",
+    importFile: kind === "pdf" || kind === "calculation-import", single: kind !== "paper",
+  };
 }

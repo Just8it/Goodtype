@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod computation;
 mod export;
 mod importer;
 mod library;
@@ -20,6 +21,7 @@ fn main() {
         .manage(notebook::NotebookHistories::default())
         .manage(workspace::AllowedRoots::default())
         .manage(settings::RemotePackages::default())
+        .manage(computation::RuntimeState::default())
         .manage(tinymist::Tinymist::default())
         .manage(importer::Importers::default())
         .manage(recognition::math_process::MathProcess::default())
@@ -27,6 +29,12 @@ fn main() {
             let handle = app.handle().clone();
             let policy = app.state::<settings::RemotePackages>();
             settings::seed_remote_packages(&handle, &policy);
+            if let Ok(settings) = settings::load_app_settings(handle.clone()) {
+                app.state::<computation::RuntimeState>().downloads.store(
+                    settings.python_package_downloads,
+                    std::sync::atomic::Ordering::SeqCst,
+                );
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -72,6 +80,21 @@ fn main() {
             notebook::open_page,
             notebook::focus_page,
             notebook::create_page,
+            notebook::create_calculation_page,
+            notebook::import_calculation_notebook,
+            computation::python_runtime_status,
+            computation::python_runtime_install,
+            computation::python_runtime_cancel,
+            computation::python_runtime_forget_local,
+            computation::local::python_runtime_discover,
+            computation::local::python_runtime_probe,
+            computation::run_calculation_cell,
+            computation::end_calculation_session,
+            notebook::read_calculation,
+            notebook::layout_calculation,
+            notebook::calculation_execution_plan,
+            notebook::edit_calculation,
+            notebook::calculation_history,
             notebook::pick_pdf_reference,
             notebook::read_pdf_reference,
             notebook::import_pdf_pages,

@@ -9,6 +9,10 @@ license.workspace = true
 [dependencies]
 goodtype-core = { path = "../goodtype-core" }
 serde.workspace = true
+serde_json.workspace = true
+base64 = "0.22"
+unicode-width = "0.2"
+pulldown-cmark = { version = "0.13", default-features = false }
 tempfile.workspace = true
 typst = "0.15.1"
 # In-process completion and analysis, driven by the same World as compilation.

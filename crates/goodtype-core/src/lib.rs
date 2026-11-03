@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+pub mod calculation;
 pub mod ink_codec;
 pub mod layout;
 pub mod object;
@@ -20,7 +21,8 @@ pub const MIN_SUPPORTED_SCHEMA_VERSION: u32 = 1;
 pub const SHAPE_SCHEMA_VERSION: u32 = 2;
 /// Binary ink layer files are what version 3 added.
 pub const BINARY_INK_SCHEMA_VERSION: u32 = 3;
-pub const SCHEMA_VERSION: u32 = BINARY_INK_SCHEMA_VERSION;
+pub const CALCULATION_SCHEMA_VERSION: u32 = 4;
+pub const SCHEMA_VERSION: u32 = CALCULATION_SCHEMA_VERSION;
 /// Legacy strokes painted above movable objects. Missing version-1 values keep that look.
 pub const DEFAULT_INK_Z_INDEX: i32 = 1_000_000;
 
@@ -153,6 +155,8 @@ impl PageBackground {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Page {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub calculation: Option<calculation::CalculationReference>,
     pub schema_version: u32,
     pub id: String,
     pub revision: u64,

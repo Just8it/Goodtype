@@ -70,6 +70,7 @@ pub async fn compile_typst(
     tauri::async_runtime::spawn_blocking(move || {
         let source = if let Some(page_text) = request.page_text {
             let page = goodtype_typst::export::ExportPage {
+                calculation: None,
                 width_pt: page_text.geometry.width_pt,
                 height_pt: page_text.geometry.height_pt,
                 background: page_text.background,

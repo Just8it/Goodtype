@@ -12,12 +12,15 @@ use goodtype_core::{
 /// shadowed the public one at every call site below and agreed with it only by coincidence.
 use crate::MAX_SOURCE_BYTES;
 
+pub(crate) type ExportSource = (String, Vec<(String, Vec<u8>)>);
+
 const MAX_PAGE_ITEMS: usize = 10_000;
 const MAX_STROKE_POINTS: usize = 1_000_000;
 const MAX_DIMENSION_PT: f64 = 100_000.0;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExportPage {
+    pub calculation: Option<crate::calculation::ExportCalculation>,
     pub width_pt: f64,
     pub height_pt: f64,
     pub shared_style: Option<String>,
@@ -122,6 +125,11 @@ pub enum ExportError {
     InvalidPage(String),
     InvalidImagePath(String),
     CompilerFailed(String),
+    /// A computational page cannot export in the selected mode. Never clipped or omitted.
+    Calculation {
+        page_index: usize,
+        reason: crate::calculation::CalculationError,
+    },
     Io(std::io::Error),
 }
 
@@ -139,6 +147,9 @@ impl std::fmt::Display for ExportError {
             Self::InvalidPage(message) => write!(formatter, "invalid page export: {message}"),
             Self::InvalidImagePath(path) => write!(formatter, "unsafe image path: {path}"),
             Self::CompilerFailed(message) => write!(formatter, "Typst export failed: {message}"),
+            Self::Calculation { page_index, reason } => {
+                write!(formatter, "computational page {}: {reason}", page_index + 1)
+            }
             Self::Io(error) => error.fmt(formatter),
         }
     }
@@ -215,8 +226,34 @@ fn compile_pdf(
     pages: &[ExportPage],
     allow_remote_packages: bool,
 ) -> Result<Vec<u8>, ExportError> {
+    let (main, overlay) = combined_source(root, pages)?;
+    crate::embedded::export_pdf(root, "page.typ", main, overlay, allow_remote_packages)
+        .map_err(ExportError::CompilerFailed)
+}
+
+/// The one generated entry document for an export, with its in-memory helper files.
+fn combined_source(root: &Path, pages: &[ExportPage]) -> Result<ExportSource, ExportError> {
     let mut overlay: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut main = String::new();
     for (page_index, page) in pages.iter().enumerate() {
+        if page_index > 0 {
+            // An explicit break keeps consecutive same-geometry pages distinct; the following
+            // `#set page` then applies to the fresh empty page.
+            main.push_str("#pagebreak()\n");
+        }
+        if let Some(calculation) = &page.calculation {
+            // Saved results only: export never runs code. Text rules stay scoped to this page.
+            let (source, files) = crate::calculation::export_source(
+                root,
+                calculation,
+                &format!("calculation-{page_index}"),
+            )
+            .map_err(|reason| ExportError::Calculation { page_index, reason })?;
+            main.push_str(&source);
+            overlay.extend(files);
+            continue;
+        }
+        main.push_str(&generated_typst_source(page, page_index));
         if let Some(page_text) = &page.page_typst {
             let source =
                 prepared_page_text(root, page, page_text).map_err(ExportError::CompilerFailed)?;
@@ -248,15 +285,7 @@ fn compile_pdf(
             ));
         }
     }
-
-    crate::embedded::export_pdf(
-        root,
-        "page.typ",
-        combined_typst_source(pages),
-        overlay,
-        allow_remote_packages,
-    )
-    .map_err(ExportError::CompilerFailed)
+    Ok((main, overlay))
 }
 
 /// The notebook's filename rule, plus a `.pdf` extension. Shared rather than restated, so an export
@@ -271,6 +300,19 @@ fn validate_output_name(name: &str) -> Result<(), ExportError> {
 fn validate_page(root: &Path, page: &ExportPage) -> Result<(), ExportError> {
     valid_positive_dimension(page.width_pt, "page width")?;
     valid_positive_dimension(page.height_pt, "page height")?;
+    if page.calculation.is_some()
+        && (page.page_typst.is_some()
+            || !page.blocks.is_empty()
+            || !page.strokes.is_empty()
+            || !page.shapes.is_empty()
+            || !page.images.is_empty()
+            || (page.width_pt - goodtype_core::calculation::A4_WIDTH_PT).abs() > 0.001)
+    {
+        // Computational pages have no free objects in this format. Refuse rather than drop them.
+        return Err(ExportError::InvalidPage(
+            "computational page has free objects or a non-A4 width".to_owned(),
+        ));
+    }
     if page.blocks.len()
         + page.strokes.len()
         + page.shapes.len()
@@ -449,6 +491,7 @@ fn validate_relative_image(root: &Path, relative: &str) -> Result<(), ExportErro
         .map_err(|_| ExportError::InvalidImagePath(relative.to_owned()))
 }
 
+#[cfg(test)]
 fn combined_typst_source(pages: &[ExportPage]) -> String {
     let mut source = String::new();
     for (page_index, page) in pages.iter().enumerate() {
@@ -478,7 +521,8 @@ fn generated_typst_source(page: &ExportPage, page_index: usize) -> String {
             typst_string(&color),
         ),
         None => format!(
-            "#set page(width: {}pt, height: {}pt, margin: 0pt)\n",
+            // Explicit, so a preceding computational page's white fill does not carry over.
+            "#set page(width: {}pt, height: {}pt, margin: 0pt, fill: none)\n",
             page.width_pt, page.height_pt
         ),
     };
@@ -622,7 +666,7 @@ fn ink_strata(page: &ExportPage) -> Vec<InkStratum<'_>> {
 /// here can currently contain one — colours are hex-validated and paths went through
 /// `validate_relative`, which refuses `\` — but this is the one function standing between
 /// canonical content and generated code, and it should not depend on its callers to be safe.
-fn typst_string(value: &str) -> String {
+pub(crate) fn typst_string(value: &str) -> String {
     value
         .replace('\\', "\\\\")
         .replace('"', "\\\"")
@@ -1119,6 +1163,7 @@ mod tests {
 
     fn page() -> ExportPage {
         ExportPage {
+            calculation: None,
             width_pt: 595.0,
             height_pt: 842.0,
             shared_style: None,
@@ -1805,6 +1850,7 @@ mod tests {
         second.width_pt = 400.0;
         second.height_pt = 300.0;
         let third = ExportPage {
+            calculation: None,
             width_pt: 595.0,
             height_pt: 842.0,
             shared_style: None,
@@ -1873,5 +1919,151 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(error, ExportError::CompilerFailed(_)));
+    }
+
+    fn calculation_page(source: &str, split_a4: bool) -> ExportPage {
+        let mut document = goodtype_core::calculation::Calculation::new("calc", "part", "Task A");
+        document.cells[0].source = source.to_owned();
+        ExportPage {
+            calculation: Some(crate::calculation::ExportCalculation {
+                document,
+                part_id: "part".to_owned(),
+                german: false,
+                split_a4,
+            }),
+            width_pt: goodtype_core::calculation::A4_WIDTH_PT,
+            height_pt: 84.0,
+            shared_style: None,
+            background: PageBackground::Plain {
+                color: "#ffffff".to_owned(),
+            },
+            page_text_baseline_grid: false,
+            page_typst: None,
+            blocks: vec![],
+            strokes: vec![],
+            shapes: vec![],
+            images: vec![],
+        }
+    }
+
+    fn page_text(frame: &typst::layout::Frame, into: &mut String) {
+        for (_, item) in frame.items() {
+            match item {
+                typst::layout::FrameItem::Group(group) => page_text(&group.frame, into),
+                typst::layout::FrameItem::Text(text) => into.push_str(text.text.as_str()),
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
+    fn mixed_normal_and_computational_pages_keep_order_geometry_and_selectable_text() {
+        use crate::calculation::{A4_HEIGHT_PT, layout};
+        let root = tempfile::tempdir().unwrap();
+        let mut before = page();
+        before.strokes.clear();
+        before.blocks[0].source = "Normal before".to_owned();
+        before.background = PageBackground::Plain {
+            color: "#fdf6e3".to_owned(),
+        };
+        let short = calculation_page("short_value = 21 * 2", false);
+        let long_source = (0..90)
+            .map(|line| format!("split_{line} = {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let split = calculation_page(&long_source, true);
+        let mut after = page();
+        after.strokes.clear();
+        after.blocks[0].source = "Normal after".to_owned();
+        let pages = [before, short.clone(), split, after];
+
+        let (source, files) = combined_source(root.path(), &pages).unwrap();
+        let mut world = crate::embedded::BlockWorld::for_main(
+            "page.typ",
+            source,
+            root.path().canonicalize().unwrap(),
+            false,
+        );
+        for (name, bytes) in files {
+            world.insert_binary(&name, bytes);
+        }
+        let document = typst::compile::<typst_layout::PagedDocument>(&world)
+            .output
+            .unwrap_or_else(|errors| panic!("{}", crate::embedded::diagnostic_messages(&errors)));
+        let pages_out = document.pages();
+        assert!(pages_out.len() >= 5, "{} pages", pages_out.len());
+        let texts = pages_out
+            .iter()
+            .map(|page| {
+                let mut text = String::new();
+                page_text(&page.frame, &mut text);
+                text
+            })
+            .collect::<Vec<_>>();
+        let size = |index: usize| {
+            let size = pages_out[index].frame.size();
+            (size.x.to_pt(), size.y.to_pt())
+        };
+        assert_eq!(size(0), (595.0, 842.0));
+        assert!(texts[0].contains("Normal before"));
+        let calculation = short.calculation.as_ref().unwrap();
+        let expected = layout(root.path(), &calculation.document, "part", false).unwrap();
+        assert!((size(1).0 - goodtype_core::calculation::A4_WIDTH_PT).abs() < 1e-6);
+        assert!((size(1).1 - expected.height_pt).abs() < 1e-6);
+        assert!(size(1).1 < 100.0, "a one-cell page stays short");
+        assert!(texts[1].contains("short_value"));
+        // The computational page does not inherit the preceding page's paper colour.
+        assert_ne!(
+            format!("{:?}", pages_out[1].fill),
+            format!("{:?}", pages_out[0].fill)
+        );
+        let last = pages_out.len() - 1;
+        for index in 2..last {
+            assert!((size(index).1 - A4_HEIGHT_PT).abs() < 1e-6);
+        }
+        let split_text = texts[2..last].concat();
+        assert!((0..90).all(|line| split_text.contains(&format!("split_{line} = {line}"))));
+        assert_eq!(size(last), (595.0, 842.0));
+        assert!(texts[last].contains("Normal after"));
+
+        let result = export_pages(root.path(), "mixed.pdf", &pages, false).unwrap();
+        assert!(fs::read(result.output_path).unwrap().starts_with(b"%PDF-"));
+    }
+
+    #[test]
+    fn computational_export_refuses_instead_of_omitting_or_clipping() {
+        let root = tempfile::tempdir().unwrap();
+        let mut with_objects = calculation_page("x = 1", false);
+        with_objects.blocks = page().blocks;
+        assert!(matches!(
+            export_pages(root.path(), "objects.pdf", &[with_objects], false),
+            Err(ExportError::InvalidPage(_))
+        ));
+        let tall = (0..2000)
+            .map(|line| format!("v{line} = {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let error = export_pages(
+            root.path(),
+            "tall.pdf",
+            &[page(), calculation_page(&tall, false)],
+            false,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            ExportError::Calculation {
+                page_index: 1,
+                reason: crate::calculation::CalculationError::TooTall { .. }
+            }
+        ));
+        assert!(!root.path().join("exports/tall.pdf").exists());
+        export_pages(
+            root.path(),
+            "tall.pdf",
+            &[calculation_page(&tall, true)],
+            false,
+        )
+        .unwrap();
     }
 }

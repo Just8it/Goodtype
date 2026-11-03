@@ -4,6 +4,7 @@
 //! `World`: embedded fonts, notebook-root-scoped file access, and a fixed clock. Remote
 //! packages are gated separately (see the `World` implementation).
 
+pub mod calculation;
 pub mod export;
 pub mod page_source;
 

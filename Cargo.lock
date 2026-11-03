@@ -1670,17 +1670,18 @@ dependencies = [
 
 [[package]]
 name = "goodtype-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "miniz_oxide",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
 ]
 
 [[package]]
 name = "goodtype-desktop"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ed25519-dalek",
  "goodtype-core",
@@ -1702,10 +1703,13 @@ dependencies = [
 
 [[package]]
 name = "goodtype-typst"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
+ "base64 0.22.1",
  "goodtype-core",
+ "pulldown-cmark",
  "serde",
+ "serde_json",
  "tempfile",
  "typst",
  "typst-ide",
@@ -1714,6 +1718,7 @@ dependencies = [
  "typst-pdf",
  "typst-svg",
  "typstyle-core",
+ "unicode-width",
 ]
 
 [[package]]
@@ -3518,6 +3523,17 @@ checksum = "645dbe486e346d9b5de3ef16ede18c26e6c70ad97418f4874b8b1889d6e761ea"
 dependencies = [
  "ar_archive_writer",
  "cc",
+]
+
+[[package]]
+name = "pulldown-cmark"
+version = "0.13.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3db2be46835f013dd3f4fa7f5f7402c537787b54ebb6fe2b94bbdd7e2669bb7b"
+dependencies = [
+ "bitflags 2.13.1",
+ "memchr",
+ "unicase",
 ]
 
 [[package]]
@@ -5770,6 +5786,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "unicase"
+version = "2.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "357cc3acc6a036009fd6c973ed009037c732d60d0b4f6c673e9041497482a28f"
+
+[[package]]
 name = "unicode-bidi"
 version = "0.3.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6863,7 +6885,7 @@ checksum = "9440ea3e5aeabb0ac63af70daf835274065238cdd0cec83418f417eae38bacee"
 
 [[package]]
 name = "xtask"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "image",
  "resvg",

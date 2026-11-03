@@ -17,7 +17,9 @@ use crate::{
 
 use super::{
     MAX_INK_BYTES, MAX_INK_POINTS_PER_LAYER, MAX_INK_STROKES_PER_LAYER, MAX_JSON_BYTES,
-    NotebookSnapshot, StorageError, StoredFile, files::json_bytes, invalid, invalid_error,
+    NotebookSnapshot, StorageError, StoredFile,
+    files::{json_bytes, read_limited},
+    invalid, invalid_error,
     paths::*,
 };
 
@@ -26,6 +28,9 @@ use super::{
 /// Opening never upgrades a page. A confirmed write first changes legacy ink references to the
 /// binary encoding, which makes version 3 required; untouched sibling pages may stay older.
 pub(crate) fn required_schema_version(page: &Page) -> u32 {
+    if page.calculation.is_some() {
+        return crate::CALCULATION_SCHEMA_VERSION;
+    }
     let object_version = if page
         .objects
         .iter()
@@ -179,6 +184,47 @@ pub(crate) fn validate_snapshot(
     let asset_paths = referenced_paths(&snapshot.manifest, &snapshot.page, SourceRole::Asset);
     validate_files(root, &snapshot.blocks, &block_paths, SourceRole::Block)?;
     validate_files(root, &snapshot.assets, &asset_paths, SourceRole::Asset)?;
+    let calculation_paths =
+        referenced_paths(&snapshot.manifest, &snapshot.page, SourceRole::Calculation);
+    validate_files(
+        root,
+        &snapshot.calculations,
+        &calculation_paths,
+        SourceRole::Calculation,
+    )?;
+    if let Some(reference) = &snapshot.page.calculation {
+        use crate::calculation::{A4_WIDTH_PT, Calculation};
+        if !crate::calculation::valid_id(&reference.id)
+            || !crate::calculation::valid_id(&reference.part_id)
+            || reference.source_path != format!("calculations/{}.ipynb", reference.id)
+            || !snapshot.page.objects.is_empty()
+            || !snapshot.page.ink_layers.is_empty()
+            || (snapshot.page.geometry.width_pt - A4_WIDTH_PT).abs() > 0.001
+        {
+            return invalid("computational page identity, geometry or content is invalid");
+        }
+        let bytes = snapshot
+            .calculations
+            .iter()
+            .find(|file| file.path == reference.source_path)
+            .map(|file| file.bytes.clone())
+            .map(Ok)
+            .unwrap_or_else(|| {
+                read_limited(
+                    resolve_existing(root, &reference.source_path)?,
+                    SourceRole::Calculation.max_bytes(),
+                )
+            })?;
+        let document = Calculation::parse(&bytes)?;
+        if document.id() != reference.id
+            || !document
+                .parts()?
+                .iter()
+                .any(|part| part.id == reference.part_id)
+        {
+            return invalid("computational page references an unknown calculation or part");
+        }
+    }
     validate_background(root, &snapshot.manifest.default_page.background)?;
     validate_background(root, &snapshot.page.background)?;
 
@@ -551,7 +597,7 @@ pub(crate) fn validate_stored_path(path: &str, role: SourceRole) -> Result<(), S
     match role {
         SourceRole::Asset => validate_asset_path(path),
         SourceRole::Block if path == layout::SHARED_STYLE => Ok(()),
-        SourceRole::Block | SourceRole::Reference => {
+        SourceRole::Block | SourceRole::Reference | SourceRole::Calculation => {
             if is_in_directory(path, role.directory()) {
                 Ok(())
             } else {
@@ -579,6 +625,11 @@ pub(crate) fn referenced_paths<'a>(
     role: SourceRole,
 ) -> Vec<&'a str> {
     let mut paths = Vec::new();
+    if role == SourceRole::Calculation
+        && let Some(reference) = &page.calculation
+    {
+        paths.push(reference.source_path.as_str());
+    }
     if role == SourceRole::Block
         && let Some(path) = manifest.shared_style_path.as_deref()
     {
