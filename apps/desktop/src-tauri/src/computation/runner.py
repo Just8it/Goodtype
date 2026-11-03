@@ -241,6 +241,3 @@ while True:
     except BaseException:
         response("response.json", {"protocol": 1, "requestId": last_request, "fatal": traceback.format_exc()[-8192:]})
         raise SystemExit(1)
-
-
-

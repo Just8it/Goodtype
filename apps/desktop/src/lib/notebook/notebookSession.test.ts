@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createSession, type SessionEnvironment } from "./notebookSession.svelte";
 import { blankNotebookSnapshot } from "./newNotebook";
 import { DEFAULT_SETTINGS } from "../settings";
+import { notice } from "../i18n";
 import type { NotebookSnapshot } from "../ipc/types";
 import type { Stroke } from "../model";
 
@@ -81,6 +82,17 @@ function workspace() {
 }
 
 describe("notebook session coordination", () => {
+  it("rejects free-positioned block insertion on a calculation page", () => {
+    const { session } = workspace();
+    const value = snapshot();
+    value.page.calculation = { id: "calc-001", sourcePath: "calculations/calc-001.ipynb", partId: "part-001" };
+    session.applySnapshot(value);
+    session.addTypstBlock();
+    session.addTranscribedBlock("hello", { x: 12, y: 12, layoutWidthPt: 120 }, notice("transcription.inserted"));
+    expect(session.typstBlocks).toEqual([]);
+    expect(ipc.commit).not.toHaveBeenCalled();
+  });
+
   it("ignores late calculation saves and heights from another notebook", () => {
     const { session } = workspace();
     const height = session.activeGeometry.heightPt;

@@ -1,4 +1,4 @@
-//! One static layout authority for computational-page display and export (ADR 0041).
+//! One static layout authority for computational-page display and export (ADR 0042).
 //!
 //! Saved cells and saved outputs become generated Typst content: code and text stay literal
 //! strings, never Typst markup, and nothing here evaluates notebook code. Display and export

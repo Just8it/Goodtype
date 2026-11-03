@@ -1,4 +1,4 @@
-//! Ordinary nbformat 4.5 files owned and validated by Goodtype (ADR 0041).
+//! Ordinary nbformat 4.5 files owned and validated by Goodtype (ADR 0042).
 //!
 //! The ordered `cells` array owns execution order. Goodtype pages own presentation order and
 //! refer to one calculation part each. Everything in a calculation file is untrusted input:

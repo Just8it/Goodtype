@@ -25,7 +25,8 @@ Goodtype keeps your notebooks as plain files on your own disk. No account, no sy
 > [!WARNING]
 > **Goodtype is in alpha and the notebook format is not stable.**
 >
-> Current builds read notebook schemas 1, 2, and 3. A confirmed page save lazily migrates older
+> Current builds read notebook schemas 1 through 4. Adding a computational page uses schema 4;
+> older builds cannot open those notebooks. Ordinary notebooks keep schema 3. A confirmed page save lazily migrates older
 > ink to schema 3 and preserves the original JSON files. Older builds cannot read schema 3.
 > Future alpha versions may still change the format; keep a separate copy of important work.
 > The [ink format specification](./formats/ink-v1.md) documents binary storage and migration.
@@ -68,6 +69,13 @@ Goodtype keeps your notebooks as plain files on your own disk. No account, no sy
 - **Multi-page notebooks** that scroll continuously, with pages you can reorder, duplicate, clear
   or delete, and undo scoped either to the page in view or to the whole notebook.
 - **Several notebooks open at once** in tabs, with search across a notebook's typed content.
+- **Jupyter calculation pages** with Python and Markdown cells, inline or side-panel editing,
+  saved outputs, and ordinary `.ipynb` import. Continue a calculation on another page to share
+  variables, or create an independent calculation. Pages have A4 width and content-driven height;
+  PDF export preserves that height or explicitly splits into A4 sheets.
+  Python runs only after you press Run, through a restricted Windows process. Choose a compatible
+  local interpreter or explicitly install the optional pinned scientific runtime. Saved content
+  stays readable without Python; missing libraries report an error without downloading anything.
 - **PDF export** of the whole notebook, in manifest order, from the files on disk rather than from
   whatever the screen happens to be showing.
 - **Crash recovery** built on atomic writes and a revision check, so an interrupted save cannot
@@ -89,6 +97,10 @@ Goodtype's core workflows work without them.
 Handwriting transcription uses installed Windows recognizers locally and sends no notebook
 content to a server. The optional math helper also runs locally; its model is not bundled with
 Goodtype. When a tested release is available, its download will require an explicit action.
+
+Python runtime downloads are explicit and governed by a separate package-download setting.
+Compatible installed libraries keep working offline. A selected local interpreter is staged
+into Goodtype's runtime area; its original installation and packages stay unchanged.
 
 ## Build
 
