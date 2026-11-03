@@ -13,6 +13,8 @@
     subtitle,
     sections,
     onClose,
+    trigger,
+    compact = false,
   }: {
     /** The subject the menu acts on, e.g. "Page 3 of 12". */
     title: string;
@@ -20,6 +22,9 @@
     subtitle?: string;
     sections: MenuSection[];
     onClose: () => void;
+    trigger?: HTMLElement;
+    /** In-surface menu: the trigger already names the subject, and rows take the dense size. */
+    compact?: boolean;
   } = $props();
 
   let menu = $state<HTMLElement>();
@@ -61,15 +66,18 @@
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 <aside
   bind:this={menu}
-  use:dismissable={onClose}
+  use:dismissable={{ onClose, trigger }}
   class="overflow-menu"
+  class:compact
   aria-label={title}
   onkeydown={moveWithin}
 >
-  <div class="menu-subject">
-    <strong>{title}</strong>
-    {#if subtitle}<span title={subtitle}>{subtitle}</span>{/if}
-  </div>
+  {#if !compact}
+    <div class="menu-subject">
+      <strong>{title}</strong>
+      {#if subtitle}<span title={subtitle}>{subtitle}</span>{/if}
+    </div>
+  {/if}
 
   {#each sections as section, index (section.title ?? index)}
     {#if index > 0}<div class="menu-divider"></div>{/if}
@@ -105,11 +113,13 @@
           disabled={entry.disabled}
           onclick={() => run(entry)}
         >
-          <span class="menu-icon" aria-hidden="true">
-            {#if entry.icon}
-              <svg viewBox="0 0 24 24"><path d={entry.icon} /></svg>
-            {/if}
-          </span>
+          {#if !compact || entry.icon}
+            <span class="menu-icon" aria-hidden="true">
+              {#if entry.icon}
+                <svg viewBox="0 0 24 24"><path d={entry.icon} /></svg>
+              {/if}
+            </span>
+          {/if}
           <span class="menu-label">{entry.label}</span>
           {#if entry.hint}
             <span class="menu-hint">{entry.hint}</span>
@@ -254,6 +264,20 @@
   }
 
   .menu-row input:focus-visible { border-color: var(--blueprint); outline: none; }
+
+  /* Sized to its labels, with dense rows: it sits on the work, not in the window chrome. */
+  .overflow-menu.compact {
+    width: max-content;
+    min-width: 168px;
+    max-width: min(280px, calc(100vw - 28px));
+    padding: 4px;
+    border-radius: var(--radius);
+    box-shadow: 0 10px 28px rgb(0 0 0 / 45%);
+  }
+
+  .compact button { min-height: var(--control-dense); padding: 0 8px; }
+  .compact .menu-heading { padding: 6px 8px 3px; }
+  .compact .menu-divider { margin: 4px 6px; }
 
   .menu-divider {
     height: 1px;

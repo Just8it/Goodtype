@@ -7,16 +7,17 @@ import type { Stroke } from "../model";
 
 const ipc = vi.hoisted(() => ({
   open: vi.fn(), page: vi.fn(), focus: vi.fn(), commit: vi.fn(), history: vi.fn(), structure: vi.fn(),
-  move: vi.fn(), add: vi.fn(),
+  move: vi.fn(), add: vi.fn(), close: vi.fn(), reorder: vi.fn(),
 }));
 vi.mock("../ipc/notebook", async original => ({ ...await original<typeof import("../ipc/notebook")>(),
   openNotebook: ipc.open, openPage: ipc.page, focusPage: ipc.focus, commitNotebook: ipc.commit,
-  runHistory: ipc.history, runStructureHistory: ipc.structure, createPage: ipc.add,
+  runHistory: ipc.history, runStructureHistory: ipc.structure, createPage: ipc.add, reorderPages: ipc.reorder,
 }));
 vi.mock("../ipc/library", () => ({ moveLibraryEntries: ipc.move }));
 vi.mock("../ipc/workspace", () => ({
   listRecentNotebooks: async () => [], recordNotebookOpened: async () => {},
   recordNotebookPage: async () => {}, recordNotebookSession: async () => {},
+  closeNotebookSession: ipc.close,
 }));
 vi.mock("../ipc/presets", () => ({ listTypstPresets: async () => [] }));
 vi.mock("../ipc/recovery", () => ({ listRecoveryCandidates: async () => [] }));
@@ -36,6 +37,7 @@ beforeEach(() => {
   ipc.history.mockImplementation(async (_root, _command, id) => result(snapshot(id)));
   ipc.structure.mockResolvedValue(result(snapshot()));
   ipc.add.mockResolvedValue(result(snapshot()));
+  ipc.close.mockResolvedValue(undefined);
   ipc.commit.mockImplementation(async (_root, value) => result(value));
 });
 afterEach(() => {
@@ -62,7 +64,7 @@ function deferred<T>() {
 function workspace() {
   const env = {
     addPageOpen: false, collectMetrics: false, followPageText: vi.fn(), message: String, moreOpen: false,
-    navigation: { stopTouchInertia: vi.fn(), pagePointers: new Map(), announceTouchHistory: vi.fn() },
+    navigation: { stopTouchInertia: vi.fn(), lockPageFocus: vi.fn(), pagePointers: new Map(), announceTouchHistory: vi.fn() },
     pageViewport: undefined, paletteDragging: false, previews: { reset: vi.fn() }, resetWorkspaceEditors: vi.fn(),
     saveTemplate: vi.fn(async () => true), searchOpen: false,
     selection: { groupedStrokeIds: [], updateInkSelection: vi.fn() },
@@ -79,6 +81,55 @@ function workspace() {
 }
 
 describe("notebook session coordination", () => {
+  it("ignores late calculation saves and heights from another notebook", () => {
+    const { session } = workspace();
+    const height = session.activeGeometry.heightPt;
+    session.calculationHeight("page-001", 300, "another-root");
+    session.calculationSaved("page-001", {
+      nbformat: 4, nbformat_minor: 5, cells: [],
+      metadata: { goodtype: { id: "calc-a", title: "Task", revision: 20, parts: [] } },
+    }, "change", "another-root");
+    expect(session.activeGeometry.heightPt).toBe(height);
+    expect(session.canUndo).toBe(false);
+  });
+  it("ends a background notebook's sessions when its tab closes", async () => {
+    const { session, env } = workspace();
+    const forget = vi.fn();
+    Object.assign(env, { forgetCalculations: forget });
+    session.openTabs = [...session.openTabs, { root: "background", title: "Other" }];
+    await session.closeNotebookTab("background");
+    expect(ipc.close).toHaveBeenCalledWith("background");
+    expect(forget).toHaveBeenCalledWith("background");
+    expect(session.root).toBe("old");
+  });
+  it("keeps calculation Undo after an unrelated page is added and undone", async () => {
+    const { session, env } = workspace();
+    const calculationHistory = vi.fn(async () => true);
+    Object.assign(env, { calculationHistory });
+    session.calculationSaved("page-001", {
+      nbformat: 4, nbformat_minor: 5, cells: [],
+      metadata: { goodtype: { id: "calc-a", title: "Task", revision: 2, parts: [{ id: "part-a", title: "Task" }] } },
+    });
+    await session.addPage({ kind: "last" });
+    await session.routeHistory("undo_notebook", "Undo");
+    await session.persist();
+    await session.routeHistory("undo_notebook", "Undo");
+    expect(calculationHistory).toHaveBeenCalledWith(true, false);
+    expect(ipc.history).not.toHaveBeenCalled();
+  });
+  it("keeps export from starting while a calculation is running", async () => {
+    const { session, env } = workspace();
+    Object.assign(env, { calculationRunning: () => true });
+    await session.exportPdf();
+    expect(env.saveTemplate).not.toHaveBeenCalled();
+    expect(session.busy).toBe(false);
+  });
+  it("keeps an explicitly selected short page active until navigation resumes", async () => {
+    const { session, env } = workspace();
+    await session.activatePage("page-002");
+    expect(env.navigation.lockPageFocus).toHaveBeenCalledOnce();
+    expect(session.activePageId).toBe("page-002");
+  });
   it.each([true, false])("preserves structural Undo across relocation, reopen=%s", async reopened => {
     const { session } = workspace();
     await session.addPage({ kind: "last" });
@@ -130,6 +181,24 @@ describe("notebook session coordination", () => {
     expect(session.pendingNeighborPages.has("page-002")).toBe(true);
     await session.persist();
     expect(ipc.commit.mock.calls[1][1].inkLayers[0].strokes).toHaveLength(2);
+  });
+
+  it("reloads visible neighbours after a page move instead of leaving them on Loading", async () => {
+    const { session } = workspace();
+    vi.stubGlobal("IntersectionObserver", class {
+      constructor(private callback: (entries: { isIntersecting: boolean }[]) => void) {}
+      observe() { this.callback([{ isIntersecting: true }]); }
+      disconnect() {}
+    });
+    // The page element stays mounted through the move, exactly as the keyed page list keeps it.
+    const observer = session.observePage({} as HTMLElement, "page-002");
+    await vi.waitFor(() => expect(session.pageEntries.find(page => page.id === "page-002")?.snapshot).not.toBeNull());
+    const moved = snapshot("page-001");
+    moved.manifest.pages = [moved.manifest.pages[1], moved.manifest.pages[0], moved.manifest.pages[2]];
+    ipc.reorder.mockResolvedValue(result(moved));
+    await session.moveActivePage(1);
+    await vi.waitFor(() => expect(session.pageEntries.find(page => page.id === "page-002")?.snapshot).not.toBeNull());
+    observer.destroy();
   });
 
   it("does not apply a focus reply over typing that happened during the request", async () => {

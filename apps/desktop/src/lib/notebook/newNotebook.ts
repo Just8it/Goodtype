@@ -1,5 +1,5 @@
 import type { NotebookSnapshot } from "../ipc/types";
-import { SCHEMA_VERSION, type NotebookManifest } from "../model";
+import { BINARY_INK_SCHEMA_VERSION as SCHEMA_VERSION, type NotebookManifest } from "../model";
 import type { NotebookSetup } from "../page/presets";
 import { projectSnapshot } from "./snapshot";
 

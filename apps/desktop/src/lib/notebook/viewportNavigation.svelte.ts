@@ -601,6 +601,7 @@ export function createNavigation(env: NavigationEnvironment) {
     changeZoom,
     zoomAt,
     wheelZoom,
+    lockPageFocus: () => { automaticPageFocusLocked = true; },
     pagePointAt,
     get panFrom() { return panFrom; },
     get touchTaps() { return touchTaps; },
