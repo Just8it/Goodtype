@@ -5,6 +5,7 @@ mod importer;
 mod library;
 mod notebook;
 mod preset;
+mod recognition;
 mod settings;
 mod store;
 mod tinymist;
@@ -21,6 +22,7 @@ fn main() {
         .manage(settings::RemotePackages::default())
         .manage(tinymist::Tinymist::default())
         .manage(importer::Importers::default())
+        .manage(recognition::math_process::MathProcess::default())
         .setup(|app| {
             let handle = app.handle().clone();
             let policy = app.state::<settings::RemotePackages>();
@@ -102,6 +104,11 @@ fn main() {
             typst::analyze_typst,
             export::export_notebook_pdf,
             export::render_notebook_cover,
+            recognition::recognition_capabilities,
+            recognition::recognize_ink_text,
+            recognition::recognize_ink_math,
+            recognition::prepare_math_recognition,
+            importer::remove_math_recognizer,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Goodtype");

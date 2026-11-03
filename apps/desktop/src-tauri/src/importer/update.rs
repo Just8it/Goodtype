@@ -175,7 +175,12 @@ pub(super) fn check(
         ),
         64,
     )?;
-    let verified = verify(tool, &bytes, &signature, &tool.public_key)?;
+    let verified = verify(
+        tool,
+        &bytes,
+        &signature,
+        &tool.public_key.ok_or("no signed update key is available")?,
+    )?;
     if let Some(version) = installed.or_else(|| tool.pinned.as_ref().map(|pin| pin.version)) {
         let ordering = stable_version(&verified.version)?.cmp(&stable_version(version)?);
         if !ordering.is_gt() {
@@ -212,7 +217,7 @@ mod tests {
             let mut changed = bytes.clone();
             changed.push(b' ');
             assert!(verify(tool, &changed, &signature, ours.as_bytes()).is_err());
-            assert!(verify(tool, &bytes, &signature, &tool.public_key).is_err());
+            assert!(verify(tool, &bytes, &signature, &tool.public_key.unwrap()).is_err());
             assert!(verify(tool, &bytes, &[0; 63], ours.as_bytes()).is_err());
         }
     }
@@ -310,7 +315,7 @@ mod tests {
         let bytes =
             read_bounded(&root.join("importer-update.json"), MAX_DESCRIPTOR as usize).unwrap();
         let signature = read_bounded(&root.join("importer-update.json.sig"), 64).unwrap();
-        let release = verify(tool, &bytes, &signature, &tool.public_key).unwrap();
+        let release = verify(tool, &bytes, &signature, &tool.public_key.unwrap()).unwrap();
         let archive = root.join(format!(
             "{}-{}-windows-x64.zip",
             tool.package, release.version

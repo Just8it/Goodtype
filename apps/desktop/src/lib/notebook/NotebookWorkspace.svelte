@@ -5,7 +5,7 @@
   import { createSelection } from "./selectionEditing.svelte";
   import { createNavigation } from "./viewportNavigation.svelte";
   import { patternLabel, shapeLabel, toolMessage, toolLabel } from "../i18n/labels";
-  import { setLanguage, t, formatNumber, displayLocale, notice, renderMessage } from "../i18n";
+  import { setLanguage, t, formatNumber, displayLocale, notice, renderMessage, type UiText } from "../i18n";
   import { errorDetails } from "../ipc/errors";
   import { onDestroy, onMount, tick } from "svelte";
   import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -22,7 +22,7 @@
   import { presetHeader, DEFAULT_PRESET_PATH, withPagePreset, type PresetChoice } from "../page/presets";
   import { summarizeMetric, type StrokePerformance } from "../ink/metrics";
   import { DEFAULT_POINTER_MAPPING, type InkTool, type PointerMapping } from "../ink/pipeline";
-  import { keepsSelection, shared } from "../ink/selection";
+  import { keepsSelection, shared, type Bounds } from "../ink/selection";
   import ColorPanel from "./ColorPanel.svelte";
   import WidthPanel from "./WidthPanel.svelte";
   import PaletteEditor from "./PaletteEditor.svelte";
@@ -55,6 +55,9 @@
   import { cycledTab } from "./tabs";
   import { addWidth as addRowWidth, canRemoveWidth, editWidth as editRowWidth, movePattern, moveSpacing, patternForWidth, prunePatterns, pruneSpacings, removeWidth as removeRowWidth, spacingForWidth, withWidthPattern, withWidthSpacing, widthTaken, WIDTH_BOUNDS_MM } from "./widths";
   import ConfirmDialog from "../workspace/ConfirmDialog.svelte";
+  import TranscriptionPanel from "./TranscriptionPanel.svelte";
+  import { recognitionCapabilities, type InkPolylines, type RecognitionCapabilities } from "../ipc/recognition";
+  import { inkPolylines, polylineBounds, shapePolylines, transcriptionPlacement } from "./transcription";
   import ConflictDialog from "../workspace/ConflictDialog.svelte";
   import RecoveryDialog from "../workspace/RecoveryDialog.svelte";
   import SearchOverlay from "../workspace/SearchOverlay.svelte";
@@ -179,6 +182,10 @@
   const tauriAvailable =
     typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
   let presetBusy = $state(false);
+  /** What Windows can recognize here; null until asked, or outside the desktop app. */
+  let recognition = $state<RecognitionCapabilities | null>(null);
+  /** The ink under review, pinned to the page it came from (ADR 0040). */
+  let transcribing = $state<{ pageId: string; polylines: InkPolylines; bounds: Bounds } | null>(null);
   let zoom = $state(1);
   let tool = $state<InkTool>("pen");
   let strokeMetrics = $state<StrokePerformance[]>([]);
@@ -637,6 +644,7 @@
     window.addEventListener("paste", selection.handlePaste);
     window.addEventListener("resize", onResizeToolbar);
     if (tauriAvailable) {
+      void recognitionCapabilities().then(found => (recognition = found)).catch(() => {});
       const appWindow = getCurrentWindow();
       void appWindow
         .onCloseRequested(windowClose.handle)
@@ -1314,6 +1322,38 @@
   }
 
   const onResizeToolbar = () => selection.scheduleSelectionToolbar();
+
+  /** Ink and shape lines are read; anything else a lasso caught (images, blocks) is left out. */
+  function transcriptionLines(): InkPolylines {
+    return [
+      ...inkPolylines(session.strokes, selection.selectedStrokeIds),
+      ...shapePolylines(session.shapes, selection.lassoObjectIds),
+    ];
+  }
+
+  function canTranscribe(): boolean {
+    return !!recognition && (recognition.recognizers.length > 0 || recognition.math.platformSupported)
+      && (selection.selectedStrokeIds.length > 0 || session.shapes.some(shape => selection.lassoObjectIds.includes(shape.id)));
+  }
+
+  function openTranscription() {
+    const polylines = transcriptionLines();
+    const bounds = polylineBounds(polylines);
+    if (!bounds) return;
+    transcribing = { pageId: session.activePageId, polylines, bounds };
+  }
+
+  function insertTranscription(source: string, label: UiText) {
+    const review = transcribing;
+    transcribing = null;
+    // The block belongs next to its ink. If the writer has moved to another page, nothing lands.
+    if (!review || review.pageId !== session.activePageId) return;
+    session.addTranscribedBlock(source, transcriptionPlacement(review.bounds, session.activeGeometry), label);
+  }
+
+  $effect(() => {
+    if (transcribing && transcribing.pageId !== session.activePageId) transcribing = null;
+  });
 
   function historyShortcut(event: KeyboardEvent) {
     if (event.defaultPrevented) return;
@@ -2131,6 +2171,7 @@
               pasteDisabled={!selection.clipboard}
               onDuplicate={selection.fromContext(selection.duplicateSelection)}
               onDelete={selection.fromContext(() => selection.deleteSelection())}
+              onTranscribe={canTranscribe() ? selection.fromContext(openTranscription) : undefined}
             />
           {:else if selection.selectedImageId || selection.selectedTypstId || selection.selectedShapeId}
             <SelectionActions
@@ -2178,6 +2219,7 @@
               ? selection.groupSelectedInk
               : undefined}
           onConvert={!selection.lassoObjectIds.length && selection.selectedStrokeIds.length === 1 ? session.convertSelectedInkToShape : undefined}
+          onTranscribe={canTranscribe() ? openTranscription : undefined}
           onCopy={() => void selection.copySelection()}
           onDuplicate={() => void selection.duplicateSelection()}
           onDelete={selection.hasCopyableSelection() ? () => void selection.deleteSelection() : undefined}
@@ -2230,6 +2272,16 @@
         void session.reopen();
       }}
       onCancel={() => (session.conflictDetail = null)}
+    />
+  {/if}
+  {#if transcribing}
+    <TranscriptionPanel
+      polylines={transcribing.polylines}
+      bounds={transcribing.bounds}
+      recognizers={recognition?.recognizers ?? []}
+      math={recognition?.math ?? null}
+      onInsert={insertTranscription}
+      onClose={() => (transcribing = null)}
     />
   {/if}
   {#if session.confirmingPageDelete !== null}
