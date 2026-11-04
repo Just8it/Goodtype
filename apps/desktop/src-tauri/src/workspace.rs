@@ -245,9 +245,11 @@ pub fn close_notebook_session(
     app: tauri::AppHandle,
     roots: tauri::State<'_, AllowedRoots>,
     histories: tauri::State<'_, crate::notebook::NotebookHistories>,
+    computation: tauri::State<'_, crate::computation::RuntimeState>,
     root: String,
 ) -> Result<(), String> {
     let canonical = ensure_allowed(&roots, &root)?;
+    crate::computation::end_root_sessions(&computation, &canonical)?;
     clear_active_recent(&app, &path_string(canonical.clone())?)?;
     histories.forget_root(&canonical)
 }

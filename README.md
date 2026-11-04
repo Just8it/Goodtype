@@ -25,7 +25,8 @@ Goodtype keeps your notebooks as plain files on your own disk. No account, no sy
 > [!WARNING]
 > **Goodtype is in alpha and the notebook format is not stable.**
 >
-> Current builds read notebook schemas 1, 2, and 3. A confirmed page save lazily migrates older
+> Current builds read notebook schemas 1 through 4. Adding a computational page uses schema 4;
+> older builds cannot open those notebooks. Ordinary notebooks keep schema 3. A confirmed page save lazily migrates older
 > ink to schema 3 and preserves the original JSON files. Older builds cannot read schema 3.
 > Future alpha versions may still change the format; keep a separate copy of important work.
 > The [ink format specification](./formats/ink-v1.md) documents binary storage and migration.
@@ -58,9 +59,23 @@ Goodtype keeps your notebooks as plain files on your own disk. No account, no sy
   Conversion runs locally and preserves the originals; some features of each app are not supported.
 - **Mixed selection** with lasso filters for handwriting, highlighting, shapes, images and Typst
   blocks, so you can move, resize, duplicate or delete them together.
+- **Handwriting transcription on Windows.** Select handwriting and choose **Transcribe** in the
+  selection bar or right-click menu. Choose an installed Windows text recognizer, review and
+  correct the proposal beside the original ink, then insert it as an editable Typst block.
+  The original ink stays intact, and insertion can be undone. Selected shape outlines are
+  included too, so straightened fraction bars stay with the handwriting.
+  Math transcription supports an optional local TexTeller add-on, but its download is not yet
+  available in this build because no tested public release is pinned.
 - **Multi-page notebooks** that scroll continuously, with pages you can reorder, duplicate, clear
   or delete, and undo scoped either to the page in view or to the whole notebook.
 - **Several notebooks open at once** in tabs, with search across a notebook's typed content.
+- **Jupyter calculation pages** with Python and Markdown cells, inline or side-panel editing,
+  saved outputs, and ordinary `.ipynb` import. Continue a calculation on another page to share
+  variables, or create an independent calculation. Pages have A4 width and content-driven height;
+  PDF export preserves that height or explicitly splits into A4 sheets.
+  Python runs only after you press Run, through a restricted Windows process. Choose a compatible
+  local interpreter or explicitly install the optional pinned scientific runtime. Saved content
+  stays readable without Python; missing libraries report an error without downloading anything.
 - **PDF export** of the whole notebook, in manifest order, from the files on disk rather than from
   whatever the screen happens to be showing.
 - **Crash recovery** built on atomic writes and a revision check, so an interrupted save cannot
@@ -78,6 +93,14 @@ optional Goodnotes and OneNote importers download from GitHub when you request t
 checks and downloads are explicit, with signed release metadata verified before an update is
 installed. Your notebooks stay on your device. Once installed, the importers work offline, and
 Goodtype's core workflows work without them.
+
+Handwriting transcription uses installed Windows recognizers locally and sends no notebook
+content to a server. The optional math helper also runs locally; its model is not bundled with
+Goodtype. When a tested release is available, its download will require an explicit action.
+
+Python runtime downloads are explicit and governed by a separate package-download setting.
+Compatible installed libraries keep working offline. A selected local interpreter is staged
+into Goodtype's runtime area; its original installation and packages stay unchanged.
 
 ## Build
 
@@ -149,6 +172,23 @@ Issues and pull requests are welcome. `cargo xtask verify` is the gate; it runs 
 with warnings denied, Rust/frontend/release tests, type-checking, and a production build, and it runs offline.
 
 ### Branches and releases
+
+Goodtype uses [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PATCH`.
+The product is currently **pre-alpha**, remaining below `1.0.0`; a release from `main`
+is a publication channel, not a claim of product maturity.
+
+- **Patch** (`0.2.0` to `0.2.1`): backward-compatible bug fixes.
+- **Minor** (`0.2.1` to `0.3.0`): new features or breaking changes during initial development;
+  reset the patch number and describe compatibility changes in the release notes.
+- **Major** (`1.0.0`): an explicit product-readiness and compatibility commitment, not an
+  automatic consequence of adding a feature. After 1.0, incompatible changes increment major.
+- **Development candidate** (`0.3.0-dev.42.1`): a pre-alpha build toward `0.3.0`.
+  `42` identifies the CI run and `1` its attempt; neither is a feature or patch number.
+
+Choose the base version from the changes since the previous published base release,
+not from the number of commits or CI builds. GitHub titles explicitly distinguish
+`Pre-alpha development build` from `Pre-alpha release`; published tags and assets stay immutable.
+Changing the maturity label to alpha requires an explicit readiness decision.
 
 Use **feature branch → `dev` → tested Windows candidate → `main`**.
 

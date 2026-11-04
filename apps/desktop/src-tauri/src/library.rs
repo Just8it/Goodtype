@@ -544,6 +544,7 @@ pub fn move_library_entries(
     roots: tauri::State<'_, AllowedRoots>,
     tinymist: tauri::State<'_, crate::tinymist::Tinymist>,
     histories: tauri::State<'_, crate::notebook::NotebookHistories>,
+    computation: tauri::State<'_, crate::computation::RuntimeState>,
     paths: Vec<String>,
     destination: String,
 ) -> Result<LibraryMoveResult, String> {
@@ -561,6 +562,10 @@ pub fn move_library_entries(
                 relocated_path(from, &moved.directories).map(|to| (from.clone(), to))
             })
             .collect::<Vec<_>>();
+        // The notebook lock keeps output admission out of the rename interval.
+        for (from, _) in &allowed_moves {
+            crate::computation::end_root_sessions(&computation, from)?;
+        }
         for (from, to) in &allowed_moves {
             allowed.remove(from);
             allowed.insert(to.clone());

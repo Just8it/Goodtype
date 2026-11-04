@@ -30,5 +30,16 @@ ed25519-dalek = { version = "2.2", default-features = false, features = ["std"] 
 windows-sys = { version = "0.61", features = [
   "Win32_Foundation",
   "Win32_Security",
+  "Win32_Security_Authorization",
+  "Win32_Security_Isolation",
+  "Win32_System_Threading",
   "Win32_System_JobObjects",
 ] }
+# Handwriting transcription through the recognizers Windows ships (ADR 0040). The same `windows`
+# release Tauri and WebView2 already build; only these API features are added.
+windows = { version = "0.61", features = [
+  "Foundation",
+  "UI_Input_Inking",
+  "Win32_System_Com",
+] }
+windows-collections = "0.2"

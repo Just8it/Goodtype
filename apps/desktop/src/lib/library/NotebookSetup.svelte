@@ -1,7 +1,7 @@
 <script lang="ts">
   import { t } from "../i18n";
   import { onMount } from "svelte";
-  import { focusTrap } from "../workspace/focus";
+  import Dialog from "../workspace/Dialog.svelte";
   import { errorDetails } from "../ipc/errors";
   import { listTypstPresets, pickTypstPreset } from "../ipc/presets";
   import { presetPresentation } from "../page/presets";
@@ -76,15 +76,9 @@
   }
 </script>
 
-<svelte:window onkeydown={(event) => { if (event.key === "Escape") onCancel(); }} />
-<div class="scrim" role="presentation" onpointerdown={(event) => { if (event.target === event.currentTarget) onCancel(); }}>
-  <div use:focusTrap class="setup" role="dialog" aria-modal="true" aria-labelledby="notebook-setup-title" tabindex="-1">
-    <form onsubmit={submit}>
-      <header>
-      <h2 id="notebook-setup-title">{$t("library.newNotebook")}</h2>
-      <p>{$t("library.setUpThePaperTheWayYou")}</p>
-      </header>
-
+<Dialog title={$t("library.newNotebook")} lead={$t("library.setUpThePaperTheWayYou")} size="lg" onClose={onCancel}>
+  {#snippet children()}
+    <form id="notebook-setup-form" onsubmit={submit}>
       <label class="wide">{$t("library.name")}
       <input bind:this={field} bind:value={name} maxlength="80" autocomplete="off" spellcheck="false" aria-invalid={problem !== null} aria-describedby="notebook-name-help" />
       <small id="notebook-name-help" class:error={problem}>{problem ?? $t("library.savedLocallyInYourGoodtypeLibrary")}</small>
@@ -118,20 +112,15 @@
       </div>
 
       {#if failure}<p class="failure" role="alert">{failure}</p>{/if}
-      <footer>
-        <button type="button" class="quiet" disabled={busy} onclick={onCancel}>{$t("library.cancel")}</button>
-        <button type="submit" class="primary" disabled={!ready}>{$t("library.createNotebook")}</button>
-      </footer>
     </form>
-  </div>
-</div>
+  {/snippet}
+  {#snippet actions()}
+    <button type="button" class="control" disabled={busy} onclick={onCancel}>{$t("library.cancel")}</button>
+    <button type="submit" form="notebook-setup-form" class="primary" disabled={!ready}>{$t("library.createNotebook")}</button>
+  {/snippet}
+</Dialog>
 
 <style>
-  .scrim { position: absolute; z-index: 60; display: grid; padding: 20px; background: rgb(10 12 16 / 62%); inset: 0; place-items: center; animation: scrim-in 140ms ease-out; }
-  .setup { width: min(620px, 100%); max-height: 100%; padding: 22px; border: 1px solid var(--edge, rgb(255 255 255 / 12%)); border-radius: var(--radius-lg, 10px); background: var(--panel, #23272f); box-shadow: 0 18px 44px rgb(0 0 0 / 55%); color: var(--text, #e9ebee); overflow-y: auto; animation: setup-in 160ms cubic-bezier(0.16, 1, 0.3, 1); }
-  header { margin-bottom: 18px; }
-  header p { margin: 5px 0 0; color: var(--muted, #aeb5be); font-size: var(--text-md, 13px); }
-  h2 { margin: 0; font-size: 20px; font-weight: 600; letter-spacing: -0.02em; }
   .fields { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 14px; }
   label, fieldset { display: grid; gap: 6px; min-width: 0; margin: 0; padding: 0; border: 0; color: var(--muted, #aeb5be); font-size: var(--text-sm, 11px); }
   .wide { grid-column: 1 / -1; }
@@ -148,16 +137,6 @@
   .segmented button:hover { background: var(--wash, rgb(255 255 255 / 8%)); color: var(--text, #e9ebee); }
   .segmented button.active { background: rgb(76 141 240 / 16%); box-shadow: inset 0 0 0 1px rgb(76 141 240 / 52%); color: var(--text, #e9ebee); }
   .failure { margin: 12px 0 0; font-size: var(--text-sm, 11px); }
-  footer { display: flex; gap: 8px; justify-content: flex-end; margin-top: 20px; }
-  footer button { min-height: var(--control, 36px); padding: 0 15px; border: 0; border-radius: var(--radius, 6px); color: var(--text, #e9ebee); font: inherit; cursor: pointer; touch-action: manipulation; }
-  .quiet { background: rgb(255 255 255 / 5%); }
-  .quiet:hover { background: var(--wash, rgb(255 255 255 / 8%)); }
-  .primary { background: var(--blueprint, #4c8df0); color: #0e1b31; font-weight: 600; }
-  .primary:hover:not(:disabled) { background: var(--blueprint-light, #7fb0f7); }
-  button:disabled { opacity: .5; cursor: default; }
-  @keyframes scrim-in { from { opacity: 0; } }
-  @keyframes setup-in { from { opacity: 0; transform: translateY(7px) scale(.99); } }
-  @media (max-width: 520px) { .fields { grid-template-columns: 1fr; } .wide { grid-column: auto; } .setup { padding: 18px; } }
-  @media (pointer: coarse) { input, select, .segmented, footer button { min-height: var(--control-touch, 44px); } }
-  @media (prefers-reduced-motion: reduce) { .scrim, .setup { animation: none; } }
+  @media (max-width: 520px) { .fields { grid-template-columns: 1fr; } .wide { grid-column: auto; } }
+  @media (pointer: coarse) { input, select, .segmented { min-height: var(--control-touch, 44px); } }
 </style>

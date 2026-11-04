@@ -107,6 +107,7 @@ fn store_snapshot(
     payload_bytes: &mut usize,
 ) -> Result<(StoredSnapshot, Vec<Vec<u8>>), StorageError> {
     let metadata_snapshot = NotebookSnapshot {
+        calculations: snapshot.calculations.clone(),
         manifest: snapshot.manifest.clone(),
         page: snapshot.page.clone(),
         blocks: snapshot.blocks.clone(),
@@ -452,6 +453,39 @@ pub fn restore_recovery_candidate(
     let mut candidate = intent.candidate;
     let current = observe_page(&root, &candidate.page.id, history)?;
 
+    if let Some(reference) = &candidate.page.calculation {
+        let current_reference = current
+            .page
+            .calculation
+            .as_ref()
+            .ok_or_else(|| invalid_error("recovery page type changed"))?;
+        if reference != current_reference {
+            return invalid("recovery calculation identity changed");
+        }
+        let original = intent
+            .previous
+            .calculations
+            .iter()
+            .find(|file| file.path == reference.source_path)
+            .ok_or_else(|| invalid_error("recovery calculation has no confirmed source"))?;
+        let current_file = current
+            .calculations
+            .iter()
+            .find(|file| file.path == reference.source_path)
+            .ok_or_else(|| invalid_error("current calculation source is missing"))?;
+        if current_file.bytes != original.bytes {
+            return Err(StorageError::ExternalChange("calculation changed since this recovery candidate; preserve it before replacing shared parts".into()));
+        }
+        let current_document = crate::calculation::Calculation::parse(&current_file.bytes)?;
+        let file = candidate
+            .calculations
+            .iter_mut()
+            .find(|file| file.path == reference.source_path)
+            .ok_or_else(|| invalid_error("recovery calculation source is missing"))?;
+        let mut document = crate::calculation::Calculation::parse(&file.bytes)?;
+        document.set_revision_after(current_document.revision())?;
+        file.bytes = document.bytes()?;
+    }
     let current_reference = page_reference(&current.manifest, &candidate.page.id)?;
     let candidate_reference = page_reference(&candidate.manifest, &candidate.page.id)?;
     if current_reference.path != candidate_reference.path {
@@ -788,5 +822,80 @@ mod tests {
         fs::write(recovery.join("notes.txt"), b"keep").unwrap();
         commit_notebook(&root, &mut history, changed).unwrap();
         assert_eq!(fs::read(recovery.join("notes.txt")).unwrap(), b"keep");
+    }
+    #[test]
+    fn interrupted_calculation_writes_roll_back_and_refuse_stale_shared_restore() {
+        use crate::calculation::Calculation;
+        use crate::storage::{
+            CalculationHistory, CellOperation, create_calculation_page, edit_calculation,
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        create_notebook(root, &snapshot()).unwrap();
+        let first = create_calculation_page(
+            root,
+            "2026-11-02T12:00:00Z",
+            &PagePosition::Last,
+            "Task",
+            None,
+        )
+        .unwrap();
+        let second = create_calculation_page(
+            root,
+            "2026-11-02T12:00:01Z",
+            &PagePosition::Last,
+            "Part",
+            Some(&first.page.id),
+        )
+        .unwrap();
+        let previous = open_page(root, &first.page.id).unwrap();
+        let mut candidate = previous.clone();
+        let mut document = Calculation::parse(&candidate.calculations[0].bytes).unwrap();
+        document.cells[0].source = "recovered = 1".into();
+        document.advance_revision().unwrap();
+        candidate.calculations[0].bytes = document.bytes().unwrap();
+        candidate.page.revision += 1;
+        let canonical = canonical_root(root).unwrap();
+        stage_transaction(&canonical, &previous, &candidate).unwrap();
+        fs::write(
+            root.join(&candidate.calculations[0].path),
+            &candidate.calculations[0].bytes,
+        )
+        .unwrap();
+        let reopened = open_page(root, &first.page.id).unwrap();
+        assert_eq!(
+            reopened.calculations[0].bytes,
+            previous.calculations[0].bytes
+        );
+        let recovered = list_recovery_candidates(root).unwrap().remove(0);
+        let document = Calculation::parse(&reopened.calculations[0].bytes).unwrap();
+        let part = second.page.calculation.as_ref().unwrap().part_id.as_str();
+        let cell = document
+            .cells
+            .iter()
+            .find(|cell| cell.part_id() == Some(part))
+            .unwrap();
+        edit_calculation(
+            root,
+            &second.page.id,
+            &mut CalculationHistory::default(),
+            CellOperation::Source {
+                cell_id: cell.id.clone(),
+                expected_source: "".into(),
+                source: "newer = 2".into(),
+            },
+            "2026-11-02T12:01:00Z",
+        )
+        .unwrap();
+        let saved = fs::read(root.join(&candidate.calculations[0].path)).unwrap();
+        assert!(matches!(
+            restore_recovery_candidate(root, &mut NotebookHistory::default(), &recovered.file_name),
+            Err(StorageError::ExternalChange(_))
+        ));
+        assert_eq!(
+            fs::read(root.join(&candidate.calculations[0].path)).unwrap(),
+            saved
+        );
+        assert_eq!(list_recovery_candidates(root).unwrap().len(), 1);
     }
 }

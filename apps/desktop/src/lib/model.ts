@@ -81,7 +81,10 @@ export type PagePosition =
   | { kind: "after"; pageId: string }
   | { kind: "last" };
 
+export type CalculationReference = { id: string; sourcePath: string; partId: string };
+
 export type Page = {
+  calculation?: CalculationReference;
   schemaVersion: number;
   id: string;
   revision: number;
@@ -97,7 +100,8 @@ export const MIN_SUPPORTED_SCHEMA_VERSION = 1;
 /// Shapes are what version 2 added. Mirrors `SHAPE_SCHEMA_VERSION` in goodtype-core.
 export const SHAPE_SCHEMA_VERSION = 2;
 export const BINARY_INK_SCHEMA_VERSION = 3;
-export const SCHEMA_VERSION = BINARY_INK_SCHEMA_VERSION;
+export const CALCULATION_SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = CALCULATION_SCHEMA_VERSION;
 
 /**
  * The version a page's content obliges its notebook to be written at.

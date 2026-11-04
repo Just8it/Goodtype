@@ -126,7 +126,7 @@ pub(crate) fn export_pdf(
         .map_err(|errors| diagnostic_messages(&errors))
 }
 
-fn diagnostic_messages(diagnostics: &[SourceDiagnostic]) -> String {
+pub(crate) fn diagnostic_messages(diagnostics: &[SourceDiagnostic]) -> String {
     diagnostics
         .iter()
         .map(|diagnostic| diagnostic.message.as_str())
@@ -324,7 +324,7 @@ impl Downloader for OfflineDownloader {
 }
 
 /// A Goodtype-owned Typst [`World`] scoped to one notebook root.
-struct BlockWorld {
+pub(crate) struct BlockWorld {
     root: PathBuf,
     main: FileId,
     /// Whether a package may be downloaded on a cache miss.
@@ -338,7 +338,7 @@ struct BlockWorld {
 }
 
 impl BlockWorld {
-    fn for_main(
+    pub(crate) fn for_main(
         main_name: &str,
         main_source: String,
         root: PathBuf,
@@ -357,7 +357,7 @@ impl BlockWorld {
         }
     }
 
-    fn insert_binary(&mut self, name: &str, bytes: Vec<u8>) {
+    pub(crate) fn insert_binary(&mut self, name: &str, bytes: Vec<u8>) {
         self.overlay
             .insert(project_file_id(name), Bytes::new(bytes));
     }
@@ -484,3 +484,7 @@ fn project_file_id(name: &str) -> FileId {
     let vpath = VirtualPath::new(name).expect("generated Typst file name is a valid virtual path");
     FileId::new(RootedPath::new(VirtualRoot::Project, vpath))
 }
+
+#[cfg(test)]
+#[path = "computation_spike.rs"]
+mod computation_spike;

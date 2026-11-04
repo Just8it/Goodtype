@@ -1,3 +1,4 @@
+import { createCalculationPage, importCalculationNotebook } from "../ipc/calculation";
 import type { createSelection } from "./selectionEditing.svelte";
 import type { createNavigation } from "./viewportNavigation.svelte";
 import { shapeMessage } from "../i18n/labels";
@@ -56,7 +57,8 @@ type PageTypstBlockState = PageTypstView & {
 
 type NotebookAction =
     | { kind: "page"; pageId: string }
-    | { kind: "structure" };
+    | { kind: "structure" }
+    | { kind: "calculation"; pageId: string; calculationId: string };
 
 export type SessionEnvironment = {
   addPageOpen: boolean;
@@ -64,12 +66,17 @@ export type SessionEnvironment = {
   readonly followPageText: (id: string | null) => void;
   readonly message: (error: unknown) => string;
   moreOpen: boolean;
-  readonly navigation: Pick<ReturnType<typeof createNavigation>, "announceTouchHistory" | "automaticPageFocusLocked" | "pagePointers" | "panFrom" | "pinchStart" | "stopTouchInertia" | "touchInertiaFrame" | "touchPanStart">;
+  readonly navigation: Pick<ReturnType<typeof createNavigation>, "announceTouchHistory" | "automaticPageFocusLocked" | "lockPageFocus" | "pagePointers" | "panFrom" | "pinchStart" | "stopTouchInertia" | "touchInertiaFrame" | "touchPanStart">;
   pageViewport: HTMLElement | undefined;
   readonly paletteDragging: boolean;
   readonly previews: Pick<ReturnType<typeof createNotebookPreviews>, "compile" | "reset">;
   readonly resetWorkspaceEditors: () => void;
   readonly saveTemplate: () => Promise<boolean>;
+  readonly flushCalculations?: () => Promise<boolean>;
+  readonly calculationRunning?: () => boolean;
+  readonly forgetCalculations?: (root: string) => void;
+  readonly calculationHistory?: (undo: boolean, pageScope: boolean) => Promise<boolean>;
+  readonly calculationHistoryFlags?: () => { canUndo: boolean; canRedo: boolean };
   searchOpen: boolean;
   readonly selection: Pick<ReturnType<typeof createSelection>, "editingShapeId" | "groupedStrokeIds" | "lassoObjectIds" | "mixedGroup" | "selectedImageId" | "selectedShapeId" | "selectedStrokeIds" | "selectedTypstId" | "updateInkSelection">;
   readonly settings: AppSettings;
@@ -434,6 +441,7 @@ export function createSession(env: SessionEnvironment) {
   }
 
   function buildSnapshot(): NotebookSnapshot {
+    if (activeSnapshot?.page.calculation) return activeSnapshot;
     const now = new Date().toISOString();
     const manifest = notebookManifest ?? {
       schemaVersion: SCHEMA_VERSION,
@@ -541,6 +549,14 @@ export function createSession(env: SessionEnvironment) {
           ? snapshot
           : previousPages.get(page.id)?.snapshot ?? null,
     }));
+    // A structural change (move, duplicate, delete, add) clears the loaded neighbours first. Their
+    // page elements stay mounted, so the visibility observer never fires again and they would sit
+    // on "Loading page…" until scrolled away and back. Reload whatever is already near the view.
+    for (const pageId of nearPageIds) {
+      if (pageId !== snapshot.page.id && !pageEntries.find((entry) => entry.id === pageId)?.snapshot) {
+        void ensurePageLoaded(pageId, true);
+      }
+    }
     revision = snapshot.page.revision;
     createdAt = snapshot.manifest.createdAt;
     strokes = reuseStrokeObjects(strokesFromSnapshot(snapshot), previousStrokes);
@@ -710,6 +726,7 @@ export function createSession(env: SessionEnvironment) {
   }
 
   async function activatePage(pageId: string, automatic = false) {
+    if (!automatic) env.navigation.lockPageFocus();
     if (
       !env.tauriAvailable ||
       disposed ||
@@ -730,6 +747,7 @@ export function createSession(env: SessionEnvironment) {
     const current = () => requestRoot === root && generation === notebookGeneration && loadGeneration === pageLoadGeneration;
     let retry = false;
     try {
+      if (!((await env.flushCalculations?.() ?? true))) return;
       // Land every pending edit on the outgoing page, then flush the incoming page's neighbor
       // renderer, so focus_page reads a current revision instead of racing a debounced commit.
       flushInkCommit();
@@ -1141,6 +1159,12 @@ export function createSession(env: SessionEnvironment) {
         applySnapshot(result.snapshot);
         canUndo = result.canUndo;
         canRedo = result.canRedo;
+        const reference = result.snapshot.page.calculation;
+        if (reference) {
+          notebookUndoOrder = notebookUndoOrder.filter(action => action.kind !== "calculation" || action.calculationId !== reference.id);
+          notebookUndoOrder.push({ kind: "calculation", pageId: result.snapshot.page.id, calculationId: reference.id });
+          notebookRedoOrder = [];
+        }
         status = notice("workspace.restoredRecoveredWorkOnPage", { "value1": activePageNumber() });
         recoveryCandidates = recoveryCandidates.filter(
           (candidate) => candidate.fileName !== fileName,
@@ -1221,6 +1245,88 @@ export function createSession(env: SessionEnvironment) {
       } finally {
         busy = false;
       }
+    });
+  }
+
+  function calculationHeight(pageId: string, heightPt: number, originRoot = root) {
+    if (originRoot !== root) return;
+    const entry = pageEntries.find(entry => entry.id === pageId);
+    const current = pageId === activePageId ? activeGeometry.heightPt : entry?.snapshot?.page.geometry.heightPt ?? entry?.geometry.heightPt;
+    if (current !== undefined && Math.abs(current - heightPt) < 0.01) return;
+    const anchor = env.pageViewport?.querySelector<HTMLElement>("[data-calculation-cell].selected");
+    const top = anchor?.getBoundingClientRect().top;
+    if (pageId === activePageId) activeGeometry = { ...activeGeometry, heightPt };
+    pageEntries = pageEntries.map(entry => entry.id !== pageId ? entry : {
+      ...entry, geometry: { ...entry.geometry, heightPt }, snapshot: entry.snapshot ? {
+        ...entry.snapshot, page: { ...entry.snapshot.page, geometry: { ...entry.snapshot.page.geometry, heightPt } },
+      } : null,
+    });
+    if (anchor && top !== undefined) void tick().then(() => {
+      if (env.pageViewport && anchor.isConnected) env.pageViewport.scrollTop += anchor.getBoundingClientRect().top - top;
+    });
+  }
+
+  async function addCalculation(position: PagePosition, continuation = false) {
+    env.moreOpen = false;
+    await replacingPage(async () => {
+      if (!(await persist())) return;
+      busy = true;
+      try {
+        const result = await createCalculationPage(root, activePageId, position,
+          translate(continuation ? "calculation.nextPart" : "calculation.newTitle"), continuation ? activePageId : null);
+        resetPageEntries();
+        applySnapshot(result.snapshot);
+        recordStructureAction(continuation ? result.snapshot.page.calculation?.id : undefined);
+        await tick();
+        scrollToPage(result.snapshot.page.id);
+      } catch (error) {
+        status = notice("calculation.failed", { detail: env.message(error) });
+      } finally { busy = false; }
+    });
+  }
+
+  function calculationSaved(pageId: string, document: import("../ipc/calculation").CalculationDocument,
+    action: "change" | "undo" | "redo" | "observe" = "change", originRoot = root) {
+    if (originRoot !== root) return;
+    const bytes = Array.from(new TextEncoder().encode(JSON.stringify(document)));
+    const update = (snapshot: NotebookSnapshot): NotebookSnapshot => snapshot.page.calculation?.id === document.metadata.goodtype.id
+      ? { ...snapshot, calculations: [{ path: snapshot.page.calculation.sourcePath, bytes }] } : snapshot;
+    if (activeSnapshot) activeSnapshot = update(activeSnapshot);
+    pageEntries = pageEntries.map(entry => entry.snapshot ? { ...entry, snapshot: update(entry.snapshot) } : entry);
+    if (action === "observe") return;
+    const change = { kind: "calculation" as const, pageId, calculationId: document.metadata.goodtype.id };
+    if (action === "change") {
+      notebookUndoOrder = [...notebookUndoOrder, change];
+      notebookRedoOrder = [];
+    } else {
+      const from = action === "undo" ? notebookUndoOrder : notebookRedoOrder;
+      let index = -1;
+      for (let at = from.length - 1; at >= 0; at -= 1) {
+        const item = from[at];
+        if (item.kind === "calculation" && item.calculationId === change.calculationId) { index = at; break; }
+      }
+      if (index >= 0) from.splice(index, 1);
+      if (action === "undo") notebookRedoOrder = [...notebookRedoOrder, change];
+      else notebookUndoOrder = [...notebookUndoOrder, change];
+    }
+
+  }
+
+  async function importCalculation(position: PagePosition) {
+    env.moreOpen = false;
+    await replacingPage(async () => {
+      if (!(await persist())) return;
+      busy = true;
+      try {
+        const result = await importCalculationNotebook(root, activePageId, position, translate("calculation.newTitle"));
+        if (!result) return;
+        resetPageEntries();
+        applySnapshot(result.snapshot);
+        recordStructureAction();
+        await tick();
+        scrollToPage(result.snapshot.page.id);
+      } catch (error) { status = notice("calculation.importFailed", { detail: env.message(error) }); }
+      finally { busy = false; }
     });
   }
 
@@ -1318,6 +1424,29 @@ export function createSession(env: SessionEnvironment) {
   }
 
   function addTypstBlock() {
+    if (activeSnapshot?.page.calculation) return;
+    insertTypstBlock("= New block\n\nType here", {
+      x: 150 + (typstBlocks.length % 4) * 20,
+      y: 220 + (typstBlocks.length % 6) * 28,
+      layoutWidthPt: 230,
+    });
+    status = notice("workspace.createdANewTypstBlock");
+    queueCommit(notice("workspace.createdTypstBlock"));
+  }
+
+  /**
+   * A confirmed handwriting transcription (ADR 0040): an ordinary new block beside the ink. The
+   * ink stays, so undoing this one commit returns the page exactly as it was.
+   */
+  function addTranscribedBlock(source: string, placement: { x: number; y: number; layoutWidthPt: number }, label: UiText) {
+    if (activeSnapshot?.page.calculation) return;
+    insertTypstBlock(source, placement);
+    env.selection.updateInkSelection([]);
+    status = label;
+    queueCommit(notice("transcription.inserted"));
+  }
+
+  function insertTypstBlock(source: string, placement: { x: number; y: number; layoutWidthPt: number }) {
     let number = typstBlocks.length + 1;
     while (typstBlocks.some((block) => block.id === `typst-${String(number).padStart(3, "0")}`)) number += 1;
     const id = `typst-${String(number).padStart(3, "0")}`;
@@ -1326,13 +1455,8 @@ export function createSession(env: SessionEnvironment) {
       {
         id,
         path: `blocks/${activePageId}-${id}.typ`,
-        source: withBlockFont("= New block\n\nType here", env.settings.inlineTextFont),
-        transform: {
-          x: 150 + (typstBlocks.length % 4) * 20,
-          y: 220 + (typstBlocks.length % 6) * 28,
-          layoutWidthPt: 230,
-          scale: 1,
-        },
+        source: withBlockFont(source, env.settings.inlineTextFont),
+        transform: { ...placement, scale: 1 },
         result: null,
         zIndex: nextVisualZIndex(),
         readingOrder: nextReadingOrder(),
@@ -1342,8 +1466,6 @@ export function createSession(env: SessionEnvironment) {
     env.selection.selectedImageId = null;
     env.selection.selectedShapeId = null;
     env.selection.editingShapeId = null;
-    status = notice("workspace.createdANewTypstBlock");
-    queueCommit(notice("workspace.createdTypstBlock"));
   }
 
   function nextVisualZIndex(): number {
@@ -1387,6 +1509,7 @@ export function createSession(env: SessionEnvironment) {
   }
 
   function queueCommit(label: UiText) {
+    if (activeSnapshot?.page.calculation) return;
     // Any commit builds a snapshot from current state, so it already carries pending ink.
     editVersion += 1;
     inkCommitTimer.cancel();
@@ -1448,10 +1571,11 @@ export function createSession(env: SessionEnvironment) {
     canRedo = false;
   }
 
-  function recordStructureAction() {
+  function recordStructureAction(resetCalculationId?: string) {
     // A manifest change invalidates page snapshots retained by Rust, but older manifest states
     // remain replayable because page files are kept. Drop only the page entries from the route.
-    notebookUndoOrder = notebookUndoOrder.filter((action) => action.kind === "structure");
+    notebookUndoOrder = notebookUndoOrder.filter((action) => action.kind === "structure" ||
+      (action.kind === "calculation" && action.calculationId !== resetCalculationId));
     notebookUndoOrder.push({ kind: "structure" });
     notebookRedoOrder = [];
     canUndo = true;
@@ -1622,6 +1746,19 @@ export function createSession(env: SessionEnvironment) {
       );
       return;
     }
+    if (env.settings.undoScope === "notebook" && target?.kind === "calculation") {
+      if (target.pageId !== activePageId) {
+        await activatePage(target.pageId);
+        if (target.pageId !== activePageId) return;
+        scrollToPage(target.pageId);
+      }
+      await env.calculationHistory?.(command === "undo_notebook", false);
+      return;
+    }
+    if (activeSnapshot?.page.calculation) {
+      await env.calculationHistory?.(command === "undo_notebook", true);
+      return;
+    }
     if (env.settings.undoScope === "notebook") {
       if (target?.kind === "page" && target.pageId !== activePageId) {
         await activatePage(target.pageId);
@@ -1734,6 +1871,7 @@ export function createSession(env: SessionEnvironment) {
   }
 
   function scrollToPage(pageId: string, behavior?: ScrollBehavior) {
+    env.navigation.lockPageFocus();
     document
       .querySelector<HTMLElement>(`[data-page-id="${pageId}"]`)
       ?.scrollIntoView({
@@ -1750,6 +1888,7 @@ export function createSession(env: SessionEnvironment) {
     }
     const startedAt = performance.now();
     if (!(await env.saveTemplate())) return false;
+    if (!((await env.flushCalculations?.() ?? true))) return false;
     flushInkCommit();
     flushTypstCommit();
     await transactionQueue;
@@ -1760,7 +1899,11 @@ export function createSession(env: SessionEnvironment) {
     return true;
   }
 
-  async function exportPdf() {
+  async function exportPdf(splitCalculationsA4 = false) {
+    if (env.calculationRunning?.()) {
+      status = notice("calculation.exportRunning");
+      return;
+    }
     if (!(await persist())) return;
     busy = true;
     const startedAt = performance.now();
@@ -1769,8 +1912,9 @@ export function createSession(env: SessionEnvironment) {
       // matches what is saved, not what this view holds.
       const path = await exportNotebookPdf(
         root,
-        "notebook.pdf",
+        splitCalculationsA4 ? "notebook-a4.pdf" : "notebook.pdf",
         env.settings.pageTextBaselineGrid,
+        splitCalculationsA4,
       );
       if (env.collectMetrics) exportMs = performance.now() - startedAt;
       status = notice("workspace.exportedPDFTo", { "path": path });
@@ -1820,6 +1964,7 @@ export function createSession(env: SessionEnvironment) {
 
     const nextRoot = relocated.get(previousRoot);
     if (nextRoot) {
+      env.forgetCalculations?.(previousRoot);
       const history = { undo: notebookUndoOrder, redo: notebookRedoOrder, canUndo, canRedo };
       const reopened = await openNotebookAt(nextRoot, {
         skipCurrentPersist: true,
@@ -1859,6 +2004,12 @@ export function createSession(env: SessionEnvironment) {
     const closed = closedTab(openTabs, tabRoot);
     if (closed.tabs === openTabs) return;
     if (tabRoot !== root) {
+      if (env.tauriAvailable) {
+        if (!((await env.flushCalculations?.() ?? true))) return;
+        try { await closeNotebookSession(tabRoot); }
+        catch (error) { status = notice("workspace.theNotebookWasSavedButCouldNot", { value1: env.message(error) }); return; }
+      }
+      env.forgetCalculations?.(tabRoot);
       openTabs = closed.tabs;
       status = (await rememberNotebookSession())
         ? notice("workspace.closedNotebookTab")
@@ -1877,6 +2028,11 @@ export function createSession(env: SessionEnvironment) {
         openTabs = previousTabs;
         notebookChosen = true;
         pageOpen = true;
+      } else {
+        if (env.tauriAvailable) await closeNotebookSession(tabRoot).catch(error => {
+          status = notice("workspace.theNotebookWasSavedButCouldNot", { value1: env.message(error) });
+        });
+        env.forgetCalculations?.(tabRoot);
       }
       return;
     }
@@ -1884,6 +2040,7 @@ export function createSession(env: SessionEnvironment) {
     if (env.tauriAvailable && root) {
       try {
         await closeNotebookSession(root);
+        env.forgetCalculations?.(root);
       } catch (error) {
         openTabs = previousTabs;
         status = notice("workspace.theNotebookWasSavedButCouldNot", { "value1": env.message(error) });
@@ -1980,12 +2137,17 @@ export function createSession(env: SessionEnvironment) {
     restoreRecovery,
     discardRecovery,
     addPage,
+    addCalculation,
+    importCalculation,
+    calculationSaved,
+    calculationHeight,
     importPdf,
     activePageNumber,
     updateTypstTransform,
     updateTypstSource,
     updateSharedStyle,
     addTypstBlock,
+    addTranscribedBlock,
     nextVisualZIndex,
     nextReadingOrder,
     scheduleInkCommit,
@@ -2027,6 +2189,7 @@ export function createSession(env: SessionEnvironment) {
     set presetRevision(value: typeof presetRevision) { presetRevision = value; },
     get activeSnapshot() { return activeSnapshot; },
     set activeSnapshot(value: typeof activeSnapshot) { activeSnapshot = value; },
+    get activeCalculation() { return activeSnapshot?.page.calculation ?? null; },
     get activePageId() { return activePageId; },
     get activeInkLayerId() { return activeInkLayerId; },
     set activeInkLayerId(value: typeof activeInkLayerId) { activeInkLayerId = value; },
@@ -2052,8 +2215,8 @@ export function createSession(env: SessionEnvironment) {
     set images(value: typeof images) { images = value; },
     get shapes() { return shapes; },
     set shapes(value: typeof shapes) { shapes = value; },
-    get canUndo() { return canUndo; },
-    get canRedo() { return canRedo; },
+    get canUndo() { return (env.settings.undoScope === "notebook" && notebookUndoOrder.length > 0) || (activeSnapshot?.page.calculation ? Boolean(env.calculationHistoryFlags?.().canUndo) : canUndo); },
+    get canRedo() { return (env.settings.undoScope === "notebook" && notebookRedoOrder.length > 0) || (activeSnapshot?.page.calculation ? Boolean(env.calculationHistoryFlags?.().canRedo) : canRedo); },
     get pendingTransactions() { return pendingTransactions; },
     get transactionFailed() { return transactionFailed; },
     get inkPending() { return inkPending; },

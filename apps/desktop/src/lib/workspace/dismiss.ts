@@ -8,6 +8,8 @@
  */
 export type DismissOptions = {
   onClose: () => void;
+  /** The trigger handles its own toggle. Do not dismiss it before its click handler runs. */
+  trigger?: HTMLElement;
   /**
    * Keep the dismissing press for the menu alone. A context menu over the canvas needs this: the
    * press that closes it would otherwise land on the page and draw a dot or start a selection.
@@ -21,7 +23,7 @@ export function dismissable(node: HTMLElement, options: (() => void) | DismissOp
   // Pointer rather than click, and capture rather than bubble, so the menu is gone before the
   // press lands on whatever is underneath it.
   const dismiss = (event: PointerEvent) => {
-    if (node.contains(event.target as Node)) return;
+    if (node.contains(event.target as Node) || settings.trigger?.contains(event.target as Node)) return;
     if (settings.swallow) {
       event.preventDefault();
       event.stopPropagation();

@@ -15,6 +15,8 @@
     grouped?: boolean;
     onGroup?: () => void;
     onConvert?: () => void;
+    /** Ink only, and only where Windows offers a recognizer (ADR 0040). */
+    onTranscribe?: () => void;
     onCut?: () => void;
     onCopy?: () => void;
     /** Shown greyed when nothing has been copied, so the bar keeps its shape. */
@@ -36,6 +38,7 @@
     grouped = false,
     onGroup,
     onConvert,
+    onTranscribe,
     onCut,
     onCopy,
     onPaste,
@@ -115,6 +118,19 @@
       <svg viewBox="0 0 24 24" aria-hidden="true">
         <path d="M4 17.5 9.5 5 14 16l3-8 3 9.5"></path>
         <path d="m17 14 3 3-3 3"></path>
+      </svg>
+    </button>
+  {/if}
+  {#if onTranscribe}
+    <button
+      type="button"
+      title={$t("transcription.action")}
+      aria-label={$t("transcription.action")}
+      onclick={onTranscribe}
+    >
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M3 16c1.5-5 3-5 4 0s2.5 5 4 0"></path>
+        <path d="M14 6.5h7M17.5 6.5V18"></path>
       </svg>
     </button>
   {/if}

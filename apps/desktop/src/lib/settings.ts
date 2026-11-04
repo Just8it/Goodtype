@@ -162,6 +162,7 @@ export type AppSettings = {
   pageTextLineWrap: boolean;
   /** Allow downloading Typst Universe packages on a cache miss. */
   remotePackages: boolean;
+  pythonPackageDownloads: boolean;
   /** Scrolling on past the last page, against resistance, adds a page in the notebook paper. */
   pullToAddPage: boolean;
   /** One finger draws with the active tool; two fingers still pan and pinch. */
@@ -222,6 +223,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   pageTextBaselineGrid: true,
   pageTextLineWrap: true,
   remotePackages: true,
+  pythonPackageDownloads: true,
   pullToAddPage: true,
   drawWithFinger: false,
   touchHistory: true,

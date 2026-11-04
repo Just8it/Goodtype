@@ -11,6 +11,7 @@ use crate::workspace::{AllowedRoots, ensure_allowed};
 /// Export the whole notebook as one ordered multi-page PDF built from the canonical files,
 /// not from frontend state. The manifest defines the page order.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)] // Tauri injects state separately from export options.
 pub async fn export_notebook_pdf(
     roots: tauri::State<'_, AllowedRoots>,
     histories: tauri::State<'_, NotebookHistories>,
@@ -18,6 +19,8 @@ pub async fn export_notebook_pdf(
     root: String,
     output_name: String,
     page_text_baseline_grid: bool,
+    split_calculations_a4: Option<bool>,
+    ui_language: Option<String>,
 ) -> Result<String, String> {
     let root = ensure_allowed(&roots, &root)?;
     let histories = histories.inner().clone();
@@ -36,7 +39,12 @@ pub async fn export_notebook_pdf(
             for reference in &manifest.pages {
                 let bundle = storage::open_page(notebook_root, &reference.id)
                     .map_err(|error| format!("page {}: {error}", reference.id))?;
-                pages.push(export_page_from_bundle(&bundle, page_text_baseline_grid)?);
+                let mut page = export_page_from_bundle(&bundle, page_text_baseline_grid)?;
+                if let Some(calculation) = &mut page.calculation {
+                    calculation.split_a4 = split_calculations_a4.unwrap_or(false);
+                    calculation.german = ui_language.as_deref() == Some("de");
+                }
+                pages.push(page);
             }
 
             Ok(pages)
@@ -188,7 +196,28 @@ fn export_page_from_bundle(
         })
         .collect();
 
+    let calculation = bundle
+        .page
+        .calculation
+        .as_ref()
+        .map(|reference| {
+            let bytes = bundle
+                .calculations
+                .iter()
+                .find(|file| file.path == reference.source_path)
+                .ok_or_else(|| "calculation source is missing".to_owned())?;
+            let document = goodtype_core::calculation::Calculation::parse(&bytes.bytes)
+                .map_err(|error| error.to_string())?;
+            Ok::<_, String>(goodtype_typst::calculation::ExportCalculation {
+                document,
+                part_id: reference.part_id.clone(),
+                german: false,
+                split_a4: false,
+            })
+        })
+        .transpose()?;
     Ok(ExportPage {
+        calculation,
         width_pt: bundle.page.geometry.width_pt,
         height_pt: bundle.page.geometry.height_pt,
         shared_style: bundle

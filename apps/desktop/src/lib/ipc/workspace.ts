@@ -6,6 +6,8 @@
  * Grouped here by what the frontend is doing rather than by which Rust file answers, because a
  * caller reaching for "record that this opened" should not have to know which module owns it.
  */
+import { get } from "svelte/store";
+import { locale } from "../i18n";
 import { invoke } from "@tauri-apps/api/core";
 import type { AppSettings, RecentNotebook } from "../settings";
 
@@ -66,8 +68,9 @@ export function exportNotebookPdf(
   root: string,
   outputName: string,
   pageTextBaselineGrid: boolean,
+  splitCalculationsA4 = false,
 ): Promise<string> {
-  return invoke<string>("export_notebook_pdf", { root, outputName, pageTextBaselineGrid });
+  return invoke<string>("export_notebook_pdf", { root, outputName, pageTextBaselineGrid, splitCalculationsA4, uiLanguage: get(locale) });
 }
 
 /** See the note in `storePastedImage` about why the bytes are converted here. */

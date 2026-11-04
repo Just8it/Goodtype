@@ -93,7 +93,7 @@ describe("bundled English and German interface", () => {
   it("renders German semantic controls and escapes user-provided details", () => {
     setLanguage("de");
     const { body } = render(SettingsPanel, { props: {
-      settings: { ...DEFAULT_SETTINGS, uiLanguage: "de" }, actions: { openMetrics() {} }, onChange() {}, onClose() {},
+      settings: { ...DEFAULT_SETTINGS, uiLanguage: "de" }, actions: { openMetrics() {}, changePython() {} }, onChange() {}, onClose() {},
     } });
     expect(body).toContain('aria-label="Einstellungen"');
     expect(body).toContain('role="radio"');

@@ -38,6 +38,8 @@
     onPresetAction,
     onPageTextLineWrapChange,
     blockControls,
+    customEditor,
+    customTitle,
   }: {
     /** `edit` — the target is on this page; `away` — it is on another page; `none` — no target. */
     mode?: "edit" | "style" | "away" | "none";
@@ -66,6 +68,8 @@
     onPresetAction?: (action: string) => void;
     onPageTextLineWrapChange?: (lineWrap: boolean) => void;
     blockControls?: Snippet;
+    customEditor?: Snippet;
+    customTitle?: string;
   } = $props();
 
   const MIN_WIDTH = 280;
@@ -127,13 +131,13 @@
   class="side-editor"
   class:dock-right={dock === "right"}
   style:width={`${width}px`}
-  aria-label={$t("editor.typstSource")}
+  aria-label={customTitle ?? $t("editor.typstSource")}
 >
   <!-- Identity strip: what this panel is holding, and how to move or close it. Everything you do
        *to* the text lives in the writing bar below, so this row never grows tool buttons. -->
   <header>
     <span class="identity">
-      <span class="title">{mode === "style" ? styleTitle : pageText ? $t("workspace.pageText") : mode === "edit" || mode === "away" ? blockLabel : $t("editor.typstSource")}</span>
+      <span class="title">{customTitle ?? (mode === "style" ? styleTitle : pageText ? $t("workspace.pageText") : mode === "edit" || mode === "away" ? blockLabel : $t("editor.typstSource"))}</span>
       <!-- Only when the target is somewhere you cannot see. While you are editing the page in
            view, the status strip already answers "which page", and printing it twice made
            neither one look like the answer. -->
@@ -141,7 +145,7 @@
         <span class="where">{$t("workspace.page2", { "pageNumber": pageNumber })}</span>
       {/if}
     </span>
-    {#if mode === "edit" || mode === "style"}
+    {#if !customEditor && (mode === "edit" || mode === "style")}
       {#if !pageText || mode === "style"}
         <EditorColorButton onCommand={(command) => editor?.applyWritingCommand(command)} />
       {/if}
@@ -192,7 +196,7 @@
     </button>
   </header>
 
-  {#if mode === "edit" && pageText}
+  {#if !customEditor && mode === "edit" && pageText}
     <WritingBar
       {source}
       {presets}
@@ -202,11 +206,13 @@
     />
   {/if}
 
-  {#if mode === "edit" && !pageText && blockControls}
+  {#if !customEditor && mode === "edit" && !pageText && blockControls}
     <div class="block-controls" data-preserve-selection>{@render blockControls()}</div>
   {/if}
 
-  {#if mode === "edit" || mode === "style"}
+  {#if customEditor}
+    <div class="body">{@render customEditor()}</div>
+  {:else if mode === "edit" || mode === "style"}
     <div class="body">
       <TypstEditor
         bind:this={editor}
