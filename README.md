@@ -173,6 +173,23 @@ with warnings denied, Rust/frontend/release tests, type-checking, and a producti
 
 ### Branches and releases
 
+Goodtype uses [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PATCH`.
+The product is currently **pre-alpha**, remaining below `1.0.0`; a release from `main`
+is a publication channel, not a claim of product maturity.
+
+- **Patch** (`0.2.0` to `0.2.1`): backward-compatible bug fixes.
+- **Minor** (`0.2.1` to `0.3.0`): new features or breaking changes during initial development;
+  reset the patch number and describe compatibility changes in the release notes.
+- **Major** (`1.0.0`): an explicit product-readiness and compatibility commitment, not an
+  automatic consequence of adding a feature. After 1.0, incompatible changes increment major.
+- **Development candidate** (`0.3.0-dev.42.1`): a pre-alpha build toward `0.3.0`.
+  `42` identifies the CI run and `1` its attempt; neither is a feature or patch number.
+
+Choose the base version from the changes since the previous published base release,
+not from the number of commits or CI builds. GitHub titles explicitly distinguish
+`Pre-alpha development build` from `Pre-alpha release`; published tags and assets stay immutable.
+Changing the maturity label to alpha requires an explicit readiness decision.
+
 Use **feature branch → `dev` → tested Windows candidate → `main`**.
 
 - Start feature/fix branches from `dev` and open small PRs against `dev`. Both long-lived
