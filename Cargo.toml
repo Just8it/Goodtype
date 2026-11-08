@@ -3,6 +3,7 @@ resolver = "3"
 members = [
   "apps/desktop/src-tauri",
   "crates/goodtype-core",
+  "crates/goodtype-mcp",
   "crates/goodtype-typst",
   "xtask",
 ]
