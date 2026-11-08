@@ -289,3 +289,22 @@ describe("running", () => {
   });
 
 });
+
+it("adopts a reviewed helper result into the existing single-step undo and redo path", async () => {
+  const { workspace, fake, saved } = setup(document(1, [cell("a", "old")]));
+  workspace.select(cellTarget("a"), cell("a", "old"));
+  expect(workspace.accept(target, result(document(2, [cell("a", "new")])))).toBe(true);
+  expect(workspace.historyFor(root, reference).canUndo).toBe(true);
+  expect(fake.states.get(fake.key())?.text).toBe("new");
+  ipc.history.mockResolvedValueOnce({ ...result(document(3, [cell("a", "old")]), false), canRedo: true });
+  expect(await workspace.history(target, true)).toBe(true);
+  expect(workspace.cellsFor(root, reference)[0].source).toBe("old");
+  expect(workspace.historyFor(root, reference).canRedo).toBe(true);
+  ipc.history.mockResolvedValueOnce(result(document(4, [cell("a", "new")])));
+  expect(await workspace.history(target, false)).toBe(true);
+  expect(workspace.cellsFor(root, reference)[0].source).toBe("new");
+  expect(ipc.history).toHaveBeenNthCalledWith(1, root, "page", true, true);
+  expect(ipc.history).toHaveBeenNthCalledWith(2, root, "page", false, true);
+  expect(saved).toHaveBeenCalledTimes(3);
+  workspace.dispose();
+});

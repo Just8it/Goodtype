@@ -20,6 +20,8 @@ typst-ide = "0.15.1"
 typst-layout = "0.15.1"
 typst-pdf = "0.15.1"
 typst-svg = "0.15.1"
+# PNG renders for the AI helper, ADR 0041.
+typst-render = "0.15.1"
 # Formatting is independent of language analysis; use the small library instead of Tinymist.
 typstyle-core = "0.15.0"
 # Typst Universe packages, offline-first. Same loader typst-cli uses.
@@ -31,3 +33,7 @@ typst-kit = { version = "0.15.1", default-features = false, features = [
     "system-packages",
     "universe-packages",
 ] }
+
+[dev-dependencies]
+# SVG raster comparison independently checks helper PNG composition (ADR 0041).
+resvg = "0.47.0"

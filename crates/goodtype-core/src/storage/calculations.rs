@@ -29,6 +29,58 @@ pub struct CalculationHistory {
 }
 
 impl CalculationHistory {
+    /// Append reviewed, unexecuted cells as one retained document-history entry.
+    pub fn append_reviewed_cells(
+        &mut self,
+        root: &Path,
+        page_id: &str,
+        base: (&str, &str, u64, &str),
+        cells: Vec<Cell>,
+        modified_at: &str,
+    ) -> Result<CalculationResult, StorageError> {
+        let root = canonical_root(root)?;
+        let loaded = load(&root, page_id)?;
+        observe(self, &loaded.bytes)?;
+        let hash = source_hash(
+            std::str::from_utf8(&loaded.bytes)
+                .map_err(|_| invalid_error("calculation is not UTF-8"))?,
+        );
+        if loaded.document.id() != base.0
+            || loaded.part_id != base.1
+            || loaded.document.revision() != base.2
+            || hash != base.3
+        {
+            return Err(StorageError::ProposalStale(vec![]));
+        }
+        if cells.is_empty()
+            || cells.len() > 100
+            || cells.iter().any(|c| {
+                !matches!(c.cell_type.as_str(), "code" | "markdown")
+                    || c.part_id() != Some(loaded.part_id.as_str())
+                    || c.execution_count.is_some()
+                    || !c.outputs.is_empty()
+                    || c.source.len() > MAX_CELL_SOURCE_BYTES
+            })
+        {
+            return Err(invalid_error("invalid reviewed cells"));
+        }
+        let mut document = loaded.document.clone();
+        let at = document
+            .cells
+            .iter()
+            .rposition(|c| c.part_id() == Some(loaded.part_id.as_str()))
+            .map_or(document.cells.len(), |i| i + 1);
+        let count = cells.len();
+        document.cells.splice(at..at, cells);
+        mark_later_outputs(&mut document, at + count);
+        let mut next = document.clone();
+        next.set_revision_after(loaded.document.revision())?;
+        if loaded.bytes.len() > HISTORY_BYTES || next.bytes()?.len() > HISTORY_BYTES {
+            return Err(StorageError::HistoryNotRetained);
+        }
+        commit(&root, loaded, document, self, modified_at)
+    }
+
     /// Explicit recovery replaces the document. Retain its confirmed predecessor for one undo.
     pub fn record_restore(&mut self, previous: Vec<u8>, restored: Vec<u8>, part_id: String) {
         self.undo.clear();
@@ -288,6 +340,70 @@ pub fn edit_calculation(
     let root = canonical_root(root)?;
     let loaded = load(&root, page_id)?;
     observe(history, &loaded.bytes)?;
+    edit_loaded(&root, loaded, history, operation, None, modified_at, false)
+}
+
+impl CalculationHistory {
+    /// Apply a reviewed Source or populated Insert against one exact disk snapshot.
+    /// `base` is (calculation ID, part ID, revision, SHA-256 of exact UTF-8 file bytes).
+    /// This is not authorization: the caller holds notebook/helper locks and validates the
+    /// live grant and proposal version before calling, then marks applied only after success.
+    pub fn apply_reviewed_cell_change(
+        &mut self,
+        root: &Path,
+        page_id: &str,
+        base: (&str, &str, u64, &str),
+        change: (CellOperation, Option<String>),
+        modified_at: &str,
+    ) -> Result<CalculationResult, StorageError> {
+        let root = canonical_root(root)?;
+        let loaded = load(&root, page_id)?;
+        observe(self, &loaded.bytes)?;
+        if loaded.document.id() != base.0 || loaded.part_id != base.1 {
+            return Err(invalid_error("reviewed calculation destination changed"));
+        }
+        let file_text = std::str::from_utf8(&loaded.bytes)
+            .map_err(|_| invalid_error("calculation source is not UTF-8"))?;
+        if loaded.document.revision() != base.2 || source_hash(file_text) != base.3 {
+            return Err(StorageError::ExternalChange(
+                "reviewed calculation is stale".into(),
+            ));
+        }
+        let (operation, initial_source) = change;
+        match &operation {
+            CellOperation::Source { .. } if initial_source.is_none() => {}
+            CellOperation::Insert {
+                after: Some(_),
+                cell_type,
+                ..
+            } if matches!(cell_type.as_str(), "code" | "markdown")
+                && initial_source
+                    .as_ref()
+                    .is_some_and(|s| s.len() <= MAX_CELL_SOURCE_BYTES) => {}
+            _ => return Err(invalid_error("unsupported reviewed cell change")),
+        }
+        edit_loaded(
+            &root,
+            loaded,
+            self,
+            operation,
+            initial_source,
+            modified_at,
+            true,
+        )
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn edit_loaded(
+    root: &Path,
+    loaded: Loaded,
+    history: &mut CalculationHistory,
+    operation: CellOperation,
+    initial_source: Option<String>,
+    modified_at: &str,
+    reviewed: bool,
+) -> Result<CalculationResult, StorageError> {
     let part_id = loaded.part_id.clone();
     let mut document = loaded.document.clone();
     let mut changed_after = None;
@@ -336,9 +452,9 @@ pub fn edit_calculation(
                     None => document.empty_part_position(&part_id)?,
                 },
             };
-            document
-                .cells
-                .insert(index, Cell::new(cell_id, &part_id, &cell_type));
+            let mut cell = Cell::new(cell_id, &part_id, &cell_type);
+            cell.source = initial_source.clone().unwrap_or_default();
+            document.cells.insert(index, cell);
             if cell_type == "code" {
                 changed_after = Some(index + 1);
             }
@@ -397,7 +513,17 @@ pub fn edit_calculation(
     if let Some(from) = changed_after {
         mark_later_outputs(&mut document, from);
     }
-    commit(&root, loaded, document, history, modified_at)
+    // Check the actual next revision bytes, including a possible extra revision digit.
+    if reviewed {
+        let mut next = document.clone();
+        next.set_revision_after(loaded.document.revision())?;
+        if loaded.bytes.len() > HISTORY_BYTES || next.bytes()?.len() > HISTORY_BYTES {
+            return Err(invalid_error(
+                "reviewed cell change exceeds history capacity",
+            ));
+        }
+    }
+    commit(root, loaded, document, history, modified_at)
 }
 
 /// Undo or redo the latest calculation action. A page-scoped request refuses an action that
@@ -527,6 +653,61 @@ mod tests {
     };
     const TIME: &str = "2026-11-02T12:00:00Z";
 
+    #[test]
+    fn appended_reviewed_cells_are_unexecuted_and_one_undo_preserves_existing_cells() {
+        let (temp, snapshot) = setup();
+        let root = temp.path();
+        let page = &snapshot.page.id;
+        let mut history = CalculationHistory::default();
+        let before = read_calculation(root, page, &mut history).unwrap();
+        let reference = &before.reference;
+        let hash = source_hash(std::str::from_utf8(&snapshot.calculations[0].bytes).unwrap());
+        let base = (
+            &reference.id[..],
+            &reference.part_id[..],
+            before.document.revision(),
+            &hash[..],
+        );
+        let cells = [
+            ("new-code", "code", "print(42)"),
+            ("new-text", "markdown", "Explanation"),
+        ]
+        .into_iter()
+        .map(|(id, kind, source)| {
+            let mut c = Cell::new(id.into(), &reference.part_id, kind);
+            c.source = source.into();
+            c
+        })
+        .collect();
+        let after = history
+            .append_reviewed_cells(root, page, base, cells, TIME)
+            .unwrap();
+        assert_eq!(after.document.cells.len(), before.document.cells.len() + 2);
+        assert_eq!(after.document.cells[0], before.document.cells[0]);
+        assert!(
+            after
+                .document
+                .cells
+                .iter()
+                .all(|c| c.outputs.is_empty() && c.execution_count.is_none())
+        );
+        let undone = calculation_history(root, page, &mut history, true, false, TIME).unwrap();
+        assert_eq!(undone.document.cells, before.document.cells);
+        let redone = calculation_history(root, page, &mut history, false, false, TIME).unwrap();
+        assert_eq!(redone.document.cells, after.document.cells);
+        assert!(
+            history
+                .append_reviewed_cells(
+                    root,
+                    page,
+                    base,
+                    vec![Cell::new("another".into(), &reference.part_id, "code")],
+                    TIME
+                )
+                .is_err()
+        );
+    }
+
     fn setup() -> (tempfile::TempDir, NotebookSnapshot) {
         let temp = tempfile::tempdir().unwrap();
         create_notebook(temp.path(), &fixtures::snapshot()).unwrap();
@@ -563,6 +744,264 @@ mod tests {
 
     fn disk(root: &Path, reference: &CalculationReference) -> Calculation {
         Calculation::parse(&std::fs::read(root.join(&reference.source_path)).unwrap()).unwrap()
+    }
+
+    fn review_base(root: &Path, current: &CalculationResult) -> (String, String, u64, String) {
+        let bytes = std::fs::read(root.join(&current.reference.source_path)).unwrap();
+        (
+            current.reference.id.clone(),
+            current.reference.part_id.clone(),
+            current.document.revision(),
+            source_hash(std::str::from_utf8(&bytes).unwrap()),
+        )
+    }
+
+    #[test]
+    fn reviewed_insert_is_one_populated_history_entry_and_duplicate_is_stale() {
+        let (temp, page) = setup();
+        let root = temp.path();
+        let mut history = CalculationHistory::default();
+        let current = read_calculation(root, &page.page.id, &mut history).unwrap();
+        let base = review_base(root, &current);
+        let change = || {
+            (
+                CellOperation::Insert {
+                    cell_id: "reviewed-cell".into(),
+                    after: Some(first_cell(&current).id.clone()),
+                    cell_type: "code".into(),
+                },
+                Some("print(42)".into()),
+            )
+        };
+        let apply = |history: &mut CalculationHistory| {
+            history.apply_reviewed_cell_change(
+                root,
+                &page.page.id,
+                (&base.0, &base.1, base.2, &base.3),
+                change(),
+                TIME,
+            )
+        };
+        assert!(history.undo.is_empty());
+        let applied = apply(&mut history).unwrap();
+        assert_eq!(history.undo.len(), 1);
+        assert_eq!(applied.document.cells[1].source, "print(42)");
+        assert!(applied.document.cells[1].outputs.is_empty());
+        assert_eq!(applied.document.cells[1].execution_count, None);
+        assert!(apply(&mut history).is_err());
+        let undo =
+            calculation_history(root, &page.page.id, &mut history, true, true, TIME).unwrap();
+        assert_eq!(undo.document.cells.len(), 1);
+        let redo =
+            calculation_history(root, &page.page.id, &mut history, false, true, TIME).unwrap();
+        assert_eq!(redo.document.cells[1].source, "print(42)");
+    }
+
+    #[test]
+    fn reviewed_change_rejects_wrong_destination_anchor_kind_size_and_source_without_writes() {
+        let (temp, page) = setup();
+        let root = temp.path();
+        let second = create_calculation_page(
+            root,
+            TIME,
+            &PagePosition::Last,
+            "Part B",
+            Some(&page.page.id),
+        )
+        .unwrap();
+        let mut history = CalculationHistory::default();
+        let current = read_calculation(root, &page.page.id, &mut history).unwrap();
+        let base = review_base(root, &current);
+        let bytes = std::fs::read(root.join(&current.reference.source_path)).unwrap();
+        let other =
+            read_calculation(root, &second.page.id, &mut CalculationHistory::default()).unwrap();
+        let other_id = first_cell(&other).id.clone();
+        let insert = |anchor: String, cell_type: &str| CellOperation::Insert {
+            cell_id: "candidate".into(),
+            after: Some(anchor),
+            cell_type: cell_type.into(),
+        };
+        let anchor = first_cell(&current).id.clone();
+        for change in [
+            (insert(other_id, "code"), Some("x".into())),
+            (insert(anchor.clone(), "raw"), Some("x".into())),
+            (
+                insert(anchor.clone(), "code"),
+                Some("x".repeat(MAX_CELL_SOURCE_BYTES + 1)),
+            ),
+            (
+                CellOperation::Delete {
+                    cell_id: anchor.clone(),
+                },
+                None,
+            ),
+            (
+                CellOperation::Source {
+                    cell_id: anchor.clone(),
+                    expected_source: "wrong".into(),
+                    source: "x".into(),
+                },
+                None,
+            ),
+        ] {
+            assert!(
+                history
+                    .apply_reviewed_cell_change(
+                        root,
+                        &page.page.id,
+                        (&base.0, &base.1, base.2, &base.3),
+                        change,
+                        TIME
+                    )
+                    .is_err()
+            );
+        }
+        assert!(
+            history
+                .apply_reviewed_cell_change(
+                    root,
+                    &second.page.id,
+                    (&base.0, &base.1, base.2, &base.3),
+                    (insert(anchor, "code"), Some("x".into())),
+                    TIME
+                )
+                .is_err()
+        );
+        assert_eq!(
+            std::fs::read(root.join(&current.reference.source_path)).unwrap(),
+            bytes
+        );
+        assert!(history.undo.is_empty());
+    }
+
+    #[test]
+    fn reviewed_source_keeps_saved_output_identity_and_is_one_undo_step() {
+        let (temp, page) = setup();
+        let root = temp.path();
+        let mut history = CalculationHistory::default();
+        let current = source(root, &page.page.id, &mut history, "print(1)");
+        let cell = first_cell(&current);
+        let current = commit_calculation_outputs(
+            root,
+            &page.page.id,
+            &mut history,
+            &cell.id,
+            &cell.source,
+            vec![json!({"output_type": "stream", "name": "stdout", "text": "1"})],
+            1,
+            json!({}),
+            TIME,
+        )
+        .unwrap();
+        let base = review_base(root, &current);
+        let cell = first_cell(&current);
+        let count = history.undo.len();
+        let edited = history
+            .apply_reviewed_cell_change(
+                root,
+                &page.page.id,
+                (&base.0, &base.1, base.2, &base.3),
+                (
+                    CellOperation::Source {
+                        cell_id: cell.id.clone(),
+                        expected_source: cell.source.clone(),
+                        source: "print(2)".into(),
+                    },
+                    None,
+                ),
+                TIME,
+            )
+            .unwrap();
+        assert_eq!(history.undo.len(), count + 1);
+        let edited_cell = first_cell(&edited);
+        assert_eq!(edited_cell.source, "print(2)");
+        assert_eq!(edited_cell.outputs, cell.outputs);
+        assert_eq!(edited_cell.execution_count, cell.execution_count);
+        assert_eq!(edited_cell.metadata, cell.metadata);
+        let undo =
+            calculation_history(root, &page.page.id, &mut history, true, true, TIME).unwrap();
+        assert_eq!(first_cell(&undo).source, "print(1)");
+        let redo =
+            calculation_history(root, &page.page.id, &mut history, false, true, TIME).unwrap();
+        assert_eq!(first_cell(&redo).source, "print(2)");
+    }
+
+    #[test]
+    fn reviewed_source_refuses_manual_edit_run_delete_and_same_revision_external_rewrite() {
+        for action in ["edit", "run", "delete", "external"] {
+            let (temp, page) = setup();
+            let root = temp.path();
+            let mut history = CalculationHistory::default();
+            let current = source(root, &page.page.id, &mut history, "x = 1");
+            let base = review_base(root, &current);
+            let cell = first_cell(&current);
+            match action {
+                "edit" => {
+                    source(root, &page.page.id, &mut history, "x = 2");
+                }
+                "run" => {
+                    commit_calculation_outputs(
+                        root,
+                        &page.page.id,
+                        &mut history,
+                        &cell.id,
+                        &cell.source,
+                        vec![],
+                        1,
+                        json!({}),
+                        TIME,
+                    )
+                    .unwrap();
+                }
+                "delete" => {
+                    edit_calculation(
+                        root,
+                        &page.page.id,
+                        &mut history,
+                        CellOperation::Delete {
+                            cell_id: cell.id.clone(),
+                        },
+                        TIME,
+                    )
+                    .unwrap();
+                }
+                _ => {
+                    let mut external = current.document.clone();
+                    external.cells[0].source = "external".into();
+                    std::fs::write(
+                        root.join(&current.reference.source_path),
+                        external.bytes().unwrap(),
+                    )
+                    .unwrap();
+                    // A new history must still reject exact-file mismatch at an unchanged revision.
+                    history = CalculationHistory::default();
+                }
+            }
+            let before = std::fs::read(root.join(&current.reference.source_path)).unwrap();
+            assert!(
+                history
+                    .apply_reviewed_cell_change(
+                        root,
+                        &page.page.id,
+                        (&base.0, &base.1, base.2, &base.3),
+                        (
+                            CellOperation::Source {
+                                cell_id: cell.id.clone(),
+                                expected_source: cell.source.clone(),
+                                source: "x = 3".into()
+                            },
+                            None
+                        ),
+                        TIME
+                    )
+                    .is_err(),
+                "{action}"
+            );
+            assert_eq!(
+                std::fs::read(root.join(&current.reference.source_path)).unwrap(),
+                before
+            );
+        }
     }
 
     #[test]

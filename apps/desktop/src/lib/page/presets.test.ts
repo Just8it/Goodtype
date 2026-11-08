@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { pagePresetOptions, pagePresetPath, pagePresetState, presetHeader, templateName, withPagePreset } from "./presets";
+import { managedPresetPath, pagePresetOptions, pagePresetPath, pagePresetState, presetHeader, presetTargetCurrent, readsNotebookFiles, templateName, withPagePreset } from "./presets";
 
 describe("Page text preset imports", () => {
   it("preserves raw examples, comments, strings and nested source when changing a header", () => {
@@ -67,5 +67,43 @@ describe("Page templates", () => {
     expect(templateName("  //name:  Lab notes  ")).toBe("Lab notes");
     expect(templateName("// Name:\n#set par(justify: true)")).toBeNull();
     expect(templateName("#let name = 1")).toBeNull();
+  });
+});
+
+describe("Preset hardening", () => {
+  it("recognizes a reformatted managed header by the same rule as Rust (P5a)", () => {
+    for (const header of [
+      presetHeader("/styles/a-b.typ"),
+      "/* page */\n  #import  \"/styles/a-b.typ\" : preset // chosen\r\n\t#show :preset .with( rhythm : goodtype_rhythm, ) // managed\n",
+      "// note\r\n\r\n#import \"/styles/a-b.typ\": preset\r\n// between\r\n#show: preset.with(rhythm: goodtype_rhythm)\r\n",
+    ]) {
+      expect(managedPresetPath(`${header}Body`)).toBe("/styles/a-b.typ");
+      expect(pagePresetState(`${header}Body`)).toEqual({ kind: "managed", path: "/styles/a-b.typ" });
+      expect(withPagePreset(`${header}Body`, "/styles/new.typ").match(/#import[^\n]+:\s*preset/g)).toHaveLength(1);
+    }
+    for (const source of [
+      "#import \"/styles/a.typ\": preset\n#show: preset.with(rhythm: 12pt)\n",
+      "#import \"/styles/../a.typ\": preset\n#show: preset.with(rhythm: goodtype_rhythm)\n",
+      "#import \"/styles/sub/a.typ\": preset\n#show: preset.with(rhythm: goodtype_rhythm)\n",
+      "Text\n#import \"/styles/a.typ\": preset\n#show: preset.with(rhythm: goodtype_rhythm)\n",
+      "#import\"/styles/a.typ\": preset\n#show: preset.with(rhythm: goodtype_rhythm)\n",
+    ]) expect(managedPresetPath(source)).toBeNull();
+  });
+
+  it("marks sources that may read notebook files for refresh after a preset change (P2)", () => {
+    for (const source of ["#import \"/styles/a.typ\": x", "#include \"x.typ\"", "#image(\"a.png\")", "#let d = json(\"d.json\")"])
+      expect(readsNotebookFiles(source)).toBe(true);
+    for (const source of ["= Heading\n$x^2$", "Imports are discussed here."]) expect(readsNotebookFiles(source)).toBe(false);
+  });
+
+  it("aborts a pending page change when anything it targets moved (P1)", () => {
+    const target = { root: "r", generation: 1, pageId: "p1", pageTextId: "t1", source: "Body" };
+    const live = { root: "r", generation: 1, pageId: "p1", pageText: { id: "t1", source: "Body" } };
+    expect(presetTargetCurrent(target, live)).toBe(true);
+    expect(presetTargetCurrent(target, { ...live, pageId: "p2", pageText: { id: "t2", source: "Body" } })).toBe(false);
+    expect(presetTargetCurrent(target, { ...live, generation: 2 })).toBe(false);
+    expect(presetTargetCurrent(target, { ...live, root: "other" })).toBe(false);
+    expect(presetTargetCurrent(target, { ...live, pageText: { id: "t1", source: "Edited" } })).toBe(false);
+    expect(presetTargetCurrent(target, { ...live, pageText: null })).toBe(false);
   });
 });

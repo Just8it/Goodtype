@@ -1,4 +1,8 @@
 import { createCalculationPage, importCalculationNotebook } from "../ipc/calculation";
+import { exportTarget, INCLUDE_EVERYTHING, type ExportChoice } from "../workspace/exportTarget";
+import { acceptProposal, validateProposalPlacement } from "../helper/proposal";
+import { helperInsertProposal, helperCreatePage } from "../ipc/helper";
+import type { Proposal } from "../ipc/helper";
 import type { createSelection } from "./selectionEditing.svelte";
 import type { createNavigation } from "./viewportNavigation.svelte";
 import { shapeMessage } from "../i18n/labels";
@@ -20,7 +24,7 @@ import { DEFAULT_INK_Z_INDEX, SCHEMA_VERSION, type NotebookManifest, type PageBa
 import { type TypstCompileResult } from "../editor/typst";
 import { clearTypstCache } from "../editor/typstCache";
 import { listTypstPresets } from "../ipc/presets";
-import { type NotebookSetup, type PresetSummary } from "../page/presets";
+import { type NotebookSetup, type PresetChange, type PresetSummary } from "../page/presets";
 
 import { type InkTool } from "../ink/pipeline";
 import { moveSelected, scaleSelected, transformedPoint } from "../ink/selection";
@@ -168,6 +172,10 @@ export function createSession(env: SessionEnvironment) {
    * changed anything meanwhile. Plain, not reactive: nothing renders from it.
    */
   let editVersion = 0;
+  // Helper freshness: queueCommit is the immediate-edit choke point. Debounced ink/source
+  // count at scheduling, not flush, so persist cannot manufacture an edit during a read.
+  // Neighbor ink, held-shape promotion, structure and history bypass that queue.
+  let editGeneration = 0;
 
   let status = $state<UiText>(notice("workspace.openingTheNotebook"));
 
@@ -217,7 +225,7 @@ export function createSession(env: SessionEnvironment) {
 
   // The active page shares its timing with neighbouring pages but not its payload: the snapshot
   // is built when the timer fires, so it picks up whatever else changed in the meantime.
-  const inkCommitTimer = createCommitTimer(() => queueCommit(inkCommitLabel));
+  const inkCommitTimer = createCommitTimer(() => queueCommit(inkCommitLabel, false));
 
   // Debounced ink is real unsaved work; the save indicator must not read "Saved" while it waits.
   let inkPending = $state(false);
@@ -417,17 +425,31 @@ export function createSession(env: SessionEnvironment) {
   }
 
   async function refreshPresets() {
-    if (!root || !env.tauriAvailable) {
+    const requested = root;
+    if (!requested || !env.tauriAvailable) {
       presets = [];
       return;
     }
     try {
-      presets = await listTypstPresets(root);
+      const listed = await listTypstPresets(requested);
+      if (root === requested) presets = listed;
     } catch {
       // An externally damaged optional style must not prevent the canonical notebook opening.
-      presets = [];
+      if (root === requested) presets = [];
     }
+  }
 
+  /**
+   * Rust wrote a preset file. Every preview that may read it — Page text on that preset, blocks
+   * or Page text importing styles, a shared style or default importing it, transitively — is
+   * recompiled against fresh bytes, and the menu lists the new state. A compile that fails keeps
+   * the last valid preview, as any failing compile does.
+   */
+  function presetChanged(change: PresetChange) {
+    if (!root || change.root !== root) return;
+    clearTypstCache(root);
+    presetRevision += 1;
+    void refreshPresets();
   }
 
   async function refreshRecoveryCandidates() {
@@ -909,6 +931,7 @@ export function createSession(env: SessionEnvironment) {
 
   function commitNeighborInk(pageId: string, strokes: Stroke[], label: UiText) {
     editVersion += 1;
+    editGeneration += 1;
     neighborStrokes = { ...neighborStrokes, [pageId]: strokes };
     const committer = neighborCommitter(pageId);
     pendingNeighborPages = new Set(pendingNeighborPages).add(pageId);
@@ -1155,6 +1178,7 @@ export function createSession(env: SessionEnvironment) {
         // A save blocked by unresolved recovery is exactly what restoring resolves; skip it then.
         if (env.tauriAvailable && activeSnapshot && !transactionFailed && !(await persist())) return;
         const result = await restoreRecoveryCandidate(root, fileName);
+        editGeneration += 1;
         resetPageEntries();
         applySnapshot(result.snapshot);
         canUndo = result.canUndo;
@@ -1410,6 +1434,7 @@ export function createSession(env: SessionEnvironment) {
       );
     }
     editVersion += 1;
+    editGeneration += 1;
     typstDirty = true;
     if (typstCommitTimer) clearTimeout(typstCommitTimer);
     typstCommitTimer = setTimeout(flushTypstCommit, TYPST_SAVE_DEBOUNCE_MS);
@@ -1418,6 +1443,7 @@ export function createSession(env: SessionEnvironment) {
   function updateSharedStyle(source: string) {
     sharedStyleSource = source;
     editVersion += 1;
+    editGeneration += 1;
     typstDirty = true;
     if (typstCommitTimer) clearTimeout(typstCommitTimer);
     typstCommitTimer = setTimeout(flushTypstCommit, TYPST_SAVE_DEBOUNCE_MS);
@@ -1438,6 +1464,40 @@ export function createSession(env: SessionEnvironment) {
    * A confirmed handwriting transcription (ADR 0040): an ordinary new block beside the ink. The
    * ink stays, so undoing this one commit returns the page exactly as it was.
    */
+  async function insertHelperProposal(proposal: Proposal) {
+    await acceptProposal(proposal, {
+      current: () => ({root: root ?? "", pageId: activePageId}), persist,
+      submit: async (captured) => {
+        const requestRoot = root, pageId = activePageId, generation = notebookGeneration;
+        if (!requestRoot) throw new Error("no_notebook");
+        replacingPageCount += 1; pendingTransactions += 1;
+        let failure: unknown;
+        transactionQueue = transactionQueue.then(async () => {
+          if (!requestRoot || root !== requestRoot || activePageId !== pageId || notebookGeneration !== generation || transactionFailed) { failure = new Error("wrong_page"); return; }
+          try {
+            if (captured.newPage) {
+              const result = await helperCreatePage(requestRoot, captured.id, captured.version, captured.newPage.position);
+              if (root !== requestRoot || notebookGeneration !== generation) return;
+              if (result.calculation) calculationSaved(result.snapshot.page.id,result.calculation.document,"change",requestRoot);
+              resetPageEntries(); applySnapshot(result.snapshot); if (!result.calculation) recordStructureAction();
+              await tick(); scrollToPage(result.snapshot.page.id); return;
+            }
+            validateProposalPlacement(captured, activeGeometry);
+            // Rust builds and checks the candidate from the committed page (ADR 0041).
+            const result = await helperInsertProposal(requestRoot, pageId, captured.id, captured.version);
+            if (root !== requestRoot || activePageId !== pageId || notebookGeneration !== generation) return;
+            applySnapshot(result.snapshot);
+            revision = result.snapshot.page.revision;
+            canUndo = result.canUndo; canRedo = result.canRedo;
+            recordNotebookAction(pageId); editGeneration += 1;
+          } catch(error) { failure = error; }
+        }).finally(() => { pendingTransactions -= 1; replacingPageCount -= 1; });
+        await transactionQueue;
+        if(failure) throw failure;
+      },
+    });
+  }
+
   function addTranscribedBlock(source: string, placement: { x: number; y: number; layoutWidthPt: number }, label: UiText) {
     if (activeSnapshot?.page.calculation) return;
     insertTypstBlock(source, placement);
@@ -1494,11 +1554,12 @@ export function createSession(env: SessionEnvironment) {
     typstCommitTimer = undefined;
     if (!typstDirty) return;
     typstDirty = false;
-    queueCommit(notice("workspace.updatedTypstSource"));
+    queueCommit(notice("workspace.updatedTypstSource"), false);
   }
 
   function scheduleInkCommit(label: UiText) {
     editVersion += 1;
+    editGeneration += 1;
     inkCommitLabel = label;
     inkPending = true;
     inkCommitTimer.arm();
@@ -1508,10 +1569,11 @@ export function createSession(env: SessionEnvironment) {
     inkCommitTimer.flush();
   }
 
-  function queueCommit(label: UiText) {
+  function queueCommit(label: UiText, newEdit = true) {
     if (activeSnapshot?.page.calculation) return;
     // Any commit builds a snapshot from current state, so it already carries pending ink.
     editVersion += 1;
+    if (newEdit) editGeneration += 1;
     inkCommitTimer.cancel();
     inkPending = false;
     if (!env.tauriAvailable || !root || transactionFailed) return;
@@ -1572,6 +1634,7 @@ export function createSession(env: SessionEnvironment) {
   }
 
   function recordStructureAction(resetCalculationId?: string) {
+    editGeneration += 1;
     // A manifest change invalidates page snapshots retained by Rust, but older manifest states
     // remain replayable because page files are kept. Drop only the page entries from the route.
     notebookUndoOrder = notebookUndoOrder.filter((action) => action.kind === "structure" ||
@@ -1623,6 +1686,7 @@ export function createSession(env: SessionEnvironment) {
    * from the fitted geometry.
    */
   function promoteHeldInk(stroke: Stroke, draft: ShapeDraft) {
+    editGeneration += 1;
     inkCommitTimer.cancel();
     inkPending = false;
     const originalStrokes = strokes;
@@ -1805,6 +1869,7 @@ export function createSession(env: SessionEnvironment) {
             if (index >= 0) notebookRedoOrder.splice(index, 1);
             notebookUndoOrder.push({ kind: "page", pageId });
           }
+          editGeneration += 1;
           applySnapshot(result.snapshot);
           canUndo = result.canUndo || notebookUndoOrder.length > 0;
           canRedo = result.canRedo || notebookRedoOrder.length > 0;
@@ -1852,6 +1917,7 @@ export function createSession(env: SessionEnvironment) {
             notebookUndoOrder.push({ kind: "structure" });
           }
           resetPageEntries();
+          editGeneration += 1;
           applySnapshot(result.snapshot);
           void recordNotebookPage(root, result.snapshot.page.id).catch(() => {});
           canUndo = result.canUndo || notebookUndoOrder.length > 0;
@@ -1899,7 +1965,7 @@ export function createSession(env: SessionEnvironment) {
     return true;
   }
 
-  async function exportPdf(splitCalculationsA4 = false) {
+  async function exportPdf(choice: ExportChoice = { scope: "notebook", pages: "", include: INCLUDE_EVERYTHING, splitCalculationsA4: false }) {
     if (env.calculationRunning?.()) {
       status = notice("calculation.exportRunning");
       return;
@@ -1910,11 +1976,15 @@ export function createSession(env: SessionEnvironment) {
     try {
       // Rust builds the ordered multi-page PDF from the canonical files, so the export
       // matches what is saved, not what this view holds.
+      const target = exportTarget(choice, notebookManifest?.pages.map((page) => page.id) ?? [], activePageId);
+      if (!target) return;
       const path = await exportNotebookPdf(
         root,
-        splitCalculationsA4 ? "notebook-a4.pdf" : "notebook.pdf",
+        target.outputName,
         env.settings.pageTextBaselineGrid,
-        splitCalculationsA4,
+        choice.splitCalculationsA4 && choice.include.calculations,
+        target.pageIds,
+        choice.include,
       );
       if (env.collectMetrics) exportMs = performance.now() - startedAt;
       status = notice("workspace.exportedPDFTo", { "path": path });
@@ -2117,6 +2187,7 @@ export function createSession(env: SessionEnvironment) {
     titleFromRoot,
     openNotebookAt,
     refreshPresets,
+    presetChanged,
     buildSnapshot,
     applySnapshot,
     scheduleResidency,
@@ -2148,6 +2219,7 @@ export function createSession(env: SessionEnvironment) {
     updateSharedStyle,
     addTypstBlock,
     addTranscribedBlock,
+    insertHelperProposal,
     nextVisualZIndex,
     nextReadingOrder,
     scheduleInkCommit,
@@ -2173,6 +2245,8 @@ export function createSession(env: SessionEnvironment) {
     returnToNotebook,
     closeNotebookTab,
     reopen,
+    markCanonicalEdit() { editGeneration += 1; },
+    get editGeneration() { return editGeneration; },
     get root() { return root; },
     set root(value: typeof root) { root = value; },
     get notebookTitle() { return notebookTitle; },

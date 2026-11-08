@@ -52,6 +52,7 @@ impl Default for LassoTargets {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct AppSettings {
+    pub ai_helper: crate::helper::HelperSettings,
     pub ui_language: String,
     pub inline_text_font: String,
     pub pen_presets: Vec<PenPreset>,
@@ -280,6 +281,7 @@ impl Default for AppSettings {
             touch_glide: 2.0,
             page_text_baseline_grid: true,
             page_text_line_wrap: true,
+            ai_helper: Default::default(),
             remote_packages: true,
             python_package_downloads: true,
             pull_to_add_page: true,
@@ -576,6 +578,8 @@ pub fn save_app_settings(
         settings.python_package_downloads,
         std::sync::atomic::Ordering::SeqCst,
     );
+    app.state::<crate::helper::Helper>()
+        .apply(&app, settings.ai_helper.clone())?;
     Ok(settings)
 }
 
@@ -825,7 +829,14 @@ impl RemotePackages {
 /// Seed the in-memory policy from the stored settings at startup.
 pub fn seed_remote_packages(app: &tauri::AppHandle, policy: &RemotePackages) {
     if let Ok(settings) = read_config::<AppSettings>(app, "settings.json") {
-        policy.set(sanitize(settings).remote_packages);
+        let settings = sanitize(settings);
+        policy.set(settings.remote_packages);
+        if let Err(error) = app
+            .state::<crate::helper::Helper>()
+            .apply(app, settings.ai_helper)
+        {
+            eprintln!("AI helper startup failed: {error}");
+        }
     }
 }
 
@@ -849,6 +860,17 @@ mod tests {
         }
     }
 
+    #[test]
+    fn legacy_settings_default_helper_off_and_round_trip() {
+        let legacy: super::AppSettings = serde_json::from_str(r#"{"touchGlide":1.5}"#).unwrap();
+        assert!(!legacy.ai_helper.enabled);
+        assert!(legacy.ai_helper.web_search);
+        assert_eq!(legacy.ai_helper.usage, crate::helper::Usage::Balanced);
+        let loaded: super::AppSettings =
+            serde_json::from_str(&serde_json::to_string(&legacy).unwrap()).unwrap();
+        assert!(!loaded.ai_helper.enabled);
+        assert_eq!(loaded.touch_glide, 1.5);
+    }
     #[test]
     fn native_labels_accept_only_supported_language_ids() {
         assert_eq!(super::dialog_label(Some("de"), "Open", "Öffnen"), "Öffnen");

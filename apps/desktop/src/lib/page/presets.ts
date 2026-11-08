@@ -6,12 +6,44 @@ export type PresetChoice =
   | { kind: "builtin"; id: string }
   | { kind: "imported"; name: string; source: string };
 
+/** A structured Typst diagnostic as Rust reports it; `file` is set inside another file. */
+export type PresetDiagnostic = {
+  severity: "error" | "warning";
+  message: string;
+  line?: number;
+  column?: number;
+  file?: string;
+};
+
+/** Why a listed preset cannot be used. `detail` is the full producer text, shown on demand. */
+export type PresetProblem = {
+  code: "not_utf8" | "too_large" | "unreadable" | "invalid";
+  detail: string;
+};
+
 export type PresetSummary = {
   id: string;
   name: string;
   description: string;
   importPath: string | null;
   kind: "builtin" | "default" | "custom";
+  form?: "function" | "preamble";
+  problem?: PresetProblem;
+  /** Everything the representative-sample check reported, warnings included. */
+  diagnostics?: PresetDiagnostic[];
+};
+
+/** Rust's notice after it wrote a preset file: no source text, only what changed. */
+export type PresetChange = { root: string; path: string; revision: string };
+
+/** The structured result of checking a preset against the shared representative sample. */
+export type PresetCheck = {
+  form: "function" | "preamble" | null;
+  sampleRevision: string;
+  rendered: boolean;
+  widthPt: number | null;
+  heightPt: number | null;
+  diagnostics: PresetDiagnostic[];
 };
 
 export type NotebookSetup = {
@@ -22,7 +54,11 @@ export type NotebookSetup = {
 };
 
 export const DEFAULT_PRESET_PATH = "/styles/default.typ";
-const MANAGED_HEADER = /^#import "(\/styles\/[A-Za-z0-9._-]+\.typ)": preset\r?\n#show: preset\.with\(rhythm: goodtype_rhythm\)(?:\r?\n){1,2}/;
+// Mirrors `parse_managed_header` in goodtype-core: blank, `//` and single-line `/* */` lines may
+// precede or separate the two directives; spaces/tabs, a trailing `//` comment and CRLF are fine.
+const IGNORABLE_LINE = /^[\t ]*(?:\/\/[^\n]*|\/\*(?:(?!\*\/|\/\*)[^\n])*\*\/[\t ]*)?\r?$/;
+const MANAGED_IMPORT_LINE = /^[\t ]*#import[\t ]+"(\/styles\/[A-Za-z0-9._-]+\.typ)"[\t ]*:[\t ]*preset[\t ]*(?:\/\/[^\n]*)?\r?$/;
+const MANAGED_SHOW_LINE = /^[\t ]*#show[\t ]*:[\t ]*preset[\t ]*\.with[\t ]*\([\t ]*rhythm[\t ]*:[\t ]*goodtype_rhythm[\t ]*,?[\t ]*\)[\t ]*(?:\/\/[^\n]*)?\r?$/;
 const PRESET_IMPORT_LINE = '^[\\t ]*#import[\\t ]+"([^"\\r\\n]+)"[\\t ]*:[\\t ]*preset[\\t ]*(?://[^\\r\\n]*)?(?:\\r?\\n|$)';
 const PRESET_SHOW_LINE = '^[\\t ]*#show[\\t ]*:[\\t ]*preset(?:\\.with[\\t ]*\\([^\\r\\n]*\\))?[\\t ]*(?://[^\\r\\n]*)?(?:\\r?\\n|$)';
 
@@ -53,9 +89,33 @@ export function pagePresetOptions(presets: PresetSummary[]): PresetSummary[] {
   );
 }
 
+/** The managed header's preset path, by the same rule Rust uses, or null. */
+export function managedPresetPath(source: string): string | null {
+  const lines = source.split("\n");
+  let index = 0;
+  const next = () => {
+    while (index < lines.length && IGNORABLE_LINE.test(lines[index])) index += 1;
+    return index < lines.length ? lines[index++] : null;
+  };
+  const importLine = next();
+  const path = importLine === null ? null : MANAGED_IMPORT_LINE.exec(importLine)?.[1] ?? null;
+  if (!path) return null;
+  const showLine = next();
+  return showLine !== null && MANAGED_SHOW_LINE.test(showLine) ? path : null;
+}
+
+/**
+ * Whether Typst source may read a notebook file — an import, include or file-reading call — and
+ * so must refresh when Rust reports a changed preset. Deliberately broad: a false positive costs
+ * one recompile, a false negative a stale preview.
+ */
+export function readsNotebookFiles(source: string): boolean {
+  return /#?\b(?:import|include)\b|\b(?:read|image|json|csv|yaml|toml|xml|cbor|plugin|bibliography)\s*\(/.test(source);
+}
+
 export function pagePresetState(source: string): PagePresetState {
-  const managed = MANAGED_HEADER.exec(source);
-  if (managed) return { kind: "managed", path: managed[1] };
+  const managed = managedPresetPath(source);
+  if (managed) return { kind: "managed", path: managed };
   const imported = new RegExp(PRESET_IMPORT_LINE, "m").exec(presetDirectives(source).join(""));
   const shown = new RegExp(PRESET_SHOW_LINE, "m").test(presetDirectives(source).join(""));
   return imported || shown
@@ -82,7 +142,7 @@ function presetDirectives(source: string): string[] {
   const directives: string[] = [];
   for (const line of source.match(/[^\n]*(?:\n|$)/g) ?? []) {
     if (new RegExp(PRESET_IMPORT_LINE).test(line) || new RegExp(PRESET_SHOW_LINE).test(line)) directives.push(line);
-    else if (!/^[\t ]*(?:\r?\n|$|\/\/[^\r\n]*(?:\r?\n|$)|#import[\t ]+"[^"\\\r\n]+"(?:[\t ]*:[\t A-Za-z0-9_,*]+)?[\t ]*(?:\/\/[^\r\n]*)?(?:\r?\n|$))$/.test(line)) break;
+    else if (!/^[\t ]*(?:\r?\n|$|\/\/[^\r\n]*(?:\r?\n|$)|\/\*(?:(?!\*\/|\/\*)[^\r\n])*\*\/[\t ]*(?:\r?\n|$)|#import[\t ]+"[^"\\\r\n]+"(?:[\t ]*:[\t A-Za-z0-9_,*]+)?[\t ]*(?:\/\/[^\r\n]*)?(?:\r?\n|$))$/.test(line)) break;
   }
   return directives;
 }
@@ -109,4 +169,18 @@ export function presetPresentation(preset: PresetSummary, t: Translator = transl
   }
   return { ...preset, description: preset.kind === "default"
     ? t("editor.notebookDefault") : t("presets.notebookPreset") };
+}
+
+/** What a page preset change targets, captured before any await (P1). */
+export type PresetTarget = { root: string; generation: number; pageId: string; pageTextId: string; source: string };
+
+/**
+ * Whether a pending preset change may still land: same notebook, generation, page, Page text and
+ * unchanged source. Anything else aborts; the change is never redirected to another page.
+ */
+export function presetTargetCurrent(target: PresetTarget, live: {
+  root: string | null; generation: number; pageId: string; pageText: { id: string; source: string } | null;
+}): boolean {
+  return live.root === target.root && live.generation === target.generation && live.pageId === target.pageId
+    && live.pageText?.id === target.pageTextId && live.pageText.source === target.source;
 }

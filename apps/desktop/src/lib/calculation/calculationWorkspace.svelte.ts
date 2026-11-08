@@ -385,7 +385,7 @@ export function createCalculationWorkspace(
   }
 
   return {
-    ingest, preview, layoutFor, documentFor, cellsFor, source, activated,
+    accept, ingest, preview, layoutFor, documentFor, cellsFor, source, activated,
     choose, select, deselect, operation, deleteCell, history, flush, historyFor,
     refreshRuntime, install, closeInstall, cancelInstall: cancelPythonInstall,
       discoverLocal, useLocal, changePython,
@@ -396,6 +396,7 @@ export function createCalculationWorkspace(
     preparePlacement: () => editor.settleComposition?.() ?? Promise.resolve(),
     runningIn: (root: string) => Object.keys(runs).some(key => key.startsWith(`${root}\0`)),
       viewHeight: (root: string, pageId: string, heightPt: number) => height(pageId, Math.min(100_000, Math.max(60, heightPt)), root),
+    cellFocus: () => editor.focusSelection?.() ?? null,
     mountEditor: editor.mount,
     get runtime() { return runtime; },
     get installing() { return installing; },

@@ -1,10 +1,12 @@
 <script lang="ts">
+  import PdfMaterials from "../pdf/PdfMaterials.svelte";
+  import type { PageObject } from "../model";
   import type { PageBackground, ShapeStyle, Stroke, StrokePattern } from "../model";
   import PaperLayer from "../page/PaperLayer.svelte";
   import type { StrokePerformance } from "../ink/metrics";
   import type { TypstCompileResult } from "../editor/typst";
   import { getCachedTypst } from "../editor/typstCache";
-  import { pagePresetPath } from "../page/presets";
+  import { pagePresetPath, readsNotebookFiles } from "../page/presets";
   import type { TypstCompileRequest } from "../ipc/typst";
   import {
     DEFAULT_POINTER_MAPPING,
@@ -35,6 +37,7 @@
   // SVGs — when focus moves onto it, instead of being torn down and rebuilt by a second
   // component.
   let {
+    materials = [],
     blocks = [],
     pageTypst = null,
     images = [],
@@ -58,6 +61,7 @@
     pageTextBaselineGrid = true,
     presetRevision = 0,
     onRequestEdit,
+    onAskAI,
     tool = "select",
     color = "#16212b",
     widthPt = 2,
@@ -112,6 +116,7 @@
     onSelectionChange,
     onStrokeMetrics,
   }: {
+    materials?: PageObject[];
     blocks?: BlockView[];
     pageTypst?: PageTypstView | null;
     images?: ImageView[];
@@ -137,6 +142,7 @@
     sharedStyle?: string;
     pageTextBaselineGrid?: boolean;
     presetRevision?: number;
+    onAskAI?: (id: string, focus: import("../helper/editorEntry").EditorFocus | null, restore: () => void) => void;
     onRequestEdit?: (id: string) => void;
     tool?: InkTool;
     color?: string;
@@ -221,7 +227,7 @@
     {background}
     geometry={{ widthPt: pageWidthPt, heightPt: pageHeightPt }}
     snapBlocksToGrid={pageTextBaselineGrid}
-    compileDependency={templatePath ? presetRevision : 0}
+    compileDependency={templatePath || readsNotebookFiles(`${sharedStyle}\n${typst.source}`) ? presetRevision : 0}
     readingOrder={typst.readingOrder}
     onCompile={(request) => onCompile(typst.id, request)}
   />
@@ -234,6 +240,7 @@
   {/if}
 </div>
 <div class:interactive class:editing={editingBlockId !== null} class="objects">
+  {#if root}<PdfMaterials objects={materials} {root} {zoom}/>{/if}
   {#each blocks as block (block.id)}
     <TypstBlock
       id={block.id}
@@ -248,6 +255,7 @@
       compileResult={results[block.id] ?? null}
       cached={getCachedTypst(`${sharedStyle}\n${block.source}`, block.layoutWidthPt, root ?? "") ?? null}
       compileContext={sharedStyle}
+      compileDependency={readsNotebookFiles(`${sharedStyle}\n${block.source}`) ? presetRevision : 0}
       {root}
       selected={interactive && selectedBlockId === block.id}
       {toPageDelta}
@@ -262,6 +270,7 @@
       onEditingChange={(editing) =>
         (editingBlockId = editing ? block.id : editingBlockId === block.id ? null : editingBlockId)}
       inlineEditing={interactive && inlineEditing}
+      onAskAI={onAskAI ? (focus, restore) => onAskAI?.(block.id, focus, restore) : undefined}
       onRequestEdit={() => onRequestEdit?.(block.id)}
     />
   {/each}
@@ -309,6 +318,7 @@
     {strokes}
     {newStrokeZIndex}
     objectZIndices={[
+      ...materials.map(material => material.zIndex),
       ...blocks.map((block) => block.zIndex),
       ...images.map((image) => image.zIndex),
       ...displayedShapes.map((shape) => shape.zIndex),

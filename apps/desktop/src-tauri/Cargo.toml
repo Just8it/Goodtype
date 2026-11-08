@@ -15,6 +15,9 @@ goodtype-typst = { path = "../../../crates/goodtype-typst" }
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10"
+# Decode only bounded saved calculation PNG/JPEG outputs for helper context.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+base64 = "0.22"
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 tempfile.workspace = true
@@ -26,6 +29,16 @@ zip = { version = "2.4", default-features = false, features = ["deflate"] }
 # Explicit importer update checks authenticate release metadata with an app-pinned key (ADR 0031).
 ed25519-dalek = { version = "2.2", default-features = false, features = ["std"] }
 
+# ADR 0041: local MCP server over the authenticated async pipe transport.
+rmcp = { version = "=3.8.0", default-features = false, features = ["server", "macros", "transport-async-rw"] }
+tokio = { version = "1", features = ["net", "io-util", "sync", "time", "macros"] }
+getrandom = "0.3"
+# Reuse the pinned Typst parser to capture literal transitive grant dependencies.
+typst-syntax = "=0.15.1"
+
+[dev-dependencies]
+rmcp = { version = "=3.8.0", default-features = false, features = ["client"] }
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
   "Win32_Foundation",
@@ -33,6 +46,8 @@ windows-sys = { version = "0.61", features = [
   "Win32_Security_Authorization",
   "Win32_Security_Isolation",
   "Win32_System_Threading",
+  "Win32_System_Memory",
+  "Win32_Storage_FileSystem",
   "Win32_System_JobObjects",
 ] }
 # Handwriting transcription through the recognizers Windows ships (ADR 0040). The same `windows`
@@ -43,3 +58,4 @@ windows = { version = "0.61", features = [
   "Win32_System_Com",
 ] }
 windows-collections = "0.2"
+

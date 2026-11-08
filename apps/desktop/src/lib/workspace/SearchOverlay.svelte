@@ -113,10 +113,10 @@
     right: 16px;
     z-index: 30;
     width: min(380px, calc(100% - 32px));
-    border: 1px solid rgb(255 255 255 / 12%);
+    border: 1px solid var(--wash-strong);
     border-radius: 10px;
-    background: #23272f;
-    box-shadow: 0 14px 36px rgb(0 0 0 / 40%);
+    background: var(--panel);
+    box-shadow: var(--shadow-menu);
   }
 
   .field {
@@ -131,7 +131,7 @@
     height: 15px;
     flex: none;
     fill: none;
-    stroke: #6a727c;
+    stroke: var(--quiet);
     stroke-width: 1.8;
   }
 
@@ -140,7 +140,7 @@
     min-width: 0;
     border: 0;
     background: transparent;
-    color: #e9ebee;
+    color: var(--text);
     font-size: 13px;
     outline: none;
   }
@@ -152,21 +152,21 @@
     border: 0;
     border-radius: 6px;
     background: transparent;
-    color: #6a727c;
+    color: var(--quiet);
     font-size: 16px;
     cursor: pointer;
   }
 
   .field > button:hover {
-    background: rgb(255 255 255 / 8%);
-    color: #e9ebee;
+    background: var(--wash);
+    color: var(--text);
   }
 
   .state {
     margin: 0;
     padding: 10px 14px 12px;
-    border-top: 1px solid rgb(255 255 255 / 8%);
-    color: #6a727c;
+    border-top: 1px solid var(--wash);
+    color: var(--quiet);
     font-size: 12px;
   }
 
@@ -175,7 +175,7 @@
     overflow: auto;
     margin: 0;
     padding: 6px;
-    border-top: 1px solid rgb(255 255 255 / 8%);
+    border-top: 1px solid var(--wash);
     list-style: none;
   }
 
@@ -188,7 +188,7 @@
     border: 0;
     border-radius: 7px;
     background: transparent;
-    color: #e9ebee;
+    color: var(--text);
     font-size: 12.5px;
     text-align: left;
     cursor: pointer;
@@ -196,12 +196,12 @@
 
   li button:hover,
   li button:focus-visible {
-    background: rgb(76 141 240 / 14%);
+    background: var(--accent-fill);
   }
 
   .page {
     flex: none;
-    color: #4c8df0;
+    color: var(--blueprint);
     font-variant-numeric: tabular-nums;
     font-size: 11.5px;
   }

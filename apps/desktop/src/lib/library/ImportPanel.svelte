@@ -497,13 +497,12 @@
     padding: 2px 0 7px;
     border: 0;
     background: none;
-    color: var(--muted, #aeb5be);
+    color: var(--muted);
     font: inherit;
     font-size: 20px;
-    font-weight: 500;
-    letter-spacing: -0.02em;
+    font-weight: 600;
     cursor: pointer;
-    transition: color 150ms ease-out;
+    transition: color var(--fast) ease-out;
   }
 
   .sources button::after {
@@ -513,19 +512,18 @@
     left: 0;
     height: 2px;
     border-radius: 1px;
-    background: var(--blueprint, #4c8df0);
+    background: var(--blueprint);
     content: "";
     transform: scaleX(0);
-    transition: transform 180ms cubic-bezier(0.16, 1, 0.3, 1);
+    transition: transform var(--enter) cubic-bezier(0.16, 1, 0.3, 1);
   }
 
   .sources button:hover {
-    color: var(--text, #e9ebee);
+    color: var(--text);
   }
 
   .sources button.on {
-    color: var(--text, #e9ebee);
-    font-weight: 600;
+    color: var(--text);
   }
 
   .sources button.on::after {
@@ -533,7 +531,7 @@
   }
 
   .sources button:focus-visible {
-    outline: 2px solid var(--blueprint-light, #7fb0f7);
+    outline: 2px solid var(--blueprint-light);
     outline-offset: 3px;
     border-radius: 2px;
   }
@@ -543,7 +541,7 @@
     width: 7px;
     height: 7px;
     border-radius: 50%;
-    background: var(--blueprint, #4c8df0);
+    background: var(--blueprint);
     animation: running 1.2s ease-in-out infinite;
   }
 
@@ -563,7 +561,7 @@
   }
 
   .outcome .error {
-    color: #f0aaa6;
+    color: var(--oxide-text);
   }
 
   .body {
@@ -572,16 +570,16 @@
   }
 
   small {
-    color: var(--muted, #aeb5be);
-    font-size: var(--text-sm, 11px);
+    color: var(--muted);
+    font-size: var(--text-sm);
     line-height: 1.45;
   }
 
   .version {
     display: block;
     margin-top: 2px;
-    color: var(--quiet, #6a727c);
-    font-size: var(--text-sm, 11px);
+    color: var(--quiet);
+    font-size: var(--text-sm);
   }
 
   .updates {
@@ -597,8 +595,8 @@
   /* What is happening now, or what happened: the line the eye should land on. */
 
   .note {
-    color: var(--muted, #aeb5be);
-    font-size: var(--text-sm, 11px);
+    color: var(--muted);
+    font-size: var(--text-sm);
   }
 
   .row,
@@ -613,7 +611,7 @@
   }
 
   .figure {
-    color: var(--muted, #aeb5be);
+    color: var(--muted);
     font-variant-numeric: tabular-nums;
   }
 
@@ -631,17 +629,17 @@
   }
 
   .label {
-    color: var(--text, #e9ebee);
-    font-weight: 500;
+    color: var(--text);
+    font-weight: 600;
   }
 
   .chosen {
-    color: var(--text, #e9ebee);
+    color: var(--text);
     overflow-wrap: anywhere;
   }
 
   .destination {
-    color: var(--text, #e9ebee);
+    color: var(--text);
   }
 
   .check {
@@ -661,7 +659,7 @@
     width: 16px;
     height: 16px;
     margin: 2px 0 0;
-    accent-color: var(--blueprint, #4c8df0);
+    accent-color: var(--blueprint);
   }
 
   .outcomes {
@@ -679,7 +677,7 @@
     grid-template-columns: 18px 1fr;
     gap: 10px;
     padding: 7px 0;
-    border-top: 1px solid var(--edge-soft, rgb(255 255 255 / 7%));
+    border-top: 1px solid var(--edge-soft);
   }
 
   .outcomes > li:first-child {
@@ -699,19 +697,19 @@
 
   .imported svg,
   .alreadyThere svg {
-    color: #7fd1a3;
+    color: var(--sage-text);
   }
 
   .needsArtwork svg {
-    color: #e9c46a;
+    color: var(--amber-text);
   }
 
   .failed svg {
-    color: #f0aaa6;
+    color: var(--oxide-text);
   }
 
   .cancelled svg {
-    color: var(--quiet, #6a727c);
+    color: var(--quiet);
   }
 
   .outcome {
@@ -725,13 +723,13 @@
   }
 
   .outcome .detail {
-    color: var(--muted, #aeb5be);
-    font-size: var(--text-sm, 11px);
+    color: var(--muted);
+    font-size: var(--text-sm);
   }
 
   details {
-    color: var(--muted, #aeb5be);
-    font-size: var(--text-sm, 11px);
+    color: var(--muted);
+    font-size: var(--text-sm);
   }
 
   summary {
@@ -747,7 +745,7 @@
   button:focus-visible,
   input:focus-visible,
   summary:focus-visible {
-    outline: 2px solid var(--blueprint-light, #7fb0f7);
+    outline: 2px solid var(--blueprint-light);
     outline-offset: 2px;
   }
 

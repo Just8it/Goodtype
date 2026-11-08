@@ -182,7 +182,7 @@
     border: 1px solid var(--edge);
     border-radius: var(--radius-lg);
     background: var(--panel);
-    box-shadow: 0 18px 44px rgb(0 0 0 / 55%);
+    box-shadow: var(--shadow-panel);
   }
 
   .width-panel.embedded {
@@ -206,8 +206,8 @@
   .segments { display: grid; grid-template-columns: repeat(3, 1fr); padding: 3px; border: 1px solid var(--edge); border-radius: var(--radius); background: rgb(0 0 0 / 18%); gap: 3px; }
   .segments button { display: grid; height: 30px; place-items: center; border: 0; border-radius: calc(var(--radius) - 2px); background: transparent; color: var(--muted); cursor: pointer; }
   .segments button:hover { color: var(--text); background: var(--wash); }
-  .segments button.current { background: rgb(76 141 240 / 22%); color: var(--text); box-shadow: inset 0 0 0 1px var(--blueprint); }
-  .segments button:focus-visible { outline: 2px solid var(--blueprint); outline-offset: 1px; }
+  .segments button.current { background: var(--accent-fill); color: var(--text); box-shadow: inset 0 0 0 1px var(--blueprint); }
+  .segments button:focus-visible { outline: 2px solid var(--blueprint-light); outline-offset: 2px; }
   .segments svg { width: 34px; height: 12px; fill: none; stroke: currentColor; stroke-width: 2.4; stroke-linecap: round; }
 
   .settings { display: grid; gap: 12px; }
@@ -236,11 +236,11 @@
 
   .primary {
     background: var(--blueprint);
-    color: #0e1b31;
+    color: var(--on-accent);
     font-weight: 600;
   }
 
-  .primary:disabled { opacity: 0.45; cursor: default; }
+  .primary:disabled { opacity: var(--disabled); cursor: default; }
 
   .note { margin: 0; color: var(--muted); font-size: var(--text-sm); }
 
@@ -253,7 +253,7 @@
   .remove:hover { background: var(--wash); }
 
   button:focus-visible {
-    outline: 2px solid var(--blueprint);
+    outline: 2px solid var(--blueprint-light);
     outline-offset: 2px;
   }
 </style>

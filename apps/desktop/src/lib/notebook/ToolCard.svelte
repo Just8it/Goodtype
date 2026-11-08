@@ -221,7 +221,7 @@
     border: 1px solid var(--edge);
     border-radius: var(--radius-lg);
     background: var(--panel);
-    box-shadow: 0 22px 54px rgb(0 0 0 / 58%);
+    box-shadow: var(--shadow-panel);
     color: var(--text);
   }
 
@@ -392,7 +392,7 @@
   }
 
   .nib:hover { background: var(--wash); }
-  .nib.current { border-color: var(--blueprint); background: rgb(76 141 240 / 14%); color: var(--text); }
+  .nib.current { border-color: var(--accent-edge); background: var(--accent-fill); color: var(--text); }
 
   .divider { height: 1px; flex: none; background: var(--edge-soft); }
 
@@ -427,7 +427,7 @@
     padding: 0;
     border: 0;
     border-radius: var(--radius-pill);
-    background: rgb(255 255 255 / 14%);
+    background: var(--track);
     cursor: pointer;
   }
 
@@ -439,11 +439,11 @@
     height: 14px;
     border-radius: 50%;
     background: var(--muted);
-    transition: transform 120ms ease, background 120ms ease;
+    transition: transform var(--fast) ease, background var(--fast) ease;
   }
 
   .toggle.on { background: var(--blueprint); }
-  .toggle.on span { background: #fff; transform: translateX(14px); }
+  .toggle.on span { background: var(--text); transform: translateX(14px); }
 
   .segmented {
     display: flex;
@@ -464,7 +464,7 @@
     cursor: pointer;
   }
 
-  .segmented button.current { background: var(--blueprint); color: #10141a; font-weight: 600; }
+  .segmented button.current { background: var(--accent-fill); box-shadow: inset 0 0 0 1px var(--accent-edge); color: var(--text); font-weight: 600; }
 
 
   .nib:focus-visible,
@@ -472,7 +472,7 @@
   .chrome:focus-visible,
   .segmented button:focus-visible {
     outline: 2px solid var(--blueprint-light);
-    outline-offset: 1px;
+    outline-offset: 2px;
   }
 
   @media (prefers-reduced-motion: reduce) {

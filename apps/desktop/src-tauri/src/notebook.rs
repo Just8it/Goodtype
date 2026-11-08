@@ -49,6 +49,21 @@ pub(crate) struct HistoryStore {
 }
 
 impl HistoryStore {
+    pub(crate) fn append_helper_cells(
+        &mut self,
+        root: &Path,
+        page: &str,
+        base: (&str, &str, u64, &str),
+        cells: Vec<goodtype_core::calculation::Cell>,
+        modified_at: &str,
+    ) -> Result<storage::CalculationResult, NotebookError> {
+        Ok(self
+            .calculations
+            .entry((root.to_path_buf(), base.0.into()))
+            .or_default()
+            .append_reviewed_cells(root, page, base, cells, modified_at)?)
+    }
+
     #[allow(clippy::too_many_arguments)] // Forward the validated execution record under the notebook lock.
     pub(crate) fn commit_calculation_outputs(
         &mut self,
@@ -120,7 +135,7 @@ pub struct NotebookError {
 }
 
 impl NotebookError {
-    fn other(error: impl std::fmt::Display) -> Self {
+    pub(crate) fn other(error: impl std::fmt::Display) -> Self {
         Self {
             code: "operation_failed",
             details: error.to_string(),
@@ -158,6 +173,8 @@ impl From<storage::StorageError> for NotebookError {
             storage::StorageError::ExternalChange(_) => "external_change",
             storage::StorageError::RevisionConflict { .. } => "revision_conflict",
             storage::StorageError::RecoveryLimit { .. } => "recovery_limit",
+            storage::StorageError::ProposalStale(_) => "proposal_stale",
+            storage::StorageError::HistoryNotRetained => "history_not_retained",
             _ => "operation_failed",
         };
         Self {
@@ -266,7 +283,7 @@ fn reobserve_after_structure(
 }
 
 /// Record the structure action, then re-observe the page it produced.
-fn advance_structure_result(
+pub(crate) fn advance_structure_result(
     histories: &mut HistoryStore,
     root: &Path,
     snapshot: NotebookSnapshot,
@@ -280,7 +297,7 @@ fn advance_structure_result(
     reobserve_after_structure(histories, root, result)
 }
 
-fn observe_structure(
+pub(crate) fn observe_structure(
     histories: &mut HistoryStore,
     root: &Path,
     active_page_id: &str,
@@ -293,7 +310,7 @@ fn observe_structure(
     .map_err(NotebookError::from)
 }
 
-fn restore_structure_result(
+pub(crate) fn restore_structure_result(
     histories: &mut HistoryStore,
     root: &Path,
     modified_at: &str,
@@ -566,6 +583,47 @@ pub async fn commit_notebook(
             Ok(CommitResult {
                 result,
                 asset_paths,
+            })
+        },
+    )
+    .await
+}
+
+/// Insert a reviewed AI helper proposal (ADR 0041) as one ordinary page commit.
+///
+/// The frontend flushes its own pending edits first and names only the reviewed proposal version.
+/// Rust builds the candidate from the committed page under this lock, re-checks the proposal's
+/// dependencies inside the saving call and refuses an insert whose undo or redo history would not
+/// be retained.
+#[tauri::command]
+pub async fn insert_helper_proposal(
+    roots: tauri::State<'_, AllowedRoots>,
+    histories: tauri::State<'_, NotebookHistories>,
+    app: tauri::AppHandle,
+    root: String,
+    page_id: String,
+    proposal: crate::helper::proposals::ProposalInsert,
+) -> Result<CommitResult, NotebookError> {
+    let helper = tauri::Manager::state::<crate::helper::Helper>(&app)
+        .inner()
+        .clone();
+    on_page(
+        &roots,
+        &histories,
+        root,
+        page_id,
+        move |root, page_id, history| {
+            let result = crate::helper::proposals::insert(
+                &helper,
+                Some(&app),
+                root,
+                page_id,
+                history,
+                proposal,
+            )?;
+            Ok(CommitResult {
+                result,
+                asset_paths: None,
             })
         },
     )
@@ -1205,6 +1263,90 @@ pub async fn import_calculation_notebook(
             &bytes,
         )?;
         advance_structure_result(store, root, snapshot).map(Some)
+    })
+    .await
+}
+
+#[cfg(test)]
+mod proposal_error_tests {
+    use super::*;
+    #[test]
+    fn maps_proposal_errors() {
+        assert_eq!(
+            NotebookError::from(storage::StorageError::HistoryNotRetained).code,
+            "history_not_retained"
+        );
+        assert_eq!(
+            NotebookError::from(storage::StorageError::ProposalStale(vec![])).code,
+            "proposal_stale"
+        );
+    }
+}
+
+/// UI-only reviewed apply. Notebook lock precedes helper lock and remains held through persistence.
+#[tauri::command]
+pub async fn apply_helper_cell_proposal(
+    roots: tauri::State<'_, AllowedRoots>,
+    histories: tauri::State<'_, NotebookHistories>,
+    app: tauri::AppHandle,
+    input: crate::helper::cells::ApplyCellInput,
+) -> Result<crate::helper::cells::ApplyCellResult, crate::helper::UiProblem> {
+    let helper = tauri::Manager::state::<crate::helper::Helper>(&app)
+        .inner()
+        .clone();
+    let (root, page) = {
+        let state = helper.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let p = state
+            .sessions
+            .values()
+            .find_map(|s| s.proposals.get(&input.proposal_id))
+            .ok_or_else(|| crate::helper::UiProblem {
+                code: "cell_proposal_revoked".into(),
+                params: Default::default(),
+            })?;
+        (p.root.clone(), p.page_id.clone())
+    };
+    on_notebook(&roots, &histories, root, move |root, store| {
+        let snapshot = storage::open_page(root, &page)?;
+        let reference = snapshot
+            .page
+            .calculation
+            .ok_or("cell_proposal_destination")?;
+        let history = store
+            .calculations
+            .entry((root.to_path_buf(), reference.id))
+            .or_default();
+        // Preserve the structured UI problem through the existing notebook error boundary.
+        Ok(crate::helper::cells::apply(
+            &helper,
+            Some(&app),
+            root,
+            &page,
+            history,
+            input,
+        ))
+    })
+    .await
+    .map_err(|_| crate::helper::UiProblem {
+        code: "cell_proposal_persist_failed".into(),
+        params: Default::default(),
+    })?
+}
+
+/// User confirmation is the only path that publishes a page-creation proposal.
+#[tauri::command]
+pub async fn apply_helper_page_proposal(
+    roots: tauri::State<'_, AllowedRoots>,
+    histories: tauri::State<'_, NotebookHistories>,
+    app: tauri::AppHandle,
+    root: String,
+    input: crate::helper::new_page::ApplyInput,
+) -> Result<crate::helper::new_page::ApplyResult, NotebookError> {
+    let helper = tauri::Manager::state::<crate::helper::Helper>(&app)
+        .inner()
+        .clone();
+    on_notebook(&roots, &histories, root, move |root, store| {
+        crate::helper::new_page::apply(&helper, Some(&app), root, store, input)
     })
     .await
 }

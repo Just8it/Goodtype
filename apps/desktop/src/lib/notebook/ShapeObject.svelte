@@ -388,7 +388,7 @@
   .control-hit.rotate { cursor: grab; }
   .control-hit.rotate:active { cursor: grabbing; }
   .editing .control-hit { cursor: move; }
-  .control-hit:focus-visible { fill: rgb(76 141 240 / 24%); }
+  .control-hit:focus-visible { fill: var(--accent-fill); }
   .control { fill: var(--paper); stroke: var(--blueprint); stroke-width: 1.5px; pointer-events: none; }
   .control.handle { fill: var(--blueprint); }
   .handle-line { stroke: var(--blueprint); opacity: 0.72; pointer-events: none; }

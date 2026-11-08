@@ -110,7 +110,7 @@
        bottom — a browser-tab move that only reads right when the tab docks onto content below. */
     border-bottom: 2px solid var(--edge);
     border-radius: var(--radius);
-    background: rgb(255 255 255 / 3%);
+    background: var(--fill-soft);
   }
   .notebook-tab.active { border-bottom-color: var(--blueprint); background: var(--panel); }
   .notebook-tab.switching { opacity: .65; }

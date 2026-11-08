@@ -1,6 +1,6 @@
 <script lang="ts">
   import { dismissable } from "./dismiss";
-  import type { MenuAction, MenuEntry, MenuSection } from "./menu";
+  import type { MenuAction, MenuSection } from "./menu";
 
   /**
    * The overflow menu. Renders whatever `sections` describe, so a new page-level feature costs
@@ -18,7 +18,7 @@
   }: {
     /** The subject the menu acts on, e.g. "Page 3 of 12". */
     title: string;
-    /** Optional second line — a path, a state. */
+    /** Optional second line — the notebook name, a state. */
     subtitle?: string;
     sections: MenuSection[];
     onClose: () => void;
@@ -39,9 +39,7 @@
   /// the only way through eleven entries was eleven presses of Tab.
   function moveWithin(event: KeyboardEvent) {
     if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
-    const items = menu
-      ? [...menu.querySelectorAll<HTMLElement>("button:not(:disabled), input:not(:disabled)")]
-      : [];
+    const items = menu ? [...menu.querySelectorAll<HTMLElement>("button:not(:disabled)")] : [];
     const current = items.indexOf(document.activeElement as HTMLElement);
     if (current < 0 || !items.length) return;
     event.preventDefault();
@@ -52,14 +50,6 @@
           ? items.length - 1
           : (current + (event.key === "ArrowDown" ? 1 : -1) + items.length) % items.length;
     items[next]?.focus();
-  }
-
-  function commitNumber(entry: MenuEntry, raw: string) {
-    if (entry.kind !== "number") return;
-    const parsed = Number.parseInt(raw, 10);
-    if (Number.isNaN(parsed)) return;
-    entry.onCommit(Math.min(entry.max, Math.max(entry.min, parsed)));
-    onClose();
   }
 </script>
 
@@ -84,48 +74,24 @@
     {#if section.title}<div class="menu-heading">{section.title}</div>{/if}
 
     {#each section.entries as entry (entry.id)}
-      {#if entry.kind === "number"}
-        <div class="menu-row" class:disabled={entry.disabled}>
+      <button
+        type="button"
+        class:destructive={entry.destructive}
+        disabled={entry.disabled}
+        onclick={() => run(entry)}
+      >
+        {#if !compact || entry.icon}
           <span class="menu-icon" aria-hidden="true">
             {#if entry.icon}
               <svg viewBox="0 0 24 24"><path d={entry.icon} /></svg>
             {/if}
           </span>
-          <label for={`menu-${entry.id}`}>{entry.label}</label>
-          <input
-            id={`menu-${entry.id}`}
-            type="number"
-            min={entry.min}
-            max={entry.max}
-            value={entry.value}
-            disabled={entry.disabled}
-            onkeydown={(event) => {
-              if (event.key === "Enter") commitNumber(entry, event.currentTarget.value);
-            }}
-            onblur={(event) => commitNumber(entry, event.currentTarget.value)}
-          />
-          {#if entry.hint}<span class="menu-hint">{entry.hint}</span>{/if}
-        </div>
-      {:else}
-        <button
-          type="button"
-          class:destructive={entry.destructive}
-          disabled={entry.disabled}
-          onclick={() => run(entry)}
-        >
-          {#if !compact || entry.icon}
-            <span class="menu-icon" aria-hidden="true">
-              {#if entry.icon}
-                <svg viewBox="0 0 24 24"><path d={entry.icon} /></svg>
-              {/if}
-            </span>
-          {/if}
-          <span class="menu-label">{entry.label}</span>
-          {#if entry.hint}
-            <span class="menu-hint">{entry.hint}</span>
-          {/if}
-        </button>
-      {/if}
+        {/if}
+        <span class="menu-label">{entry.label}</span>
+        {#if entry.hint}
+          <span class="menu-hint">{entry.hint}</span>
+        {/if}
+      </button>
     {/each}
   {/each}
 </aside>
@@ -144,8 +110,8 @@
     border: 1px solid var(--edge);
     border-radius: var(--radius-lg);
     background: var(--panel);
-    box-shadow: 0 18px 44px rgb(0 0 0 / 55%);
-    animation: menu-in 130ms cubic-bezier(0.2, 0.7, 0.3, 1);
+    box-shadow: var(--shadow-menu);
+    animation: menu-in var(--enter) cubic-bezier(0.2, 0.7, 0.3, 1);
     transform-origin: top right;
   }
 
@@ -172,25 +138,18 @@
     margin-top: 3px;
     color: var(--quiet);
     font-size: var(--text-sm);
-    /* A path is read from its end — the folder it is in matters more than the drive it is on. */
-    direction: rtl;
-    text-align: left;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
 
   .menu-heading {
     padding: 9px 10px 5px;
-    color: var(--quiet);
-    font-size: var(--text-xs);
-    letter-spacing: 0.1em;
-    text-transform: uppercase;
+    color: var(--muted);
+    font-size: var(--text-sm);
+    font-weight: 600;
   }
 
-  /* One row shape for actions and for the number entry, so a leading icon never shifts the
-     column of labels next to it. */
-  button,
-  .menu-row {
+  button {
     display: flex;
     width: 100%;
     min-height: var(--control);
@@ -206,10 +165,10 @@
     gap: 10px;
   }
 
-  button { cursor: pointer; transition: background 110ms ease; }
+  button { cursor: pointer; transition: background var(--fast) ease; }
   button:hover:not(:disabled) { background: var(--wash); }
   button:focus-visible { outline: 2px solid var(--blueprint-light); outline-offset: -2px; }
-  button:disabled, .menu-row.disabled { color: var(--quiet); cursor: default; }
+  button:disabled { color: var(--quiet); cursor: default; }
 
   .menu-icon {
     display: grid;
@@ -246,25 +205,6 @@
   .destructive:hover:not(:disabled) { background: rgb(229 100 94 / 12%); }
   .destructive:hover:not(:disabled) .menu-icon svg { stroke: var(--oxide); }
 
-  .menu-row label { flex: 1; color: inherit; }
-
-  .menu-row input {
-    box-sizing: border-box;
-    width: 62px;
-    height: var(--control-dense);
-    padding: 0 8px;
-    border: 1px solid var(--edge);
-    border-radius: var(--radius);
-    background: var(--surround);
-    color: var(--text);
-    font: inherit;
-    font-size: var(--text-sm);
-    font-variant-numeric: tabular-nums;
-    text-align: center;
-  }
-
-  .menu-row input:focus-visible { border-color: var(--blueprint); outline: none; }
-
   /* Sized to its labels, with dense rows: it sits on the work, not in the window chrome. */
   .overflow-menu.compact {
     width: max-content;
@@ -272,7 +212,7 @@
     max-width: min(280px, calc(100vw - 28px));
     padding: 4px;
     border-radius: var(--radius);
-    box-shadow: 0 10px 28px rgb(0 0 0 / 45%);
+    box-shadow: var(--shadow-menu);
   }
 
   .compact button { min-height: var(--control-dense); padding: 0 8px; }

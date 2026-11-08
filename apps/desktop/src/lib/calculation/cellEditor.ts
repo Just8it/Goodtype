@@ -1,3 +1,4 @@
+import { extractFocus } from "../helper/editorEntry";
 import { basicSetup, EditorView } from "codemirror";
 import { EditorState, Prec } from "@codemirror/state";
 import { keymap } from "@codemirror/view";
@@ -113,6 +114,7 @@ export function createCellEditor(onChange: (key: string, source: string) => void
     return { destroy() { cancel?.(); if (view?.dom.parentElement === node) view.dom.remove(); } };
   }
   return {
+    focusSelection: () => view ? extractFocus(view.state) : null,
     select, reset, forget, release, mount, settleComposition,
     has: (key: string) => key === active || states.has(key),
     text: (key: string) => current(key)?.doc.toString(),
@@ -122,4 +124,4 @@ export function createCellEditor(onChange: (key: string, source: string) => void
     dispose() { view?.destroy(); view = undefined; active = ""; states.clear(); },
   };
 }
-export type CellEditor = ReturnType<typeof createCellEditor>;
+export type CellEditor = Omit<ReturnType<typeof createCellEditor>, "focusSelection"> & { focusSelection?: () => import("../helper/editorEntry").EditorFocus | null };

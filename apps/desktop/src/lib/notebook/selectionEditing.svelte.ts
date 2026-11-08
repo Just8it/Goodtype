@@ -1,3 +1,4 @@
+import { materialItems } from "../helper/crop";
 import type { createNavigation } from "./viewportNavigation.svelte";
 
 import { translate, notice, type UiText } from "../i18n";
@@ -31,6 +32,7 @@ import { type AppSettings } from "../settings";
 export type SelectionEnvironment = {
   activeInkLayerId: string;
   activeInkLayerPath: string;
+  readonly regionBounds?: import("../ink/selection").Bounds | null;
   readonly activePageId: string;
   activeSnapshot: NotebookSnapshot | null;
   readonly changeStrokes: (next: Stroke[], label: UiText, replaced?: ReadonlyMap<string, string[]>) => void;
@@ -83,6 +85,7 @@ export function createSelection(env: SelectionEnvironment) {
 
   function lassoItems(): LassoItem[] {
     return [
+      ...materialItems(env.activeSnapshot?.page.objects ?? []),
       ...env.shapes.map(shapeLassoItem),
       ...env.images.map(image => ({ id: image.id, kind: "images" as const, closed: true,
         outline: boxOutline(image.x, image.y, image.widthPt * image.scale, image.heightPt * image.scale, image.rotation) })),
@@ -241,7 +244,7 @@ export function createSelection(env: SelectionEnvironment) {
 
   function routeObjectPointer(event: PointerEvent) {
     // Explicit handles own contact, even with a brush or the Shape tool in hand.
-    if (event.target instanceof Element && event.target.closest(".shape-controls .control-hit, .mixed-selection, .typst-block .handle")) {
+    if (event.target instanceof Element && event.target.closest(".shape-controls .control-hit, .helper-crop, .helper-workspace, .mixed-selection, .typst-block .handle")) {
       directObjectInput = true;
       const role = pointerRole(event, env.tool, env.pointerMapping);
       if (event.type === "pointerdown" && (role === "erase" || role === "lasso" || role === "ignore" && event.pointerType === "pen")) {
@@ -322,7 +325,7 @@ export function createSelection(env: SelectionEnvironment) {
       ((event.pointerType === "pen" || env.navigation.fingerDraws(event)) && !keepsSelection(env.tool)) ||
       (event.target instanceof Element &&
         event.target.closest(
-          ".mixed-selection, .typst-block, .image-object, .shape-object, .selection-actions, .overflow-menu, .instrument-palette, .palette-editor, [data-preserve-selection]",
+          ".helper-crop, .helper-workspace, .mixed-selection, .typst-block, .image-object, .shape-object, .selection-actions, .overflow-menu, .instrument-palette, .palette-editor, [data-preserve-selection]",
         ))
     ) {
       return;
@@ -836,7 +839,7 @@ export function createSelection(env: SelectionEnvironment) {
         .querySelector<HTMLElement>(`.active-page [data-object-id="${CSS.escape(objectId)}"]`)
         ?.getBoundingClientRect() ?? null;
     } else {
-      const bounds = mixedSelectionBounds ?? selectionBounds(env.strokes, inkActionIds());
+      const bounds = env.regionBounds ?? mixedSelectionBounds ?? selectionBounds(env.strokes, inkActionIds());
       const frame = env.pageFrame?.getBoundingClientRect();
       if (bounds && frame) {
         const view = { pageOriginX: 0, pageOriginY: 0, zoom: env.zoom };

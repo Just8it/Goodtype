@@ -342,7 +342,7 @@
 <style>
   button { border: 0; }
   button:focus-visible { outline: 2px solid var(--blueprint-light); outline-offset: 2px; }
-  button:disabled { cursor: not-allowed; opacity: .32; }
+  button:disabled { cursor: not-allowed; opacity: var(--disabled); }
   .workspace-chrome {
     position: absolute;
     z-index: 15;
@@ -367,14 +367,14 @@
     border: 1px solid var(--edge);
     border-radius: var(--radius-lg);
     background: var(--panel);
-    box-shadow: 0 12px 30px rgb(0 0 0 / 45%);
+    box-shadow: var(--shadow-menu);
     gap: 0;
     cursor: grab;
     touch-action: none;
-    transition: border-color 120ms ease, box-shadow 120ms ease;
+    transition: border-color var(--fast) ease, box-shadow var(--fast) ease;
   }
   .history-pill:focus-visible { outline: 2px solid var(--blueprint-light); outline-offset: 2px; }
-  .history-pill.dragging { border-color: rgb(76 141 240 / 72%); cursor: grabbing; }
+  .history-pill.dragging { border-color: var(--blueprint); cursor: grabbing; }
   /* The gap between the buttons is the handle, so it has to be wide enough to be one. The dots
      only appear on approach, so the control reads as two buttons until it needs to read as more. */
   /* The pill travels the way the rail does: it becomes one touch-sized puck under the pointer,
@@ -388,8 +388,8 @@
     width: var(--control-touch);
     height: var(--control-touch);
     padding: 0;
-    border-color: rgb(76 141 240 / 72%);
-    box-shadow: 0 14px 34px rgb(0 0 0 / 62%);
+    border-color: var(--blueprint);
+    box-shadow: var(--shadow-modal);
     animation: palette-pickup 120ms cubic-bezier(0.16, 1, 0.3, 1);
     will-change: left, top;
   }
@@ -447,7 +447,7 @@
     background-size: 4px 6px;
     background-repeat: repeat-y;
     opacity: 0;
-    transition: opacity 120ms ease;
+    transition: opacity var(--fast) ease;
   }
   .history-pill:hover .grip,
   .history-pill:focus-visible .grip,
@@ -492,9 +492,9 @@
     border: 1px solid var(--edge);
     border-radius: var(--radius-lg);
     background: var(--panel);
-    box-shadow: 0 20px 50px rgb(0 0 0 / 52%);
+    box-shadow: var(--shadow-panel);
     touch-action: none;
-    transition: border-color 120ms ease, box-shadow 120ms ease;
+    transition: border-color var(--fast) ease, box-shadow var(--fast) ease;
   }
 
   /* Placement comes from `chromeLayout`, which is the only thing that sees every piece of chrome
@@ -521,7 +521,7 @@
     grid-row: 2;
     gap: 3px;
     opacity: 1;
-    transition: opacity 120ms ease;
+    transition: opacity var(--fast) ease;
   }
 
   .palette-grip {
@@ -556,10 +556,10 @@
     width: var(--control-touch);
     height: var(--control-touch);
     padding: 0;
-    border-color: rgb(76 141 240 / 72%);
+    border-color: var(--blueprint);
     grid-template: 1fr / 1fr;
     gap: 0;
-    box-shadow: 0 14px 34px rgb(0 0 0 / 62%);
+    box-shadow: var(--shadow-modal);
     animation: palette-pickup 120ms cubic-bezier(0.16, 1, 0.3, 1);
     will-change: left, top;
   }
@@ -614,7 +614,7 @@
   }
 
   .palette-grip:hover { background: var(--wash); }
-  .palette-grip:focus-visible { outline: 2px solid var(--blueprint); outline-offset: 1px; }
+  .palette-grip:focus-visible { outline: 2px solid var(--blueprint-light); outline-offset: 2px; }
 
   .palette-grip-dots {
     display: grid;
