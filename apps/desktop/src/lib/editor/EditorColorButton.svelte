@@ -69,10 +69,10 @@
   .color-control { display: inline-flex; flex: none; }
   .color-button { display: grid; place-items: center; width: var(--control-dense); height: var(--control-dense); padding: 0; border: 0; border-radius: var(--radius); background: transparent; color: var(--muted); cursor: pointer; }
   .color-button:hover, .color-button.active { background: var(--wash); color: var(--text); }
-  .color-button:focus-visible, select:focus-visible { outline: 2px solid var(--blueprint); outline-offset: 1px; }
+  .color-button:focus-visible, select:focus-visible { outline: 2px solid var(--blueprint-light); outline-offset: 2px; }
   svg { width: var(--icon-dense); height: var(--icon-dense); fill: none; stroke: currentColor; stroke-width: var(--stroke-dense); stroke-linecap: round; stroke-linejoin: round; }
   .colour-line { stroke-width: 3; }
-  .color-popout { position: fixed; z-index: 60; width: 272px; max-width: calc(100vw - 16px); max-height: calc(100vh - 16px); overflow-y: auto; border: 1px solid var(--edge); border-radius: var(--radius-lg); background: var(--panel); color: var(--text); box-shadow: 0 18px 44px rgb(0 0 0 / 55%); }
+  .color-popout { position: fixed; z-index: 60; width: 272px; max-width: calc(100vw - 16px); max-height: calc(100vh - 16px); overflow-y: auto; border: 1px solid var(--edge); border-radius: var(--radius-lg); background: var(--panel); color: var(--text); box-shadow: var(--shadow-panel); }
   .purpose { display: flex; align-items: center; gap: 6px; padding: 12px 12px 0; font-size: var(--text-md); }
   select { flex: 1; min-width: 0; height: var(--control-dense); padding: 0 6px; border: 1px solid var(--edge); border-radius: var(--radius); background: var(--surround); color: var(--text); font: inherit; }
   p { margin: 6px 12px 0; color: var(--muted); font-size: var(--text-sm); line-height: 1.4; }

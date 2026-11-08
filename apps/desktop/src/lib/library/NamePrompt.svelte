@@ -75,19 +75,19 @@
   input {
     box-sizing: border-box;
     width: 100%;
-    min-height: var(--control, 36px);
+    min-height: var(--control);
     padding: 9px 11px;
-    border: 1px solid var(--edge, rgb(255 255 255 / 12%));
-    border-radius: var(--radius, 6px);
+    border: 1px solid var(--edge);
+    border-radius: var(--radius);
     background: rgb(0 0 0 / 25%);
-    color: var(--text, #e9ebee);
+    color: var(--text);
     font: inherit;
-    font-size: var(--text-md, 13px);
+    font-size: var(--text-md);
   }
-  input:hover { border-color: rgb(255 255 255 / 20%); }
-  input:focus-visible { border-color: var(--blueprint-light, #7fb0f7); outline: 2px solid var(--blueprint-light, #7fb0f7); outline-offset: 1px; }
-  input[aria-invalid="true"] { border-color: var(--oxide, #e5645e); }
-  .name-problem { min-height: 1.2em; margin: 7px 2px 0; color: transparent; font-size: var(--text-sm, 11px); }
-  .name-problem.shown { color: var(--oxide, #e5645e); }
-  @media (pointer: coarse) { input { min-height: var(--control-touch, 44px); } }
+  input:hover { border-color: var(--edge-strong); }
+  input:focus-visible { border-color: var(--blueprint-light); outline: 2px solid var(--blueprint-light); outline-offset: 2px; }
+  input[aria-invalid="true"] { border-color: var(--oxide); }
+  .name-problem { min-height: 1.2em; margin: 7px 2px 0; color: transparent; font-size: var(--text-sm); }
+  .name-problem.shown { color: var(--oxide); }
+  @media (pointer: coarse) { input { min-height: var(--control-touch); } }
 </style>

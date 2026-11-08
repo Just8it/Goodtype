@@ -106,7 +106,7 @@
     /* No background of its own: the strip above is the lighter chrome, this row sits on the panel
        body, and the rule below separates it from the darker editor. */
     border-bottom: 1px solid var(--edge-soft);
-    color: var(--text, #e9ebee);
+    color: var(--text);
   }
 
   .tools {
@@ -125,8 +125,8 @@
     border: 0;
     border-radius: var(--radius);
     background: transparent;
-    color: var(--muted, #aeb5be);
-    font: var(--text-md)/1 var(--font-ui, Bahnschrift, system-ui, sans-serif);
+    color: var(--muted);
+    font: var(--text-md)/1 var(--font-ui);
   }
 
   .tools button {
@@ -139,7 +139,7 @@
 
   .tools button:hover {
     background: var(--wash);
-    color: var(--text, #e9ebee);
+    color: var(--text);
   }
 
   .tools button svg {
@@ -160,8 +160,8 @@
 
   .tools button:focus-visible,
   .menu-select:has(select:focus-visible) .face {
-    outline: 2px solid var(--blueprint, #4c8df0);
-    outline-offset: 1px;
+    outline: 2px solid var(--blueprint-light);
+    outline-offset: 2px;
   }
 
   /* The select carries the behaviour and the face carries the look, so the select sits invisibly
@@ -187,20 +187,20 @@
     align-items: center;
     padding: 0 8px;
     border-radius: var(--radius);
-    color: var(--muted, #aeb5be);
-    font: var(--text-md)/1 var(--font-ui, Bahnschrift, system-ui, sans-serif);
+    color: var(--muted);
+    font: var(--text-md)/1 var(--font-ui);
     gap: 4px;
   }
 
   .menu-select:hover .face {
     background: var(--wash);
-    color: var(--text, #e9ebee);
+    color: var(--text);
   }
 
   .insert .face {
     border: 1px solid var(--edge);
-    background: var(--surround, #1b1e24);
-    color: var(--text, #e9ebee);
+    background: var(--surround);
+    color: var(--text);
     font-size: var(--text-md);
     gap: 6px;
   }
@@ -219,13 +219,13 @@
   }
 
   .caret {
-    color: var(--quiet, #6a727c);
+    color: var(--quiet);
     font-size: var(--text-xs);
   }
 
   option {
-    background: var(--panel, #23272f);
-    color: var(--text, #e9ebee);
+    background: var(--panel);
+    color: var(--text);
   }
 
   .math {

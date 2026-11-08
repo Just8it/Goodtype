@@ -1,7 +1,7 @@
 <script lang="ts">
   import { t } from "../i18n";
   import { tick } from "svelte";
-  import type { PresetSummary } from "../page/presets";
+  import type { PresetDiagnostic, PresetSummary } from "../page/presets";
   import { DEFAULT_PRESET_PATH, presetPresentation, pagePresetOptions, pagePresetState } from "../page/presets";
 
   // The preset picker used to be a full-width <select> that printed the same list three times —
@@ -21,7 +21,15 @@
     onAction: (action: string) => void;
   } = $props();
 
-  type Entry = { action: string; name: string; hint: string };
+  /// `problem` marks a preset that cannot be used: short reason in the row, full producer text
+  /// on demand. `warning` keeps a usable preset's first warning visible in full.
+  type Entry = {
+    action: string;
+    name: string;
+    hint: string;
+    problem?: { reason: string; detail: string };
+    warning?: string;
+  };
 
   let open = $state(false);
   /// `page` retargets this page only; `notebook` moves the default every page inherits.
@@ -29,6 +37,8 @@
   let root = $state<HTMLElement>();
   let chip = $state<HTMLButtonElement>();
   let list = $state<HTMLElement>();
+  /// The broken entry whose full text is shown.
+  let expanded = $state<string | null>(null);
 
   const active = $derived(pagePresetState(source));
   const defaultPreset = $derived(presets.find((preset) => preset.kind === "default"));
@@ -54,6 +64,34 @@
     active.kind === "managed" && active.path ? `path:${active.path}` : active.kind === "none" ? "none" : "",
   );
 
+  function located(diagnostic: PresetDiagnostic): string {
+    const where = [diagnostic.file?.replace(/^\/styles\//, ""), diagnostic.line].filter(Boolean).join(":");
+    return where ? `${where} · ${diagnostic.message}` : diagnostic.message;
+  }
+
+  /// Problem and warning state for one listed preset, localized where Goodtype owns the words.
+  function status(preset: PresetSummary | undefined): Pick<Entry, "problem" | "warning"> {
+    if (!preset) return {};
+    if (preset.problem) {
+      const reason = $t(({
+        not_utf8: "editor.presetReasonNotUtf8",
+        too_large: "editor.presetReasonTooLarge",
+        unreadable: "editor.presetReasonUnreadable",
+        invalid: "editor.presetReasonInvalid",
+      } as const)[preset.problem.code]);
+      const error = preset.diagnostics?.find((d) => d.severity === "error");
+      return { problem: { reason, detail: error ? located(error) : preset.problem.detail } };
+    }
+    const warnings = (preset.diagnostics ?? []).filter((d) => d.severity === "warning");
+    if (!warnings.length) return {};
+    const first = located(warnings[0]);
+    return {
+      warning: warnings.length === 1
+        ? first
+        : $t("editor.presetWarningMore", { message: first, count: warnings.length - 1 }),
+    };
+  }
+
   const entries = $derived.by<Entry[]>(() =>
     scope === "notebook"
       ? [
@@ -66,12 +104,13 @@
         ]
       : [
           ...(defaultPreset
-            ? [{ action: `path:${DEFAULT_PRESET_PATH}`, name: defaultPreset.name, hint: $t("editor.theNotebookDefault") }]
+            ? [{ action: `path:${DEFAULT_PRESET_PATH}`, name: defaultPreset.name, hint: $t("editor.theNotebookDefault"), ...status(defaultPreset) }]
             : []),
           ...pagePresets.map((preset) => ({
             action: preset.importPath ? `path:${preset.importPath}` : `page:${preset.id}`,
             name: preset.name,
             hint: preset.description,
+            ...status(preset),
           })),
           ...(active.kind === "managed" && active.path
             ? [{ action: `edit:${active.path}`, name: $t("editor.editThisTemplate"), hint: $t("editor.changeItEveryPageUsingItFollows") }]
@@ -100,6 +139,7 @@
     open = !open;
     if (!open) return;
     scope = "page";
+    expanded = null;
     // Open on the preset that is in force, so the current answer is the one under the caret.
     void tick().then(() => {
       const nodes = [...(list?.querySelectorAll<HTMLButtonElement>(".entry") ?? [])];
@@ -107,9 +147,16 @@
     });
   }
 
-  function pick(action: string) {
+  function pick(entry: Entry) {
+    // An unusable preset is never applied; activating it shows why instead.
+    if (entry.problem) {
+      expanded = expanded === entry.action ? null : entry.action;
+      // Keep the disclosed text in view inside the scrolling list, without moving focus.
+      if (expanded) void tick().then(() => list?.querySelector(".detail")?.scrollIntoView({ block: "nearest" }));
+      return;
+    }
     close();
-    onAction(action);
+    onAction(entry.action);
   }
 
   function keys(event: KeyboardEvent) {
@@ -181,20 +228,44 @@
 
       <ul role="group" aria-label={$t("editor.presets")}>
         {#each entries as entry (entry.action)}
+          {@const detailId = `preset-detail-${entry.action.replace(/[^A-Za-z0-9_-]/g, "_")}`}
           <li role="none">
             <button
               type="button"
               class="entry menu-item"
+              class:unavailable={!!entry.problem}
               role="menuitemradio"
               aria-checked={checked(entry.action)}
-              onclick={() => pick(entry.action)}
+              aria-disabled={entry.problem ? "true" : undefined}
+              aria-expanded={entry.problem ? expanded === entry.action : undefined}
+              aria-controls={entry.problem && expanded === entry.action ? detailId : undefined}
+              aria-label={entry.problem
+                ? $t("editor.presetEntryInvalid", { name: entry.name, reason: entry.problem.reason })
+                : undefined}
+              onclick={() => pick(entry)}
             >
               <span class="tick" aria-hidden="true">{checked(entry.action) ? "✓" : ""}</span>
               <span class="text">
                 <span class="entry-name">{entry.name}</span>
-                {#if entry.hint}<span class="hint">{entry.hint}</span>{/if}
+                {#if entry.problem}
+                  <span class="note">
+                    <span class="mark error" aria-hidden="true"></span>
+                    <span>{$t("editor.presetUnavailable", { reason: entry.problem.reason })}</span>
+                    <span class="toggle">{expanded === entry.action ? $t("editor.presetHideDetails") : $t("editor.presetShowDetails")}</span>
+                  </span>
+                {:else if entry.warning}
+                  <span class="note">
+                    <span class="mark warning" aria-hidden="true"></span>
+                    <span>{$t("editor.presetWarning", { message: entry.warning })}</span>
+                  </span>
+                {:else if entry.hint}
+                  <span class="hint">{entry.hint}</span>
+                {/if}
               </span>
             </button>
+            {#if entry.problem && expanded === entry.action}
+              <p class="detail" id={detailId}>{entry.problem.detail}</p>
+            {/if}
           </li>
         {/each}
       </ul>
@@ -226,25 +297,25 @@
     border: 0;
     border-radius: var(--radius);
     background: transparent;
-    color: var(--muted, #aeb5be);
-    font: var(--text-md)/1 var(--font-ui, Bahnschrift, system-ui, sans-serif);
+    color: var(--muted);
+    font: var(--text-md)/1 var(--font-ui);
     cursor: pointer;
     gap: 7px;
   }
 
   .chip:hover:not(:disabled) {
     background: var(--wash);
-    color: var(--text, #e9ebee);
+    color: var(--text);
   }
 
   .chip:focus-visible {
-    outline: 2px solid var(--blueprint, #4c8df0);
-    outline-offset: 1px;
+    outline: 2px solid var(--blueprint-light);
+    outline-offset: 2px;
   }
 
   .chip:disabled {
-    cursor: default;
-    opacity: 0.55;
+    cursor: not-allowed;
+    opacity: var(--disabled);
   }
 
   .name {
@@ -258,20 +329,20 @@
     height: 6px;
     flex: none;
     border-radius: 2px;
-    background: var(--blueprint, #4c8df0);
+    background: var(--blueprint);
   }
 
   .dot.custom {
-    background: var(--amber, #e0912b);
+    background: var(--amber);
   }
 
   .dot.off {
-    background: var(--quiet, #6a727c);
+    background: var(--quiet);
   }
 
   .caret {
     flex: none;
-    color: var(--quiet, #6a727c);
+    color: var(--quiet);
     font-size: var(--text-xs);
   }
 
@@ -283,11 +354,11 @@
     width: 264px;
     max-width: calc(100vw - 24px);
     padding: 6px;
-    border: 1px solid rgb(255 255 255 / 14%);
+    border: 1px solid var(--edge);
     border-radius: var(--radius-lg);
-    background: var(--panel, #23272f);
-    box-shadow: 0 14px 34px rgb(0 0 0 / 55%);
-    color: var(--text, #e9ebee);
+    background: var(--panel);
+    box-shadow: var(--shadow-menu);
+    color: var(--text);
   }
 
   .scope {
@@ -304,18 +375,18 @@
     border: 0;
     border-radius: var(--radius);
     background: transparent;
-    color: var(--muted, #aeb5be);
-    font: var(--text-sm)/1 var(--font-ui, Bahnschrift, system-ui, sans-serif);
+    color: var(--muted);
+    font: var(--text-sm)/1 var(--font-ui);
     cursor: pointer;
   }
 
   .scope button[aria-checked="true"] {
     background: var(--edge);
-    color: var(--text, #e9ebee);
+    color: var(--text);
   }
 
   .menu-item:focus-visible {
-    outline: 2px solid var(--blueprint, #4c8df0);
+    outline: 2px solid var(--blueprint-light);
     outline-offset: -1px;
   }
 
@@ -340,7 +411,7 @@
     border-radius: var(--radius);
     background: transparent;
     color: inherit;
-    font: var(--text-md)/1.35 var(--font-ui, Bahnschrift, system-ui, sans-serif);
+    font: var(--text-md)/1.35 var(--font-ui);
     text-align: left;
     cursor: pointer;
     gap: 6px;
@@ -353,7 +424,7 @@
   .tick {
     width: 13px;
     flex: none;
-    color: var(--blueprint-light, #7fb0f7);
+    color: var(--blueprint-light);
   }
 
   .text {
@@ -365,15 +436,72 @@
 
   .hint {
     overflow: hidden;
-    color: var(--quiet, #6a727c);
+    color: var(--quiet);
     font-size: var(--text-sm);
     text-overflow: ellipsis;
     white-space: nowrap;
   }
 
+  /* A problem or warning is essential information, so it reads in muted rather than quiet. */
+  .note {
+    display: flex;
+    min-width: 0;
+    align-items: baseline;
+    color: var(--muted);
+    font-size: var(--text-sm);
+    line-height: 1.35;
+    overflow-wrap: anywhere;
+    gap: 6px;
+  }
+
+  /* The chip's square status dot, reused: amber for a warning, oxide for an unusable preset. */
+  .mark {
+    width: 6px;
+    height: 6px;
+    flex: none;
+    align-self: flex-start;
+    margin-top: calc(0.675em - 3px);
+    border-radius: 2px;
+  }
+
+  .mark.warning {
+    background: var(--amber);
+  }
+
+  .mark.error {
+    background: var(--oxide);
+  }
+
+  .toggle {
+    margin-left: auto;
+    flex: none;
+    color: var(--blueprint-light);
+    white-space: nowrap;
+  }
+
+  .entry.unavailable {
+    cursor: default;
+  }
+
+  .entry.unavailable .entry-name {
+    color: var(--muted);
+  }
+
+  .detail {
+    max-height: 7.5rem;
+    margin: 0 4px 4px 23px;
+    padding: 6px 8px;
+    border-top: 1px solid var(--edge-soft);
+    color: var(--muted);
+    font: var(--text-sm)/1.45 var(--font-code);
+    overflow-wrap: anywhere;
+    overflow-y: auto;
+    user-select: text;
+  }
+
   .footnote {
     margin: 6px 2px 2px;
-    color: var(--quiet, #6a727c);
+    color: var(--quiet);
     font-size: var(--text-sm);
     line-height: 1.4;
   }

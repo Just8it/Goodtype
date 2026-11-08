@@ -122,21 +122,21 @@
 
 <style>
   .fields { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 14px; }
-  label, fieldset { display: grid; gap: 6px; min-width: 0; margin: 0; padding: 0; border: 0; color: var(--muted, #aeb5be); font-size: var(--text-sm, 11px); }
+  label, fieldset { display: grid; gap: 6px; min-width: 0; margin: 0; padding: 0; border: 0; color: var(--muted); font-size: var(--text-sm); }
   .wide { grid-column: 1 / -1; }
-  input, select { box-sizing: border-box; width: 100%; height: var(--control, 36px); padding: 0 10px; border: 1px solid var(--edge, rgb(255 255 255 / 12%)); border-radius: var(--radius, 6px); background-color: rgb(0 0 0 / 25%); color: var(--text, #e9ebee); font: var(--text-md, 13px) var(--font-ui, Bahnschrift, system-ui, sans-serif); }
+  input, select { box-sizing: border-box; width: 100%; height: var(--control); padding: 0 10px; border: 1px solid var(--edge); border-radius: var(--radius); background-color: rgb(0 0 0 / 25%); color: var(--text); font: var(--text-md) var(--font-ui); }
   select { padding-right: 34px; appearance: none; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%23aeb5be' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m7 9.5 5 5 5-5'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 10px center; }
-  option { background: var(--panel, #23272f); }
-  input:focus-visible, select:focus-visible, button:focus-visible { outline: 2px solid var(--blueprint-light, #7fb0f7); outline-offset: 1px; }
-  input:hover, select:hover { border-color: rgb(255 255 255 / 20%); }
-  input[aria-invalid="true"] { border-color: var(--oxide, #e5645e); }
-  small { min-height: 1.2em; color: var(--quiet, #6a727c); }
-  small.error, .failure { color: var(--oxide, #e5645e); }
-  .segmented { display: flex; height: var(--control, 36px); padding: 3px; border: 1px solid var(--edge, rgb(255 255 255 / 12%)); border-radius: var(--radius, 6px); background: rgb(0 0 0 / 25%); gap: 3px; }
-  .segmented button { flex: 1; border: 0; border-radius: var(--radius, 6px); background: transparent; color: var(--muted, #aeb5be); cursor: pointer; }
-  .segmented button:hover { background: var(--wash, rgb(255 255 255 / 8%)); color: var(--text, #e9ebee); }
-  .segmented button.active { background: rgb(76 141 240 / 16%); box-shadow: inset 0 0 0 1px rgb(76 141 240 / 52%); color: var(--text, #e9ebee); }
-  .failure { margin: 12px 0 0; font-size: var(--text-sm, 11px); }
+  option { background: var(--panel); }
+  input:focus-visible, select:focus-visible, button:focus-visible { outline: 2px solid var(--blueprint-light); outline-offset: 2px; }
+  input:hover, select:hover { border-color: var(--edge-strong); }
+  input[aria-invalid="true"] { border-color: var(--oxide); }
+  small { min-height: 1.2em; color: var(--quiet); }
+  small.error, .failure { color: var(--oxide); }
+  .segmented { display: flex; height: var(--control); padding: 3px; border: 1px solid var(--edge); border-radius: var(--radius); background: rgb(0 0 0 / 25%); gap: 3px; }
+  .segmented button { flex: 1; border: 0; border-radius: var(--radius); background: transparent; color: var(--muted); cursor: pointer; }
+  .segmented button:hover { background: var(--wash); color: var(--text); }
+  .segmented button.active { background: var(--accent-fill); box-shadow: inset 0 0 0 1px var(--accent-edge); color: var(--text); }
+  .failure { margin: 12px 0 0; font-size: var(--text-sm); }
   @media (max-width: 520px) { .fields { grid-template-columns: 1fr; } .wide { grid-column: auto; } }
-  @media (pointer: coarse) { input, select, .segmented { min-height: var(--control-touch, 44px); } }
+  @media (pointer: coarse) { input, select, .segmented { min-height: var(--control-touch); } }
 </style>
