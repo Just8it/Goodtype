@@ -59,10 +59,10 @@
 <style>
   ul { max-height: min(50vh, 400px); margin: 0; padding: 0; overflow: auto; list-style: none; }
   /* Rows divided by a soft rule rather than boxed: cards inside a panel read as clutter. */
-  li { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 0; border-top: 1px solid var(--edge-soft, rgb(255 255 255 / 7%)); }
+  li { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 0; border-top: 1px solid var(--edge-soft); }
   li:first-child { border-top: 0; padding-top: 0; }
   .summary { display: grid; gap: 2px; min-width: 0; overflow-wrap: anywhere; }
-  .summary span { color: var(--muted, #aeb5be); font-size: var(--text-sm, 11px); }
-  .summary .problem { color: #f0aaa6; }
+  .summary span { color: var(--muted); font-size: var(--text-sm); }
+  .summary .problem { color: var(--oxide-text); }
   .actions { flex: none; }
 </style>

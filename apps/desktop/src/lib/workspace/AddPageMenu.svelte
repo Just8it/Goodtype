@@ -471,7 +471,7 @@
 </div>
 
 <style>
-  .muted { opacity: .45; }
+  .muted { opacity: var(--disabled); }
   .calculation-preview { box-sizing: border-box; padding: 18%; width: 100%; }
   .code-line { display: block; width: 85%; height: 4px; background: #8d9da8; margin-bottom: 7px; }
   .code-line.short { width: 55%; }
@@ -491,12 +491,12 @@
     border: 1px solid var(--edge);
     border-radius: var(--radius-lg);
     background: var(--surround);
-    box-shadow: 0 30px 70px rgb(0 0 0 / 55%);
+    box-shadow: var(--shadow-modal);
     overflow: hidden;
     /* The centring translate lives in the keyframes too, or the animation would drop it and the
        panel would fly in from the corner it is no longer anchored to. */
     transform: translate(-50%, -50%);
-    animation: panel-in 150ms cubic-bezier(0.2, 0.7, 0.3, 1);
+    animation: panel-in var(--enter) cubic-bezier(0.2, 0.7, 0.3, 1);
   }
 
   @keyframes panel-in {
@@ -522,7 +522,7 @@
     margin-top: 3px;
     color: var(--muted);
     font-size: var(--text-sm);
-    animation: said 180ms ease-out;
+    animation: said var(--enter) ease-out;
   }
 
   @keyframes said {
@@ -542,10 +542,9 @@
 
   .run-label {
     padding: 0 4px;
-    color: var(--quiet);
-    font-size: var(--text-xs);
-    letter-spacing: 0.1em;
-    text-transform: uppercase;
+    color: var(--muted);
+    font-size: var(--text-sm);
+    font-weight: 600;
   }
 
   .run button {
@@ -553,16 +552,16 @@
     height: 24px;
     border: 0;
     border-radius: var(--radius);
-    background: rgb(255 255 255 / 7%);
+    background: var(--wash);
     color: var(--text);
     font: inherit;
     font-size: var(--text-md);
     cursor: pointer;
-    transition: background 120ms ease;
+    transition: background var(--fast) ease;
   }
 
-  .run button:hover:enabled { background: var(--wash); }
-  .run button:disabled { opacity: 0.35; cursor: default; }
+  .run button:hover:enabled { background: var(--wash-strong); }
+  .run button:disabled { opacity: var(--disabled); cursor: default; }
 
   .run output {
     min-width: 20px;
@@ -619,18 +618,16 @@
   section { display: flex; flex-direction: column; gap: 8px; }
 
   .eyebrow {
-    color: var(--quiet);
-    font-size: var(--text-xs);
-    letter-spacing: 0.14em;
-    text-transform: uppercase;
+    color: var(--muted);
+    font-size: var(--text-sm);
+    font-weight: 600;
   }
 
   .eyebrow.spread { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
 
   .readout {
     font-variant-numeric: tabular-nums;
-    letter-spacing: 0;
-    text-transform: none;
+    font-weight: 400;
   }
 
   .row { display: flex; gap: 6px; }
@@ -651,15 +648,15 @@
     font-size: var(--text-sm);
     cursor: pointer;
     gap: 7px;
-    transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+    transition: background var(--fast) ease, border-color var(--fast) ease, color var(--fast) ease;
   }
 
   .chip:hover:enabled { background: var(--wash); color: var(--text); }
-  .chip:disabled { opacity: 0.4; cursor: default; }
+  .chip:disabled { opacity: var(--disabled); cursor: default; }
 
   .chip.on {
-    border-color: rgb(76 141 240 / 60%);
-    background: rgb(76 141 240 / 16%);
+    border-color: var(--accent-edge);
+    background: var(--accent-fill);
     color: var(--text);
   }
 
@@ -670,7 +667,7 @@
     border: 1px solid currentColor;
     border-radius: 1px;
     opacity: 0.8;
-    transition: width 140ms ease, height 140ms ease;
+    transition: width var(--fast) ease, height var(--fast) ease;
   }
 
   .page-mark.landscape { width: 12px; height: 9px; }
@@ -680,7 +677,7 @@
     height: 16px;
     flex: none;
     border-radius: 3px;
-    box-shadow: inset 0 0 0 1px rgb(255 255 255 / 22%);
+    box-shadow: inset 0 0 0 1px var(--edge-strong);
   }
 
   /* Column B. */
@@ -716,14 +713,14 @@
     font-size: var(--text-sm);
     cursor: pointer;
     gap: 6px;
-    transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+    transition: background var(--fast) ease, border-color var(--fast) ease, color var(--fast) ease;
   }
 
   .pill:hover { background: var(--wash); color: var(--text); }
 
   .pill.on {
-    border-color: rgb(76 141 240 / 60%);
-    background: rgb(76 141 240 / 16%);
+    border-color: var(--accent-edge);
+    background: var(--accent-fill);
     color: var(--text);
   }
 
@@ -737,24 +734,24 @@
     min-width: 0;
     align-items: center;
     padding: 7px 10px;
-    border: 1px dashed rgb(255 255 255 / 18%);
+    border: 1px dashed var(--edge-strong);
     border-radius: var(--radius);
-    background: rgb(255 255 255 / 2%);
+    background: var(--fill-soft);
     color: var(--text);
     font: inherit;
     text-align: left;
     cursor: pointer;
     gap: 10px;
-    transition: background 120ms ease, border-color 120ms ease;
+    transition: background var(--fast) ease, border-color var(--fast) ease;
   }
 
-  .import:hover:enabled { border-color: rgb(255 255 255 / 32%); }
-  .import:disabled { opacity: 0.45; cursor: default; }
+  .import:hover:enabled { border-color: var(--quiet); }
+  .import:disabled { opacity: var(--disabled); cursor: default; }
 
   .import.on {
     border-color: var(--blueprint);
     border-style: solid;
-    background: rgb(76 141 240 / 9%);
+    background: var(--accent-tint);
   }
 
   .sheet {
@@ -768,7 +765,6 @@
     padding-bottom: 4px;
     border-radius: 3px;
     background: var(--paper);
-    box-shadow: 0 1px 3px rgb(0 0 0 / 40%);
   }
 
   .sheet :global(svg) { display: block; width: 100%; height: 100%; }
@@ -776,11 +772,10 @@
   .badge {
     padding: 1px 3px;
     border-radius: 2px;
-    background: var(--oxide);
-    color: #fff;
-    font-size: 8.5px;
-    font-weight: 700;
-    letter-spacing: 0.04em;
+    background: var(--charcoal);
+    color: var(--text);
+    font-size: var(--text-xs);
+    font-weight: 600;
   }
 
   .badge.big { padding: 3px 7px; font-size: var(--text-sm); }
@@ -796,7 +791,7 @@
     flex: 1;
     padding: 14px 16px 18px;
     overflow-y: auto;
-    transition: opacity 160ms ease;
+    transition: opacity var(--fast) ease;
   }
 
   .papers.muted { opacity: 0.4; }
@@ -824,15 +819,15 @@
     text-align: left;
     cursor: pointer;
     gap: 7px;
-    transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+    transition: background var(--fast) ease, border-color var(--fast) ease, color var(--fast) ease;
   }
 
-  .card:hover:enabled { border-color: rgb(255 255 255 / 30%); color: var(--text); }
-  .card:disabled { opacity: 0.45; cursor: default; }
+  .card:hover:enabled { border-color: var(--edge-strong); color: var(--text); }
+  .card:disabled { opacity: var(--disabled); cursor: default; }
 
   .card.on {
     border-color: var(--blueprint);
-    background: rgb(76 141 240 / 14%);
+    background: var(--accent-fill);
     color: var(--text);
   }
 
@@ -843,10 +838,8 @@
     background: var(--paper);
     box-shadow: inset 0 0 0 1px rgb(0 0 0 / 30%);
     overflow: hidden;
-    transition: transform 120ms ease;
   }
 
-  .card:hover:enabled .thumb { transform: scale(1.03); }
   .thumb :global(svg) { display: block; width: 100%; height: 100%; }
 
   .name {
@@ -885,7 +878,7 @@
     width: auto;
     height: min(var(--stage-h), calc(var(--stage-w) / var(--ratio)));
     background: var(--paper);
-    box-shadow: 0 2px 6px rgb(0 0 0 / 35%), 0 22px 46px rgb(0 0 0 / 45%);
+    box-shadow: var(--shadow-page);
   }
 
   .sheet-preview :global(svg) { display: block; width: 100%; height: 100%; }
@@ -908,10 +901,8 @@
 
   .summary dt {
     flex: none;
-    color: var(--quiet);
-    font-size: var(--text-xs);
-    letter-spacing: 0.1em;
-    text-transform: uppercase;
+    color: var(--muted);
+    font-size: var(--text-sm);
   }
 
   .summary dd {
@@ -927,21 +918,20 @@
   .commit { display: flex; flex: none; flex-direction: column; gap: 8px; }
 
   .add {
-    height: 42px;
+    height: var(--control);
     border: 0;
     border-radius: var(--radius);
     background: var(--blueprint);
-    color: #12151a;
+    color: var(--on-accent);
     font: inherit;
     font-size: var(--text-md);
-    font-weight: 700;
+    font-weight: 600;
     cursor: pointer;
-    box-shadow: 0 6px 18px rgb(0 0 0 / 40%);
-    transition: filter 120ms ease;
+    transition: background var(--fast) ease;
   }
 
-  .add:hover:enabled { filter: brightness(1.08); }
-  .add:disabled { opacity: 0.45; cursor: default; box-shadow: none; }
+  .add:hover:enabled { background: var(--blueprint-hover); }
+  .add:disabled { opacity: var(--disabled); cursor: not-allowed; }
 
   .note { color: var(--quiet); font-size: var(--text-xs); text-align: center; }
 
@@ -967,7 +957,7 @@
 
   button:focus-visible {
     outline: 2px solid var(--blueprint-light);
-    outline-offset: 1px;
+    outline-offset: 2px;
   }
 
   /* A narrower window tightens the two fixed columns and drops the library to three across
