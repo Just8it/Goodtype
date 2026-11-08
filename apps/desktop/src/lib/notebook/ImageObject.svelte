@@ -238,7 +238,7 @@
 
   .move-surface:focus-visible,
   .scale-handle:focus-visible {
-    outline: 2px solid #4c8df0;
+    outline: 2px solid var(--blueprint);
     outline-offset: 2px;
   }
 

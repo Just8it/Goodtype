@@ -316,7 +316,7 @@
     border: 1px solid var(--edge);
     border-radius: var(--radius-lg);
     background: var(--panel);
-    box-shadow: 0 22px 54px rgb(0 0 0 / 58%);
+    box-shadow: var(--shadow-panel);
     color: var(--text);
     font-size: var(--text-md);
   }
@@ -336,9 +336,9 @@
   .original polyline { fill: none; stroke: #1d2430; stroke-linecap: round; stroke-linejoin: round; }
 
   .kinds { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
-  .kinds button { display: flex; min-height: var(--control-touch); align-items: center; padding: 0 10px; border: 1px solid var(--edge); border-radius: var(--radius); background: transparent; color: var(--muted); cursor: pointer; gap: 8px; font-size: var(--text-md); transition: background 140ms ease, border-color 140ms ease, color 140ms ease; }
+  .kinds button { display: flex; min-height: var(--control-touch); align-items: center; padding: 0 10px; border: 1px solid var(--edge); border-radius: var(--radius); background: transparent; color: var(--muted); cursor: pointer; gap: 8px; font-size: var(--text-md); transition: background var(--fast) ease, border-color var(--fast) ease, color var(--fast) ease; }
   .kinds button:hover:not(:disabled) { background: var(--wash); color: var(--text); }
-  .kinds button.current { border-color: var(--blueprint); background: rgb(76 141 240 / 14%); color: var(--text); }
+  .kinds button.current { border-color: var(--accent-edge); background: var(--accent-fill); color: var(--text); }
   .kinds svg { width: var(--icon); height: var(--icon); flex: none; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: var(--stroke); }
 
   /* The Settings select: dark-scheme so the native list matches the panel, its own chevron. */
@@ -351,7 +351,7 @@
   .result { display: flex; flex-direction: column; gap: 7px; }
   textarea { width: 100%; padding: 7px 9px; border: 1px solid var(--edge-soft); border-radius: var(--radius); background: rgb(0 0 0 / 22%); color: var(--text); font: inherit; font-size: var(--text-md); line-height: 1.45; resize: vertical; caret-color: var(--blueprint-light); }
   textarea.code { font-family: "Cascadia Mono", Consolas, monospace; }
-  textarea::selection, .latex code::selection { background: rgb(76 141 240 / 35%); }
+  textarea::selection, .latex code::selection { background: var(--accent-select); }
 
   .message, .hint, .lead { margin: 0; font-size: var(--text-sm); line-height: 1.45; }
   .message { color: var(--muted); }
@@ -366,7 +366,7 @@
   .row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
   .figure { color: var(--muted); font-size: var(--text-sm); font-variant-numeric: tabular-nums; }
 
-  .progress { position: relative; height: 6px; overflow: hidden; border-radius: 3px; background: rgb(255 255 255 / 8%); }
+  .progress { position: relative; height: 6px; overflow: hidden; border-radius: 3px; background: var(--wash); }
   /* Scaled, not resized: the bar updates while the writer may be drawing, and a transform never
      makes the page lay out again. */
   .progress span { position: absolute; inset: 0; border-radius: inherit; background: var(--blueprint); transform: scaleX(0); transform-origin: left; transition: transform 200ms ease-out; }
@@ -384,14 +384,14 @@
   footer { display: flex; flex: none; justify-content: flex-end; padding: 10px 12px; border-top: 1px solid var(--edge-soft); gap: 8px; }
 
   .control, .primary { display: inline-flex; min-height: var(--control); align-items: center; justify-content: center; padding: 0 12px; border: 0; border-radius: var(--radius); font: inherit; font-size: var(--text-md); white-space: nowrap; cursor: pointer; touch-action: manipulation; }
-  .control { background: rgb(255 255 255 / 5%); color: var(--text); }
-  .control:hover:not(:disabled) { background: var(--wash); }
-  .primary { background: var(--blueprint); color: #0e1b31; font-weight: 600; }
-  .primary:hover:not(:disabled) { box-shadow: inset 0 0 0 1px rgb(255 255 255 / 20%); }
+  .control { background: var(--wash); color: var(--text); }
+  .control:hover:not(:disabled) { background: var(--wash-strong); }
+  .primary { background: var(--blueprint); color: var(--on-accent); font-weight: 600; }
+  .primary:hover:not(:disabled) { box-shadow: inset 0 0 0 1px var(--edge-strong); }
   .primary.wide { width: 100%; }
 
-  button:disabled { cursor: not-allowed; opacity: 0.32; }
-  button:focus-visible, select:focus-visible, textarea:focus-visible, summary:focus-visible { outline: 2px solid var(--blueprint-light); outline-offset: 1px; }
+  button:disabled { cursor: not-allowed; opacity: var(--disabled); }
+  button:focus-visible, select:focus-visible, textarea:focus-visible, summary:focus-visible { outline: 2px solid var(--blueprint-light); outline-offset: 2px; }
 
   @media (pointer: coarse) {
     .control, .primary { min-height: var(--control-touch); }

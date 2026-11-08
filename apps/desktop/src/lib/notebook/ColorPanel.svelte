@@ -304,8 +304,8 @@
     padding: 11px;
     border: 1px solid var(--edge);
     border-radius: var(--radius-lg);
-    background: #23272f;
-    box-shadow: 0 18px 44px rgb(0 0 0 / 55%);
+    background: var(--panel);
+    box-shadow: var(--shadow-panel);
   }
 
   .color-panel.embedded {
@@ -376,13 +376,13 @@
     width: 100%;
     height: 20px;
     padding: 0;
-    border: 1px solid rgb(255 255 255 / 14%);
+    border: 1px solid var(--edge);
     border-radius: var(--radius);
     cursor: pointer;
   }
 
   .chip.current {
-    outline: 1.5px solid #4c8df0;
+    outline: 1.5px solid var(--blueprint);
     outline-offset: 1.5px;
   }
 
@@ -390,8 +390,8 @@
   .apply:focus-visible,
   .remove:focus-visible,
   input:focus-visible {
-    outline: 2px solid #7fb0f7;
-    outline-offset: 1px;
+    outline: 2px solid var(--blueprint-light);
+    outline-offset: 2px;
   }
 
   .hex-row {
@@ -404,7 +404,7 @@
     width: 22px;
     height: 22px;
     flex: none;
-    border: 1px solid rgb(255 255 255 / 16%);
+    border: 1px solid var(--edge);
     border-radius: var(--radius);
   }
 
@@ -414,8 +414,8 @@
     padding: 4px 6px;
     border: 1px solid var(--edge);
     border-radius: var(--radius);
-    background: #16181d;
-    color: #e9ebee;
+    background: var(--charcoal);
+    color: var(--text);
     font: 11px/1.4 "Cascadia Mono", Consolas, monospace;
   }
 
@@ -424,8 +424,8 @@
     padding: 4px 8px;
     border: 1px solid var(--edge);
     border-radius: var(--radius);
-    background: #1b1e24;
-    color: #e9ebee;
+    background: var(--surround);
+    color: var(--text);
     font-size: var(--text-sm);
     cursor: pointer;
   }
@@ -437,6 +437,6 @@
 
   .remove {
     margin-top: 2px;
-    color: #e5645e;
+    color: var(--oxide);
   }
 </style>

@@ -225,7 +225,7 @@
     border: 1px solid var(--edge);
     border-radius: var(--radius-lg);
     background: var(--panel);
-    box-shadow: 0 22px 54px rgb(0 0 0 / 58%);
+    box-shadow: var(--shadow-panel);
     color: var(--text);
   }
 
@@ -251,34 +251,34 @@
   .preview span { position: absolute; right: 8px; bottom: 5px; font-size: 10px; }
 
   .shape-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
-  .shape-grid button { display: flex; min-height: var(--control-touch); align-items: center; padding: 0 10px; border: 1px solid var(--edge); border-radius: var(--radius); background: transparent; color: var(--muted); cursor: pointer; gap: 8px; transition: background 140ms ease, border-color 140ms ease, color 140ms ease; }
+  .shape-grid button { display: flex; min-height: var(--control-touch); align-items: center; padding: 0 10px; border: 1px solid var(--edge); border-radius: var(--radius); background: transparent; color: var(--muted); cursor: pointer; gap: 8px; transition: background var(--fast) ease, border-color var(--fast) ease, color var(--fast) ease; }
   .shape-grid button:hover { background: var(--wash); color: var(--text); }
-  .shape-grid button.current { border-color: var(--blueprint); background: rgb(76 141 240 / 14%); color: var(--text); }
+  .shape-grid button.current { border-color: var(--accent-edge); background: var(--accent-fill); color: var(--text); }
   .shape-grid svg { width: var(--icon); height: var(--icon); flex: none; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: var(--stroke); }
   .shape-grid svg circle { fill: currentColor; stroke: none; }
   .shape-grid button span { font-size: var(--text-md); }
   .pattern-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
   .pattern-grid button { display: grid; min-height: var(--control-touch); place-items: center; padding: 6px 4px; border: 1px solid var(--edge); border-radius: var(--radius); background: transparent; color: var(--muted); cursor: pointer; gap: 2px; font: inherit; font-size: var(--text-sm); }
   .pattern-grid button:hover { background: var(--wash); color: var(--text); }
-  .pattern-grid button.current { border-color: var(--blueprint); background: rgb(76 141 240 / 14%); color: var(--text); }
-  .pattern-grid button:focus-visible { outline: 2px solid var(--blueprint-light); outline-offset: 1px; }
+  .pattern-grid button.current { border-color: var(--accent-edge); background: var(--accent-fill); color: var(--text); }
+  .pattern-grid button:focus-visible { outline: 2px solid var(--blueprint-light); outline-offset: 2px; }
   .spacing { margin-top: 8px; }
   .pattern-grid svg { width: 100%; height: 12px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
 
   .divider { height: 1px; background: var(--edge-soft); }
   .rows { gap: 2px; }
   .row { display: flex; min-height: var(--control-touch); align-items: center; justify-content: space-between; gap: 10px; }
-  .row.disabled { opacity: 0.45; }
+  .row.disabled { opacity: var(--disabled); }
   .row-name { display: flex; min-width: 0; flex-direction: column; font-size: var(--text-md); gap: 2px; }
   .row-name span { color: var(--quiet); font-size: var(--text-sm); }
-  .toggle { position: relative; width: 34px; height: 20px; flex: none; padding: 0; border: 0; border-radius: var(--radius-pill); background: rgb(255 255 255 / 14%); cursor: pointer; }
-  .toggle span { position: absolute; top: 3px; left: 3px; width: 14px; height: 14px; border-radius: 50%; background: var(--muted); transition: transform 120ms ease, background 120ms ease; }
+  .toggle { position: relative; width: 34px; height: 20px; flex: none; padding: 0; border: 0; border-radius: var(--radius-pill); background: var(--track); cursor: pointer; }
+  .toggle span { position: absolute; top: 3px; left: 3px; width: 14px; height: 14px; border-radius: 50%; background: var(--muted); transition: transform var(--fast) ease, background var(--fast) ease; }
   .toggle.on { background: var(--blueprint); }
-  .toggle.on span { background: #fff; transform: translateX(14px); }
+  .toggle.on span { background: var(--text); transform: translateX(14px); }
 
   .chrome:focus-visible,
   .shape-grid button:focus-visible,
-  .toggle:focus-visible { outline: 2px solid var(--blueprint-light); outline-offset: 1px; }
+  .toggle:focus-visible { outline: 2px solid var(--blueprint-light); outline-offset: 2px; }
 
   @media (prefers-reduced-motion: reduce) {
     .shape-grid button, .toggle span { transition: none; }

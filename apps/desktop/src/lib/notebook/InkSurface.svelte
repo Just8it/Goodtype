@@ -1135,7 +1135,7 @@
   }
 
   .ink-surface:focus-visible {
-    outline: 2px solid #206acb;
+    outline: 2px solid var(--paper-select);
     outline-offset: 2px;
   }
 
@@ -1166,8 +1166,8 @@
   }
 
   .selection-overlay {
-    fill: var(--paper, #fcfcfa);
-    stroke: var(--blueprint, #4c8df0);
+    fill: var(--paper);
+    stroke: var(--blueprint);
     pointer-events: none;
   }
 
@@ -1186,12 +1186,12 @@
   }
 
   .eraser-cursor.pressed .eraser-cursor-halo {
-    fill: rgb(76 141 240 / 12%);
+    fill: var(--accent-tint);
     stroke: rgb(255 255 255 / 90%);
   }
 
   .eraser-cursor.pressed .eraser-cursor-ring {
-    stroke: #206acb;
+    stroke: var(--paper-select);
   }
 
   .status {

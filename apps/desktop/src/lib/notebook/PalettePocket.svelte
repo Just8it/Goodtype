@@ -267,10 +267,10 @@
   }
 
   button:hover { background: var(--wash); }
-  button:focus-visible { outline: 2px solid var(--blueprint); outline-offset: 1px; }
+  button:focus-visible { outline: 2px solid var(--blueprint-light); outline-offset: 2px; }
 
   .widths button.current, .erasers button.current {
-    background: rgb(76 141 240 / 18%);
+    background: var(--accent-fill);
     outline: 1px solid var(--blueprint);
   }
 
@@ -283,7 +283,7 @@
   .swatch {
     width: 18px;
     height: 18px;
-    border: 1px solid rgb(255 255 255 / 22%);
+    border: 1px solid var(--edge-strong);
     border-radius: 50%;
   }
 
@@ -293,7 +293,7 @@
      value. It vanishes at the ceiling, where the last colour or width stands in its cell. The
      width tile keeps the chips' rounded square; the colour one is round like the swatches. */
   .add {
-    border: 1px dashed rgb(255 255 255 / 30%);
+    border: 1px dashed var(--edge-strong);
     background: transparent;
   }
 
