@@ -1,5 +1,39 @@
 //! Compile the actual bundled skill recipes, never a second copy of their source.
 use super::*;
+use std::io::Read;
+use typst_kit::downloader::Downloader;
+use typst_kit::packages::{FsPackages, SystemPackages, UniversePackages};
+
+struct RecipeFixtures;
+impl Downloader for RecipeFixtures {
+    fn stream(
+        &self,
+        _key: &dyn std::any::Any,
+        url: &str,
+    ) -> std::io::Result<(Option<usize>, Box<dyn Read>)> {
+        let bytes: &'static [u8] = match url.strip_prefix("https://fixture.invalid/preview/") {
+            Some("lilaq-0.6.0.tar.gz") => {
+                include_bytes!("../../../fixtures/typst/packages/lilaq-0.6.0.tar.gz")
+            }
+            Some("elembic-1.1.1.tar.gz") => {
+                include_bytes!("../../../fixtures/typst/packages/elembic-1.1.1.tar.gz")
+            }
+            Some("zero-0.6.1.tar.gz") => {
+                include_bytes!("../../../fixtures/typst/packages/zero-0.6.1.tar.gz")
+            }
+            Some("tiptoe-0.4.0.tar.gz") => {
+                include_bytes!("../../../fixtures/typst/packages/tiptoe-0.4.0.tar.gz")
+            }
+            _ => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "unpinned recipe package",
+                ));
+            }
+        };
+        Ok((Some(bytes.len()), Box::new(bytes)))
+    }
+}
 
 #[test]
 fn bundled_skill_recipes_compile_offline() {
@@ -14,6 +48,12 @@ fn bundled_skill_recipes_compile_offline() {
         "Page summary preserving",
     ];
     let root = tempfile::tempdir().unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    let packages = Box::leak(Box::new(SystemPackages::from_parts(
+        None,
+        Some(FsPackages::new(cache.path())),
+        UniversePackages::with_url(RecipeFixtures, "https://fixture.invalid"),
+    )));
     let output = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/w6/recipes");
     std::fs::create_dir_all(&output).unwrap();
     for (index, heading) in cases.iter().enumerate() {
@@ -27,7 +67,7 @@ fn bundled_skill_recipes_compile_offline() {
             .and_then(|(_, s)| s.split_once("\n```"))
             .unwrap_or_else(|| panic!("missing Typst fence: {heading}"))
             .0;
-        let result = compile_block(
+        let result = compile_block_with(
             root.path(),
             &CompileRequest {
                 source: source.to_owned(),
@@ -35,11 +75,13 @@ fn bundled_skill_recipes_compile_offline() {
                 generation: index as u64,
                 allow_remote_packages: false,
             },
+            None,
+            packages,
         )
         .unwrap();
         assert!(
             result.diagnostics.is_empty(),
-            "{heading}: {:?}. Missing package cache is a SETUP FAILURE: prepare pinned lilaq 0.6.0 and its pinned dependencies using Goodtype's existing approved package import flow, then rerun offline. No downloads occur in this test.",
+            "{heading}: {:?}. Recipe dependencies must resolve solely from the pinned test fixtures.",
             result.diagnostics
         );
         let svg = result.svg.expect("recipe must produce SVG");
