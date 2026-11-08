@@ -142,7 +142,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-windows-
 
 The script installs locked frontend dependencies, builds the release app and ink decoder, then
 creates `target\Goodtype-Windows-<version>-local.<timestamp>\` and the matching `.zip`.
-Both contain `Goodtype.exe`, `tinymist.exe`, `goodtype-ink.exe`, `ink-v1.md`, `README.txt`,
+Both contain `Goodtype.exe`, `tinymist.exe`, `goodtype-ink.exe`, `goodtype-mcp.exe`,
+`skill/goodtype/SKILL.md`, `ink-v1.md`, `README.txt`,
 `LICENSE`, and `NOTICE`. A JSON manifest and `.sha256` alongside the ZIP record the version,
 source commit, dirty-source status, and checksums. The script checks a fresh extraction,
 the executable's version and the relocated ink decoder before reporting success.
