@@ -8,7 +8,7 @@ import type { Stroke } from "../model";
 
 const ipc = vi.hoisted(() => ({
   open: vi.fn(), page: vi.fn(), focus: vi.fn(), commit: vi.fn(), history: vi.fn(), structure: vi.fn(),
-  move: vi.fn(), add: vi.fn(), close: vi.fn(), reorder: vi.fn(),
+  move: vi.fn(), add: vi.fn(), close: vi.fn(), reorder: vi.fn(), presets: vi.fn(),
 }));
 vi.mock("../ipc/notebook", async original => ({ ...await original<typeof import("../ipc/notebook")>(),
   openNotebook: ipc.open, openPage: ipc.page, focusPage: ipc.focus, commitNotebook: ipc.commit,
@@ -20,7 +20,7 @@ vi.mock("../ipc/workspace", () => ({
   recordNotebookPage: async () => {}, recordNotebookSession: async () => {},
   closeNotebookSession: ipc.close,
 }));
-vi.mock("../ipc/presets", () => ({ listTypstPresets: async () => [] }));
+vi.mock("../ipc/presets", () => ({ listTypstPresets: ipc.presets }));
 vi.mock("../ipc/recovery", () => ({ listRecoveryCandidates: async () => [] }));
 vi.mock("../library/cover", () => ({ notebookCover: async () => null }));
 vi.mock("../pdf/document", () => ({ releasePdfDocuments: async () => {} }));
@@ -39,6 +39,7 @@ beforeEach(() => {
   ipc.structure.mockResolvedValue(result(snapshot()));
   ipc.add.mockResolvedValue(result(snapshot()));
   ipc.close.mockResolvedValue(undefined);
+  ipc.presets.mockResolvedValue([]);
   ipc.commit.mockImplementation(async (_root, value) => result(value));
 });
 afterEach(() => {
@@ -234,5 +235,35 @@ describe("notebook session coordination", () => {
     expect(await session.openNotebookAt("other")).toBe(false);
     expect(ipc.open).not.toHaveBeenCalled();
     expect(session.root).toBe("old");
+  });
+});
+
+describe("preset change notices (P2)", () => {
+  const listed = (name: string) => [{ id: "styles/a.typ", name, description: "", importPath: "/styles/a.typ", kind: "custom" as const }];
+
+  it("refreshes previews and the list only for the open notebook", async () => {
+    const { session } = workspace();
+    ipc.presets.mockResolvedValue(listed("Fresh"));
+    const before = session.presetRevision;
+    session.presetChanged({ root: "elsewhere", path: "/styles/a.typ", revision: "1" });
+    await vi.runAllTimersAsync();
+    expect(session.presetRevision).toBe(before);
+    expect(ipc.presets).not.toHaveBeenCalled();
+    session.presetChanged({ root: "old", path: "/styles/a.typ", revision: "2" });
+    expect(session.presetRevision).toBe(before + 1);
+    await vi.runAllTimersAsync();
+    expect(ipc.presets).toHaveBeenCalledWith("old");
+    expect(session.presets.map(preset => preset.name)).toEqual(["Fresh"]);
+  });
+
+  it("never stores a list read for a notebook that is no longer open", async () => {
+    const { session } = workspace();
+    const pending = deferred<ReturnType<typeof listed>>();
+    ipc.presets.mockReturnValue(pending.promise);
+    const refresh = session.refreshPresets();
+    session.root = "other";
+    pending.resolve(listed("Stale"));
+    await refresh;
+    expect(session.presets).toEqual([]);
   });
 });
