@@ -1,0 +1,80 @@
+/* Goodtype's design tokens. The rules for using them live in apps/desktop/DESIGN.md.
+   Every surface reads these names; a raw colour, shadow or tint inside a component is a bug
+   unless it is notebook content (ink, paper defaults, syntax colours, the hue picker). */
+:root {
+  /* Surfaces, darkest to lightest. Paper is content, never a control fill. */
+  --charcoal: #16181d;
+  --surround: #1b1e24;
+  --panel: #23272f;
+  --paper: #fcfcfa;
+
+  /* Text. Quiet is the lowest step that still reads (4.7:1 on panel); nothing goes dimmer. */
+  --text: #e9ebee;
+  --muted: #aeb5be;
+  --quiet: #8a929c;
+
+  /* The one accent. Blue means: primary action, selected, focused, or the target of a drop. */
+  --blueprint: #4c8df0;
+  --blueprint-light: #7fb0f7;
+  --blueprint-hover: #6a9ef2;
+  --on-accent: #0e1b31;
+  --accent-tint: rgb(76 141 240 / 10%);
+  --accent-fill: rgb(76 141 240 / 16%);
+  --accent-edge: rgb(76 141 240 / 55%);
+  --accent-select: rgb(76 141 240 / 35%);
+  /* Selection drawn on paper needs a darker blue to hold contrast against white. */
+  --paper-select: #2f6fdb;
+
+  /* Status. Each one is a signal, never decoration. */
+  --oxide: #e5645e;
+  --oxide-hover: #ef7a74;
+  --oxide-text: #f0aaa6;
+  --oxide-wash: #3a2224;
+  --amber: #e0912b;
+  --amber-text: #e9c46a;
+  --sage: #4fb586;
+  --sage-text: #7fd1a3;
+
+  /* Neutral fills and lines over the dark surfaces. Fills: soft (a resting field), wash (hover,
+     secondary button), strong (pressed). Lines: soft (divider), edge (container), strong (hover
+     on a bordered field, dashed drop zones, swatch rings). */
+  --fill-soft: rgb(255 255 255 / 4%);
+  --wash: rgb(255 255 255 / 8%);
+  --wash-strong: rgb(255 255 255 / 12%);
+  --edge-soft: rgb(255 255 255 / 7%);
+  --edge: rgb(255 255 255 / 12%);
+  --edge-strong: rgb(255 255 255 / 22%);
+  --inset: rgb(0 0 0 / 22%);
+  --track: #505764;
+
+  /* Elevation: three levels and no others. Content on the canvas sits flat. */
+  --shadow-menu: 0 8px 24px rgb(0 0 0 / 40%);
+  --shadow-panel: 0 14px 36px rgb(0 0 0 / 48%);
+  --shadow-modal: 0 24px 64px rgb(0 0 0 / 55%);
+  /* The page sheet on the desk, and full-size previews of one. Not for anything on the page. */
+  --shadow-page: 0 1px 4px rgb(0 0 0 / 30%), 0 16px 40px rgb(0 0 0 / 35%);
+
+  /* Motion and state. One speed for feedback, one for things arriving. */
+  --fast: 120ms;
+  --enter: 160ms;
+  --disabled: 0.4;
+
+  /* Sizes. */
+  --control: 36px;
+  --control-dense: 28px;
+  --control-touch: 44px;
+  --icon: 20px;
+  --icon-dense: 16px;
+  --stroke: 1.7;
+  --stroke-dense: 2;
+  --radius: 6px;
+  --radius-lg: 10px;
+  --radius-pill: 999px;
+  --text-xs: 10px;
+  --text-sm: 11px;
+  --text-md: 13px;
+  --text-lg: 15px;
+
+  --font-ui: Bahnschrift, "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  --font-code: "Cascadia Mono", Consolas, monospace;
+}
