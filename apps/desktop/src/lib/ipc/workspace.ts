@@ -7,6 +7,7 @@
  * caller reaching for "record that this opened" should not have to know which module owns it.
  */
 import { get } from "svelte/store";
+import type { ExportInclude } from "../workspace/exportTarget";
 import { locale } from "../i18n";
 import { invoke } from "@tauri-apps/api/core";
 import type { AppSettings, RecentNotebook } from "../settings";
@@ -69,8 +70,12 @@ export function exportNotebookPdf(
   outputName: string,
   pageTextBaselineGrid: boolean,
   splitCalculationsA4 = false,
+  /** Omitted exports every page; Rust rejects an id the notebook does not have. */
+  pageIds?: string[],
+  /** Which kinds of content to keep. Omitted keeps everything. */
+  include?: ExportInclude,
 ): Promise<string> {
-  return invoke<string>("export_notebook_pdf", { root, outputName, pageTextBaselineGrid, splitCalculationsA4, uiLanguage: get(locale) });
+  return invoke<string>("export_notebook_pdf", { root, outputName, pageTextBaselineGrid, splitCalculationsA4, uiLanguage: get(locale), pageIds: pageIds ?? null, include: include ?? null });
 }
 
 /** See the note in `storePastedImage` about why the bytes are converted here. */

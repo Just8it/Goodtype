@@ -104,7 +104,12 @@ export type EraserReach = "everything" | "highlighter";
 /** Whole marks, or only the ink under the eraser (ADR 0037). */
 export type EraserMode = "stroke" | "precise";
 
+/** What happens when the assistant asks for context the user did not attach. Rust enforces it. */
+export type HelperPermission = "allow" | "ask" | "never";
+export type HelperPermissions = { pages: HelperPermission; presets: HelperPermission; pageNames: HelperPermission };
+
 export type AppSettings = {
+  aiHelper: { enabled: boolean; usage: "low" | "balanced" | "detailed"; webSearch: boolean; codexPath: string | null; codexModel: string | null; allowedMcpServers: string[]; permissions: HelperPermissions };
   uiLanguage: "en" | "de";
   /** Resolved into ordinary Typst source when a new movable text block is created. */
   inlineTextFont: string;
@@ -179,6 +184,7 @@ export type AppSettings = {
 };
 
 export const DEFAULT_SETTINGS: AppSettings = {
+  aiHelper: { enabled: false, usage: "balanced", webSearch: true, codexPath: null, codexModel: null, allowedMcpServers: [], permissions: { pages: "ask", presets: "ask", pageNames: "allow" } },
   uiLanguage: "en",
   inlineTextFont: "",
   penPresets: [
@@ -326,7 +332,12 @@ export function withRecentColor(recent: string[], color: string): string[] {
 export async function loadSettings(tauriAvailable: boolean): Promise<AppSettings> {
   if (!tauriAvailable) return structuredClone(DEFAULT_SETTINGS);
   try {
-    return await loadAppSettings();
+    const loaded = await loadAppSettings();
+    const aiHelper = { ...DEFAULT_SETTINGS.aiHelper, ...loaded.aiHelper };
+    aiHelper.permissions = { ...DEFAULT_SETTINGS.aiHelper.permissions, ...loaded.aiHelper?.permissions };
+    // Null is the Goodtype Luna default; preserve every nonblank explicit choice.
+    if (!aiHelper.codexModel?.trim()) aiHelper.codexModel = null;
+    return { ...loaded, aiHelper };
   } catch {
     return structuredClone(DEFAULT_SETTINGS);
   }
