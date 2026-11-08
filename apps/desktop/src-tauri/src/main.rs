@@ -2,6 +2,7 @@
 
 mod computation;
 mod export;
+mod helper;
 mod importer;
 mod library;
 mod notebook;
@@ -22,6 +23,7 @@ fn main() {
         .manage(workspace::AllowedRoots::default())
         .manage(settings::RemotePackages::default())
         .manage(computation::RuntimeState::default())
+        .manage(helper::Helper::default())
         .manage(tinymist::Tinymist::default())
         .manage(importer::Importers::default())
         .manage(recognition::math_process::MathProcess::default())
@@ -38,6 +40,29 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            helper::codex::helper_codex_status,
+            helper::codex::helper_codex_run,
+            helper::codex::helper_codex_stop,
+            helper::codex::helper_codex_close,
+            helper::helper_status,
+            helper::proposals::helper_proposals,
+            helper::preset_install::helper_install_preset,
+            helper::proposals::helper_dismiss_proposal,
+            helper::proposals::helper_request_change,
+            helper::proposals::helper_edit_proposal,
+            notebook::insert_helper_proposal,
+            notebook::apply_helper_cell_proposal,
+            notebook::apply_helper_page_proposal,
+            helper::helper_install_relay,
+            helper::helper_share,
+            helper::helper_unshare,
+            helper::helper_revoke_attachment,
+            helper::helper_revoke_notebook,
+            helper::helper_context_reply,
+            helper::helper_answer_connection,
+            helper::helper_answer_scope,
+            helper::helper_revoke,
+            helper::helper_activity,
             library::library_root,
             library::pick_library_root,
             library::list_library,
@@ -68,7 +93,7 @@ fn main() {
             workspace::record_notebook_opened,
             workspace::record_notebook_page,
             workspace::record_notebook_session,
-            workspace::close_notebook_session,
+            helper::helper_close_notebook_session,
             workspace::write_phase0_metrics,
             settings::load_app_settings,
             settings::save_app_settings,
@@ -133,6 +158,11 @@ fn main() {
             recognition::prepare_math_recognition,
             importer::remove_math_recognizer,
         ])
-        .run(tauri::generate_context!())
-        .expect("failed to run Goodtype");
+        .build(tauri::generate_context!())
+        .expect("failed to build Goodtype")
+        .run(|app, event| {
+            if matches!(event, tauri::RunEvent::Exit) {
+                app.state::<helper::Helper>().stop();
+            }
+        });
 }
