@@ -90,7 +90,7 @@ async function manifest() {
   metadata.sourceDirty ||= dirty;
   const directory = resolve(root, 'target', metadata.packageName);
   const files = {};
-  for (const name of ['Goodtype.exe', 'tinymist.exe', 'goodtype-ink.exe', 'ink-v1.md', 'README.txt', 'LICENSE', 'NOTICE']) {
+  for (const name of ['Goodtype.exe', 'tinymist.exe', 'goodtype-ink.exe', 'goodtype-mcp.exe', 'skill/goodtype/SKILL.md', 'ink-v1.md', 'README.txt', 'LICENSE', 'NOTICE']) {
     files[name] = await sha256(resolve(directory, name));
   }
   const archive = `${metadata.packageName}.zip`;

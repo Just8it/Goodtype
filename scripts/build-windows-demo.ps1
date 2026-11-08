@@ -28,6 +28,9 @@ try {
 
     & cargo build --release --locked -p goodtype-core --bin goodtype-ink
     if ($LASTEXITCODE -ne 0) { throw "Ink decoder release build failed." }
+
+    & cargo build --release --locked -p goodtype-mcp
+    if ($LASTEXITCODE -ne 0) { throw "AI relay release build failed." }
 }
 finally {
     Pop-Location
@@ -49,7 +52,8 @@ if (-not (Test-Path -LiteralPath $releaseExecutable)) {
 
 $sidecar = Join-Path $buildTargetRoot "release\tinymist.exe"
 $decoder = Join-Path $buildTargetRoot "release\goodtype-ink.exe"
-foreach ($requiredFile in @($sidecar, $decoder)) {
+$relay = Join-Path $buildTargetRoot "release\goodtype-mcp.exe"
+foreach ($requiredFile in @($sidecar, $decoder, $relay)) {
     if (-not (Test-Path -LiteralPath $requiredFile -PathType Leaf)) {
         throw "Required release binary is missing: $requiredFile"
     }
@@ -59,6 +63,8 @@ New-Item -ItemType Directory -Path $demoDirectory | Out-Null
 Copy-Item -LiteralPath $releaseExecutable -Destination (Join-Path $demoDirectory "Goodtype.exe")
 Copy-Item -LiteralPath $sidecar -Destination (Join-Path $demoDirectory "tinymist.exe")
 Copy-Item -LiteralPath $decoder -Destination (Join-Path $demoDirectory "goodtype-ink.exe")
+Copy-Item -LiteralPath $relay -Destination (Join-Path $demoDirectory "goodtype-mcp.exe")
+Copy-Item -LiteralPath (Join-Path $repositoryRoot "crates\goodtype-mcp\skill") -Destination $demoDirectory -Recurse
 Copy-Item -LiteralPath (Join-Path $repositoryRoot "formats\ink-v1.md") -Destination $demoDirectory
 foreach ($notice in @("LICENSE", "NOTICE")) {
     Copy-Item -LiteralPath (Join-Path $repositoryRoot $notice) -Destination $demoDirectory
@@ -69,6 +75,7 @@ Goodtype for Windows x64
 
 Extract this entire ZIP to a folder, then open Goodtype.exe.
 Keep tinymist.exe beside Goodtype.exe for editor intelligence.
+Keep goodtype-mcp.exe and the skill folder beside it for optional AI assistance.
 Microsoft Edge WebView2 Runtime is required by the desktop app.
 
 This build supports schema-4 notebooks with computational pages. Older

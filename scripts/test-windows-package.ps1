@@ -20,6 +20,12 @@ try {
             throw "Extracted file differs from its manifest: $($file.Name)"
         }
     }
+    foreach ($required in @("goodtype-mcp.exe", "skill/goodtype/SKILL.md")) {
+        if (-not (Test-Path -LiteralPath (Join-Path $extracted $required) -PathType Leaf) -or
+            -not $metadata.files.PSObject.Properties[$required]) {
+            throw "Required AI package file is missing or unhashed: $required"
+        }
+    }
     $version = (Get-Item -LiteralPath (Join-Path $extracted "Goodtype.exe")).VersionInfo.ProductVersion
     if ($version -ne $metadata.version) { throw "App version '$version' differs from '$($metadata.version)'." }
 
