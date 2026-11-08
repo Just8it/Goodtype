@@ -274,6 +274,43 @@ pub fn create_page(
     background: Option<&PageBackground>,
     geometry: Option<&PageGeometry>,
 ) -> Result<NotebookSnapshot, StorageError> {
+    create_page_inner(
+        selected_root,
+        modified_at,
+        position,
+        background,
+        geometry,
+        None,
+    )
+}
+
+/// Publish a fresh page and its initial Page text in the same transaction.
+pub fn create_page_with_text(
+    selected_root: &Path,
+    modified_at: &str,
+    position: &PagePosition,
+    background: Option<&PageBackground>,
+    geometry: Option<&PageGeometry>,
+    source: &str,
+) -> Result<NotebookSnapshot, StorageError> {
+    create_page_inner(
+        selected_root,
+        modified_at,
+        position,
+        background,
+        geometry,
+        Some(source),
+    )
+}
+
+fn create_page_inner(
+    selected_root: &Path,
+    modified_at: &str,
+    position: &PagePosition,
+    background: Option<&PageBackground>,
+    geometry: Option<&PageGeometry>,
+    source: Option<&str>,
+) -> Result<NotebookSnapshot, StorageError> {
     let mut guard = ManifestGuard::open_resolved(selected_root, modified_at)?;
     let root = guard.root().to_path_buf();
     // A page added to a version-1 notebook is a version-1 page. One notebook, one version.
@@ -330,7 +367,7 @@ pub fn create_page(
             path: ink_path,
         }],
     };
-    let snapshot = NotebookSnapshot {
+    let mut snapshot = NotebookSnapshot {
         calculations: Vec::new(),
         manifest: guard.manifest.clone(),
         page,
@@ -343,6 +380,33 @@ pub fn create_page(
             strokes: Vec::new(),
         }],
     };
+    if let Some(source) = source {
+        let id = format!("text-{}", snapshot.page.id);
+        let path = (0..1000)
+            .map(|n| format!("blocks/{id}-{n}.typ"))
+            .find(|path| root.join(path).symlink_metadata().is_err())
+            .ok_or_else(|| invalid_error("no unused Page text path"))?;
+        snapshot.page.objects.push(crate::PageObject::PageTypst {
+            fields: crate::ObjectFields {
+                id: id.clone(),
+                x: 0.,
+                y: 0.,
+                rotation: 0.,
+                scale: 1.,
+                z_index: 0,
+                reading_order: 0,
+                group_id: None,
+                created_at: modified_at.into(),
+                modified_at: modified_at.into(),
+            },
+            source_path: path.clone(),
+        });
+        snapshot.page.reading_order.push(id);
+        snapshot.blocks.push(StoredFile {
+            path,
+            bytes: source.as_bytes().to_vec(),
+        });
+    }
     validate_snapshot(&root, &snapshot)?;
     guard.commit_snapshot(&snapshot, "adding a page")?;
     open_page(&root, &snapshot.page.id)

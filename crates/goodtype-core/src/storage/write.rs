@@ -404,29 +404,60 @@ fn persist_typst_style(
     Ok(relative)
 }
 
-pub fn list_typst_styles(selected_root: &Path) -> Result<Vec<StoredFile>, StorageError> {
+/// One `.typ` entry in `styles/`: its notebook-relative path and either its bytes or why they
+/// could not be read. Non-Typst files, directories, symlinks and unsafe names are never entries.
+#[derive(Debug)]
+pub struct TypstStyleEntry {
+    pub path: String,
+    pub bytes: Result<Vec<u8>, StorageError>,
+}
+
+/// Every Typst style entry, sorted by path. One unreadable or oversized file is reported on its
+/// own entry instead of failing the whole listing, and unrelated files are skipped.
+pub fn list_typst_style_entries(
+    selected_root: &Path,
+) -> Result<Vec<TypstStyleEntry>, StorageError> {
     let root = canonical_root(selected_root)?;
     let directory = root.join("styles");
     if !directory.exists() {
         return Ok(Vec::new());
     }
-    let mut files = fs::read_dir(&directory)?
-        .map(|entry| {
-            let entry = entry?;
-            let filename = entry.file_name().to_string_lossy().into_owned();
-            validate_safe_filename(&filename)?;
-            if !filename.to_ascii_lowercase().ends_with(".typ") || !entry.file_type()?.is_file() {
-                return Err(StorageError::InvalidPath(filename));
-            }
-            let relative = format!("styles/{filename}");
-            Ok(StoredFile {
-                path: relative.clone(),
-                bytes: read_limited(resolve_existing(&root, &relative)?, MAX_TYPST_STYLE_BYTES)?,
+    let mut entries = Vec::new();
+    for entry in fs::read_dir(&directory)? {
+        let Ok(entry) = entry else { continue };
+        let filename = entry.file_name().to_string_lossy().into_owned();
+        // `file_type` does not follow links, so a symlink is never an ordinary file here.
+        let is_file = entry.file_type().is_ok_and(|kind| kind.is_file());
+        if !is_file
+            || !filename.to_ascii_lowercase().ends_with(".typ")
+            || validate_safe_filename(&filename).is_err()
+        {
+            continue;
+        }
+        let relative = format!("styles/{filename}");
+        let bytes = resolve_existing(&root, &relative)
+            .and_then(|path| read_limited(path, MAX_TYPST_STYLE_BYTES));
+        entries.push(TypstStyleEntry {
+            path: relative,
+            bytes,
+        });
+    }
+    entries.sort_unstable_by(|left, right| left.path.cmp(&right.path));
+    Ok(entries)
+}
+
+/// The readable Typst styles. Unrelated and unreadable entries are left out; callers that must
+/// show per-file problems use [`list_typst_style_entries`].
+pub fn list_typst_styles(selected_root: &Path) -> Result<Vec<StoredFile>, StorageError> {
+    Ok(list_typst_style_entries(selected_root)?
+        .into_iter()
+        .filter_map(|entry| {
+            entry.bytes.ok().map(|bytes| StoredFile {
+                path: entry.path,
+                bytes,
             })
         })
-        .collect::<Result<Vec<_>, StorageError>>()?;
-    files.sort_unstable_by(|left, right| left.path.cmp(&right.path));
-    Ok(files)
+        .collect())
 }
 
 /// Exact cleanup for a failed notebook-creation transaction. Never accepts a general path.
@@ -550,10 +581,115 @@ fn save_to_root_inner(
     FileSet::of(snapshot)?.fingerprint_written(&written)
 }
 
+/// Atomic new-only install with an explicit no-write result for identical existing bytes.
+pub fn install_reviewed_typst_style(
+    root: &Path,
+    filename: &str,
+    source: &str,
+) -> Result<(String, bool), StorageError> {
+    validate_safe_filename(filename)?;
+    if !filename.ends_with(".typ") || source.is_empty() || source.len() > MAX_TYPST_STYLE_BYTES {
+        return Err(StorageError::InvalidPath(filename.into()));
+    }
+    let root = canonical_root(root)?;
+    let relative = format!("styles/{filename}");
+    match super::files::write_new(&root, &relative, source.as_bytes()) {
+        Ok(()) => Ok((relative, true)),
+        Err(StorageError::AlreadyExists(_)) => {
+            let bytes = read_limited(resolve_existing(&root, &relative)?, MAX_TYPST_STYLE_BYTES)?;
+            if bytes == source.as_bytes() {
+                Ok((relative, false))
+            } else {
+                Err(StorageError::AlreadyExists(relative))
+            }
+        }
+        Err(e) => Err(e),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::storage::{fixtures::*, *};
     use std::fs;
+
+    /// P7: one stray file or one bad preset must not empty the list.
+    #[test]
+    fn style_listing_skips_unrelated_entries_and_reports_bad_typ_files_individually() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path();
+        write_typst_style(root, "good.typ", "#set text(size: 12pt)").unwrap();
+        let styles = root.join("styles");
+        fs::write(styles.join("README.md"), "notes").unwrap();
+        fs::write(styles.join("thumbs.db"), [0u8, 1, 2]).unwrap();
+        fs::create_dir(styles.join("folder.typ")).unwrap();
+        fs::write(
+            styles.join("huge.typ"),
+            vec![b'x'; super::MAX_TYPST_STYLE_BYTES + 1],
+        )
+        .unwrap();
+        fs::write(styles.join("latin1.typ"), [0xe4u8, b'\n']).unwrap();
+        let entries = list_typst_style_entries(root).unwrap();
+        let paths: Vec<_> = entries.iter().map(|entry| entry.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            ["styles/good.typ", "styles/huge.typ", "styles/latin1.typ"]
+        );
+        assert!(entries[0].bytes.is_ok());
+        assert!(entries[1].bytes.is_err());
+        // Bytes are returned as stored; deciding about UTF-8 belongs to the preset reader.
+        assert!(entries[2].bytes.is_ok());
+        let readable = list_typst_styles(root).unwrap();
+        assert_eq!(readable.len(), 2);
+        #[cfg(unix)]
+        {
+            let outside = tempfile::tempdir().unwrap();
+            fs::write(outside.path().join("secret.typ"), "SECRET").unwrap();
+            std::os::unix::fs::symlink(outside.path().join("secret.typ"), styles.join("link.typ"))
+                .unwrap();
+            assert!(
+                list_typst_style_entries(root)
+                    .unwrap()
+                    .iter()
+                    .all(|e| e.path != "styles/link.typ")
+            );
+        }
+        #[cfg(windows)]
+        if std::os::windows::fs::symlink_file(root.join("styles/good.typ"), styles.join("link.typ"))
+            .is_ok()
+        {
+            assert!(
+                list_typst_style_entries(root)
+                    .unwrap()
+                    .iter()
+                    .all(|e| e.path != "styles/link.typ")
+            );
+        }
+    }
+
+    #[test]
+    fn reviewed_install_atomic_collision_has_exactly_one_writer() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(temp.path().join("styles")).unwrap();
+        let barrier = std::sync::Barrier::new(2);
+        let results = std::thread::scope(|scope| {
+            let threads = ["first", "second"].map(|source| {
+                let barrier = &barrier;
+                let root = temp.path();
+                scope.spawn(move || {
+                    barrier.wait();
+                    install_reviewed_typst_style(root, "new.typ", source)
+                })
+            });
+            threads.map(|t| t.join().unwrap())
+        });
+        assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1);
+        let source = std::fs::read_to_string(temp.path().join("styles/new.typ")).unwrap();
+        assert!(source == "first" || source == "second");
+        assert_eq!(
+            install_reviewed_typst_style(temp.path(), "new.typ", &source).unwrap(),
+            ("styles/new.typ".into(), false)
+        );
+    }
 
     #[test]
     fn preset_installation_reuses_identical_bytes_but_never_replaces_edits() {

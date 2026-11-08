@@ -47,6 +47,16 @@ pub fn commit_page_delta(
     history: &mut NotebookHistory,
     delta: PageDelta,
 ) -> Result<HistoryResult, StorageError> {
+    commit_page_delta_with_precondition(root, history, delta, None)
+}
+
+/// Caller must hold the notebook lock throughout this operation.
+pub fn commit_page_delta_with_precondition(
+    root: &Path,
+    history: &mut NotebookHistory,
+    delta: PageDelta,
+    precondition: Option<super::ProposalPrecondition>,
+) -> Result<HistoryResult, StorageError> {
     let root = canonical_root(root)?;
     let current = open_page(&root, &delta.page.id)?;
     super::history::ensure_current(&root, history, &current, delta.page.revision)?;
@@ -124,7 +134,13 @@ pub fn commit_page_delta(
         candidate.blocks.retain(|old| old.path != file.path);
         candidate.blocks.push(file);
     }
-    super::history::commit_current(&root, history, current, candidate)
+    super::history::commit_current_with_precondition(
+        &root,
+        history,
+        current,
+        candidate,
+        precondition,
+    )
 }
 
 #[cfg(test)]

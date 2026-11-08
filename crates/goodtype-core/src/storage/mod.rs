@@ -19,6 +19,7 @@ pub mod files;
 mod history;
 mod pages;
 mod paths;
+mod proposal;
 mod recovery;
 mod search;
 mod validate;
@@ -32,18 +33,19 @@ pub use calculations::{
     CalculationHistory, CalculationResult, CellOperation, calculation_history,
     commit_calculation_outputs, edit_calculation, read_calculation,
 };
-pub use delta::{PageDelta, commit_page_delta};
+pub use delta::{PageDelta, commit_page_delta, commit_page_delta_with_precondition};
 pub use history::{
-    HistoryResult, NotebookHistory, commit_notebook, focus_page, observe_notebook, observe_page,
-    redo_notebook, undo_notebook,
+    HistoryResult, NotebookHistory, commit_notebook, commit_notebook_with_precondition, focus_page,
+    history_preflight, observe_notebook, observe_page, redo_notebook, undo_notebook,
 };
 pub use pages::{
     CalculationExecutionPlan, CalculationStep, NotebookStructureHistory, PagePosition,
     StructureHistoryResult, advance_structure, calculation_execution_plan, create_calculation_page,
-    create_notebook, create_page, delete_page, duplicate_page, import_calculation_page,
-    import_pdf_pages, observe_structure, open_notebook, open_page, redo_structure, reorder_pages,
-    save_notebook, undo_structure,
+    create_notebook, create_page, create_page_with_text, delete_page, duplicate_page,
+    import_calculation_page, import_pdf_pages, observe_structure, open_notebook, open_page,
+    redo_structure, reorder_pages, save_notebook, undo_structure,
 };
+pub use proposal::*;
 pub use recovery::{
     RecoveryCandidate, discard_recovery_candidate, list_recovery_candidates,
     restore_recovery_candidate,
@@ -51,8 +53,9 @@ pub use recovery::{
 pub use search::{SearchHit, search_notebook};
 pub(crate) use validate::validate_ink_layer;
 pub use write::{
-    install_typst_style, list_typst_styles, read_pdf_reference, remove_typst_style,
-    store_pasted_image, store_pdf_reference, update_typst_style, write_typst_style,
+    TypstStyleEntry, install_reviewed_typst_style, install_typst_style, list_typst_style_entries,
+    list_typst_styles, read_pdf_reference, remove_typst_style, store_pasted_image,
+    store_pdf_reference, update_typst_style, write_typst_style,
 };
 
 /// The store's size budget, in one place.
@@ -104,6 +107,8 @@ impl NotebookSnapshot {
 
 #[derive(Debug)]
 pub enum StorageError {
+    ProposalStale(Vec<ChangedDependency>),
+    HistoryNotRetained,
     Io(io::Error),
     Json(serde_json::Error),
     InvalidPath(String),
@@ -118,6 +123,12 @@ pub enum StorageError {
 impl fmt::Display for StorageError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::ProposalStale(changed) => {
+                write!(formatter, "proposal dependencies changed: {changed:?}")
+            }
+            Self::HistoryNotRetained => {
+                write!(formatter, "proposal undo or redo would not be retained")
+            }
             Self::Io(error) => write!(formatter, "{error}"),
             Self::Json(error) => write!(formatter, "{error}"),
             Self::InvalidPath(path) => write!(formatter, "invalid notebook path: {path}"),
