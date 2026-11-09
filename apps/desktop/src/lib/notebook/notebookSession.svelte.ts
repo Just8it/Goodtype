@@ -1,5 +1,5 @@
 import { createCalculationPage, importCalculationNotebook } from "../ipc/calculation";
-import { exportTarget, INCLUDE_EVERYTHING, type ExportChoice } from "../workspace/exportTarget";
+import { exportTarget, INCLUDE_EVERYTHING, parsePageList, type ExportChoice } from "../workspace/exportTarget";
 import { acceptProposal, validateProposalPlacement } from "../helper/proposal";
 import { helperInsertProposal, helperCreatePage } from "../ipc/helper";
 import type { Proposal } from "../ipc/helper";
@@ -10,7 +10,7 @@ import { translate, notice, type UiText } from "../i18n";
 import { notebookFailureCode } from "../ipc/errors";
 import { tick } from "svelte";
 
-import { commitNotebook, createNotebook, createPage, deletePage, duplicatePage, focusPage, importPdfPages, openNotebook, openPage, pickPdfReference, reorderPages, runHistory, runStructureHistory } from "../ipc/notebook";
+import { commitNotebook, createNotebook, createPage, deletePage, deletePages as deletePagesIpc, duplicatePage, focusPage, importPdfPages, openNotebook, openPage, pickPdfReference, reorderPages, runHistory, runStructureHistory } from "../ipc/notebook";
 import { discardRecoveryCandidate, listRecoveryCandidates, restoreRecoveryCandidate } from "../ipc/recovery";
 import { moveLibraryEntries } from "../ipc/library";
 import { type TypstCompileRequest } from "../ipc/typst";
@@ -279,6 +279,8 @@ export function createSession(env: SessionEnvironment) {
   let notebookChosen = $state(false);
 
   let coverRevision = $state(0);
+  /** How many times each page has saved this session; the page overview redraws a tile on change. */
+  let pageSaves = $state<Record<string, number>>({});
 
   // Session-local order of committed changes across pages, so notebook-scoped undo can route
   // Ctrl+Z to the page that changed most recently.
@@ -531,6 +533,7 @@ export function createSession(env: SessionEnvironment) {
 
   function applySnapshot(snapshot: NotebookSnapshot) {
     pageSession += 1;
+    if (activeSnapshot) notePageSaved(activeSnapshot, snapshot);
     const previousEntry = pageEntries.find(entry => entry.id === snapshot.page.id);
     const previousStrokes = snapshot.page.id === activePageId ? strokes : previousEntry ? neighborStrokesFor(previousEntry) : [];
     env.selection.lassoObjectIds = [];
@@ -669,7 +672,15 @@ export function createSession(env: SessionEnvironment) {
   }
 
   function replacePageSnapshot(pageId: string, snapshot: NotebookSnapshot | null) {
+    const previous = pageEntries.find((entry) => entry.id === pageId)?.snapshot;
+    if (previous && snapshot) notePageSaved(previous, snapshot);
     pageEntries = pageEntries.map((entry) => entry.id === pageId ? { ...entry, snapshot } : entry);
+  }
+
+  /** A new revision of a loaded page means it saved; loading or evicting it is not a change. */
+  function notePageSaved(previous: NotebookSnapshot, next: NotebookSnapshot) {
+    if (previous.page.id !== next.page.id || previous.page.revision === next.page.revision) return;
+    pageSaves = { ...pageSaves, [next.page.id]: (pageSaves[next.page.id] ?? 0) + 1 };
   }
 
   function dropNeighborStrokes(pageId: string) {
@@ -1165,6 +1176,54 @@ export function createSession(env: SessionEnvironment) {
     });
   }
 
+  /** Put the pages in `order`, a permutation of the current ones, as one undoable step. */
+  async function reorderTo(order: string[]) {
+    const manifest = notebookManifest;
+    if (busy || !env.tauriAvailable || !manifest) return;
+    if (order.every((id, index) => manifest.pages[index]?.id === id)) return;
+    busy = true;
+    await replacingPage(async () => {
+      try {
+        if (!(await persist())) return;
+        const result = await reorderPages(root, order, new Date().toISOString(), activePageId);
+        resetPageEntries();
+        applySnapshot(result.snapshot);
+        recordStructureAction();
+        await tick();
+        scrollToPage(activePageId);
+        status = notice("workspace.reorderedPages");
+      } catch (error) {
+        status = notice("workspace.couldNotReorderPages", { "value1": env.message(error) });
+      } finally {
+        busy = false;
+      }
+    });
+  }
+
+  /** Remove several pages in one undoable step. A notebook always keeps at least one page. */
+  async function deletePages(ids: string[]) {
+    const manifest = notebookManifest;
+    if (busy || !env.tauriAvailable || !manifest || ids.length === 0) return;
+    if (ids.length >= manifest.pages.length) return;
+    await replacingPage(async () => {
+      if (!(await persist())) return;
+      busy = true;
+      try {
+        const result = await deletePagesIpc(root, ids, new Date().toISOString(), activePageId);
+        resetPageEntries();
+        applySnapshot(result.snapshot);
+        recordStructureAction();
+        await tick();
+        scrollToPage(result.snapshot.page.id);
+        status = notice("counts.deletedPages", { count: ids.length });
+      } catch (error) {
+        status = notice("workspace.couldNotDeleteThePage", { "value1": env.message(error) });
+      } finally {
+        busy = false;
+      }
+    });
+  }
+
   async function navigateToSearchHit(hit: SearchHit) {
     env.searchOpen = false;
     const entry = pageEntries.find((page) => page.id === hit.pageId);
@@ -1368,7 +1427,8 @@ export function createSession(env: SessionEnvironment) {
   }
 
   /** `replacing` names a page the PDF takes the place of: a new notebook's blank first page. */
-  async function importPdf(position: PagePosition, replacing?: string) {
+  /** `pageList` picks PDF pages in print-dialog form ("1-3, 7"); empty or absent takes them all. */
+  async function importPdf(position: PagePosition, replacing?: string, pageList?: string) {
     env.moreOpen = false;
     if (!env.tauriAvailable) return;
     await replacingPage(async () => {
@@ -1381,7 +1441,13 @@ export function createSession(env: SessionEnvironment) {
           return;
         }
         status = notice("workspace.readingPDFPages");
-        const geometries = await pdfPageGeometries(root, sourcePath);
+        const every = await pdfPageGeometries(root, sourcePath);
+        const chosen = pageList?.trim() ? parsePageList(pageList, every.length) : undefined;
+        if (chosen === null) {
+          status = notice("counts.pdfHasPagesChangeList", { count: every.length });
+          return;
+        }
+        const geometries = chosen ? chosen.map((number) => every[number - 1]!) : every;
         const result = await importPdfPages(
           root,
           new Date().toISOString(),
@@ -1390,6 +1456,7 @@ export function createSession(env: SessionEnvironment) {
           geometries,
           activePageId,
           replacing,
+          chosen,
         );
         resetPageEntries();
         applySnapshot(result.snapshot);
@@ -2232,6 +2299,8 @@ export function createSession(env: SessionEnvironment) {
     calculationSaved,
     calculationHeight,
     importPdf,
+    reorderTo,
+    deletePages,
     activePageNumber,
     updateTypstTransform,
     updateTypstSource,
@@ -2328,6 +2397,7 @@ export function createSession(env: SessionEnvironment) {
     get notebookChosen() { return notebookChosen; },
     set notebookChosen(value: typeof notebookChosen) { notebookChosen = value; },
     get coverRevision() { return coverRevision; },
+    get pageSaves() { return pageSaves; },
     get confirmingPageDelete() { return confirmingPageDelete; },
     set confirmingPageDelete(value: typeof confirmingPageDelete) { confirmingPageDelete = value; },
     get pageCount() { return pageCount; },

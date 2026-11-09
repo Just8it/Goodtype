@@ -50,6 +50,24 @@ describe("Codex composer", () => {
 });
 
 describe("Codex run panel", () => {
+  it.each(["en", "de"] as const)("shows retry counts, Stop, and a manual retry only for startup connection failures in %s", language => {
+    setLanguage(language);
+    for (const attempt of [1, 5]) {
+      const html = render(CodexRunPanel, { props: { state: "starting", text: "", tools: [], onStop() {}, onRetry() {},
+        problem: { code: "connection_retrying", params: { attempt: String(attempt), max: "5", seconds: "15" } } } }).body;
+      expect(html).toContain(`(${attempt}/5)`);
+      expect(html).toContain(translate("codex.stop"));
+      expect(html).not.toContain('role="alert"');
+      expect(html).not.toContain(`>${translate("codex.retry")}</button>`);
+    }
+    for (const code of ["provider_unreachable", "confinement_failed", "codex_crashed"]) {
+      const html = render(CodexRunPanel, { props: { state: "failed", text: "", tools: [], onStop() {}, onRetry() {},
+        problem: { code, params: { detail: "<private>" } } } }).body;
+      expect(html.includes(`>${translate("codex.retry")}</button>`)).toBe(code === "provider_unreachable");
+      expect(html).toContain("&lt;private>");
+    }
+  });
+
   for (const state of ["starting", "reading", "preparing", "checking", "ready", "done", "failed", "stopped"] as CodexRunState[]) {
     it(`renders ${state} and Stop only for active runs`, () => {
       const html = render(CodexRunPanel, { props: { state, text: "Answer <script>", tools: [], onStop() {}, onClose() {} } }).body;

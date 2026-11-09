@@ -14,6 +14,7 @@
     kind,
     fill,
     constrain,
+    endSnap,
     drawAndHold,
     minimumLineLengthPt = 6,
     onMinimumLineLengthChange,
@@ -24,6 +25,7 @@
     onKindChange,
     onFillChange,
     onConstrainChange,
+    onEndSnapChange,
     onDrawAndHoldChange,
     onPatternChange,
     onSpacingChange,
@@ -33,6 +35,7 @@
     kind: ShapeKind;
     fill: boolean;
     constrain: boolean;
+    endSnap: boolean;
     drawAndHold: boolean;
     minimumLineLengthPt?: number;
     onMinimumLineLengthChange?: (length: number) => void;
@@ -43,6 +46,7 @@
     onKindChange: (kind: ShapeKind) => void;
     onFillChange: (fill: boolean) => void;
     onConstrainChange: (constrain: boolean) => void;
+    onEndSnapChange: (enabled: boolean) => void;
     onDrawAndHoldChange: (enabled: boolean) => void;
     onPatternChange: (pattern: StrokePattern) => void;
     onSpacingChange: (spacing: number) => void;
@@ -190,6 +194,13 @@
         constrain,
         false,
         () => onConstrainChange(!constrain),
+      )}
+      {@render toggle(
+        $t("workspace.snapEnds"),
+        $t("workspace.snapEndsHint"),
+        endSnap,
+        false,
+        () => onEndSnapChange(!endSnap),
       )}
       {@render toggle(
         $t("workspace.fillClosedShapes"),

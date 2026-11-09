@@ -88,6 +88,8 @@ pub struct AppSettings {
     /// Gap factor for the Shapes tool's pattern.
     pub shape_pattern_spacing: f64,
     pub shape_constrain: bool,
+    /// Line ends and rectangle corners drawn or dragged with the Shapes tool meet nearby ends.
+    pub shape_end_snap: bool,
     /// Pen shortcut: pause at the end of a deliberate mark to promote it into a shape.
     pub draw_and_hold_shapes: bool,
     pub held_line_minimum_pt: f64,
@@ -263,6 +265,7 @@ impl Default for AppSettings {
             shape_pattern: default_pen_pattern(),
             shape_pattern_spacing: 1.0,
             shape_constrain: false,
+            shape_end_snap: true,
             draw_and_hold_shapes: true,
             held_line_minimum_pt: 6.0,
             history_corner: "auto".into(),
@@ -870,6 +873,15 @@ mod tests {
             serde_json::from_str(&serde_json::to_string(&legacy).unwrap()).unwrap();
         assert!(!loaded.ai_helper.enabled);
         assert_eq!(loaded.touch_glide, 1.5);
+    }
+
+    #[test]
+    fn legacy_settings_turn_shape_end_snapping_on() {
+        let legacy: super::AppSettings =
+            serde_json::from_str(r#"{"shapeConstrain":true}"#).unwrap();
+        assert!(legacy.shape_end_snap);
+        let off: super::AppSettings = serde_json::from_str(r#"{"shapeEndSnap":false}"#).unwrap();
+        assert!(!super::sanitize(off).shape_end_snap);
     }
     #[test]
     fn native_labels_accept_only_supported_language_ids() {

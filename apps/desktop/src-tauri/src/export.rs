@@ -147,19 +147,25 @@ fn selected_pages<'a>(
         .collect())
 }
 
-/// A disposable first-page preview uses the exact same material/order as ordinary export.
+/// A disposable page preview uses the exact same material/order as ordinary export: the first
+/// page for a notebook cover, or `page_id` for a tile in the page overview.
 #[tauri::command]
 pub async fn render_notebook_cover(
     roots: tauri::State<'_, AllowedRoots>,
     histories: tauri::State<'_, NotebookHistories>,
     root: String,
     page_text_baseline_grid: bool,
+    page_id: Option<String>,
 ) -> Result<tauri::ipc::Response, String> {
     let root = ensure_allowed(&roots, &root)?;
     let histories = histories.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let page = with_notebook(&histories, || {
-            let bundle = storage::open_notebook(&root).map_err(|error| error.to_string())?;
+            let bundle = match &page_id {
+                Some(page_id) => storage::open_page(&root, page_id),
+                None => storage::open_notebook(&root),
+            }
+            .map_err(|error| error.to_string())?;
             export_page_from_bundle(&bundle, page_text_baseline_grid)
         })?;
         let bytes = render_page_pdf(&root, &page).map_err(|error| error.to_string())?;

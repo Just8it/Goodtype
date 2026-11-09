@@ -53,6 +53,8 @@ export type NotebookSetup = {
   preset: PresetChoice;
   /** Start from a PDF: once created, the chosen document's pages replace the blank first page. */
   fromPdf?: boolean;
+  /** Which of the PDF's pages to bring in, in print-dialog form; empty or absent takes them all. */
+  pdfPages?: string;
 };
 
 export const DEFAULT_PRESET_PATH = "/styles/default.typ";

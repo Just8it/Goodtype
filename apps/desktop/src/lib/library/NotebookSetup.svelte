@@ -9,6 +9,7 @@
   import { DEFAULT_PAGE_SIZE, PAGE_SIZES, pageSizes, geometryOf, type Orientation } from "../page/sizes";
   import { PAPER_TONES, paperTones, templateGroups } from "../page/templates";
   import { nameProblem } from "./library";
+  import { isPageListSyntax } from "../workspace/exportTarget";
 
   let { busy = false, onConfirm, onCancel }: {
     busy?: boolean;
@@ -20,6 +21,7 @@
   let sizeId = $state(DEFAULT_PAGE_SIZE.id);
   let orientation = $state<Orientation>("portrait");
   let fromPdf = $state(false);
+  let pdfPages = $state("");
   let toneId = $state(PAPER_TONES[0].id);
   let templateId = $state("blank-white");
   let preset = $state<PresetChoice>({ kind: "none" });
@@ -31,7 +33,8 @@
   const tone = $derived(PAPER_TONES.find((item) => item.id === toneId) ?? PAPER_TONES[0]);
   const templates = $derived(templateGroups(tone, $t).flatMap((group) => group.templates));
   const problem = $derived(name ? nameProblem(name, $t) : null);
-  const ready = $derived(Boolean(name) && !problem && !busy);
+  const pdfPagesValid = $derived(!fromPdf || isPageListSyntax(pdfPages));
+  const ready = $derived(Boolean(name) && !problem && !busy && pdfPagesValid);
 
   onMount(async () => {
     field?.focus();
@@ -74,6 +77,7 @@
       background: { kind: "template", template },
       preset,
       fromPdf,
+      ...(fromPdf && pdfPages.trim() ? { pdfPages: pdfPages.trim() } : {}),
     });
   }
 </script>
@@ -95,6 +99,12 @@
         </div>
         {#if fromPdf}<small>{$t("library.pdfStartHelp")}</small>{/if}
       </fieldset>
+      {#if fromPdf}
+      <label class="wide">{$t("library.pdfPageList")}
+        <input bind:value={pdfPages} type="text" inputmode="numeric" spellcheck="false" autocomplete="off" placeholder={$t("library.pdfPageListPlaceholder")} aria-invalid={!pdfPagesValid} aria-describedby="notebook-pdf-pages-help" />
+        <small id="notebook-pdf-pages-help" class:error={!pdfPagesValid}>{pdfPagesValid ? $t("library.pdfPageListHelp") : $t("library.pdfPageListInvalid")}</small>
+      </label>
+      {/if}
       <!-- A PDF brings its own page sizes, so the paper controls only apply to blank paper. -->
       {#if !fromPdf}
       <label>{$t("library.pageSize")}

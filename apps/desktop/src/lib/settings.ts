@@ -146,6 +146,8 @@ export type AppSettings = {
   shapePattern: StrokePattern;
   shapePatternSpacing: number;
   shapeConstrain: boolean;
+  /** Line ends and rectangle corners meet nearby ends and corners; Alt places freely. */
+  shapeEndSnap: boolean;
   drawAndHoldShapes: boolean;
   heldLineMinimumPt: number;
   /** Where the undo and redo buttons sit; `auto` keeps them clear of the palette on their own. */
@@ -215,6 +217,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   shapePattern: "solid",
   shapePatternSpacing: 1,
   shapeConstrain: false,
+  shapeEndSnap: true,
   drawAndHoldShapes: true,
   heldLineMinimumPt: 6,
   historyCorner: "auto",

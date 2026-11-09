@@ -80,6 +80,7 @@
       opacity: 1,
     },
     shapeConstrain = false,
+    shapeEndSnap = true,
     drawAndHoldShapes = true,
     heldLineMinimumPt = 6,
     eraseRadiusPt = 8,
@@ -158,6 +159,7 @@
     shapeKind?: ShapeKind;
     shapeStyle?: ShapeStyle;
     shapeConstrain?: boolean;
+    shapeEndSnap?: boolean;
     drawAndHoldShapes?: boolean;
     heldLineMinimumPt?: number;
     eraseRadiusPt?: number;
@@ -305,6 +307,8 @@
       {pageWidthPt}
       {pageHeightPt}
       {zoom}
+      endSnap={shapeEndSnap}
+      snapShapes={displayedShapes}
       {toPageDelta}
       onSelect={interactive ? () => onSelectShape?.(shape.id) : undefined}
       onChange={interactive ? (next, commit) => onChangeShape?.(next, commit) : undefined}
@@ -344,6 +348,7 @@
     {shapeKind}
     {shapeStyle}
     {shapeConstrain}
+    {shapeEndSnap}
     {drawAndHoldShapes}
     {heldLineMinimumPt}
     {eraseRadiusPt}

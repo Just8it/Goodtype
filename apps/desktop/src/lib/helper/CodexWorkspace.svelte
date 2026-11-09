@@ -125,7 +125,7 @@
     }
     else tools = [...tools, event.value].slice(-500);
   }
-  async function send(prompt: string) {
+  async function send(prompt: string, retry = false) {
     if (!canSend(prompt, busy)) return false;
     const usageOverride = allowImages ? "balanced" as const : undefined;
     const captured = captureHelperIntent(intent());
@@ -160,7 +160,7 @@
       }
       if (disposed) { await helperCodexClose(conversationId); return false; }
       followOutput = true;
-      if (run) history = [...history, { prompt: lastPrompt, answer: text }];
+      if (run && !retry) history = [...history, { prompt: lastPrompt, answer: text }];
       run = { ...result, state: "starting" };
       lastPrompt = prompt; text = ""; lastItem = "";
       tools = []; stopping = false;
@@ -172,6 +172,10 @@
       const queued = pending; pending = [];
       for (const event of queued) receive(event);
     }
+  }
+  async function retryConnection() {
+    if (busy || run?.state !== "failed" || run.problem?.code !== "provider_unreachable") return;
+    await send(lastPrompt, true);
   }
   async function stop() {
     if (!run || stopping) return;
@@ -251,7 +255,7 @@
   {/each}
   {#if run}
     <p class="request">{lastPrompt}</p>
-    <CodexRunPanel state={run.state} {text} {tools} problem={run.problem} {stopping} onStop={stop} onClose={close} />
+    <CodexRunPanel state={run.state} {text} {tools} problem={run.problem} {stopping} onStop={stop} onRetry={retryConnection} retryDisabled={busy} onClose={close} />
     <div bind:this={responseEnd} aria-hidden="true"></div>
   {:else}
     <div class="intro-heading"><h3>{$t("codex.askHeading")}</h3></div>

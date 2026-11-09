@@ -2,6 +2,7 @@
   import { t, formatNumber, displayLocale } from "../i18n";
   import { dismissable } from "./dismiss";
   import { sourceBehavior, resolvePosition, type AddPageGroup, type AddPageSource, type AddPageWhere } from "./addPage";
+  import { isPageListSyntax } from "./exportTarget";
 
   /**
    * The add-page panel: three columns instead of one long scroll.
@@ -84,6 +85,8 @@
   let count = $state(1);
   let added = $state(0);
   let panel = $state<HTMLElement>();
+  /** Which PDF pages to bring in. Only the syntax is checked here; the file is not chosen yet. */
+  let pdfPages = $state("");
 
   /** Paper shelves. The import shelf is pinned above the library rather than scrolling with it. */
   const paperGroups = $derived(groups.filter((group) => (group.lane ?? "blank") === "blank"));
@@ -107,6 +110,8 @@
   const behavior = $derived(sourceBehavior(selected));
   const importing = $derived(behavior.importFile);
   const effectiveCount = $derived(behavior.single ? 1 : count);
+  const pdfPagesValid = $derived(!behavior.pdf || isPageListSyntax(pdfPages));
+  const blocked = $derived(!selected || selected.disabled || !pdfPagesValid);
 
   const shelves = $derived(
     category === "all" ? paperGroups : paperGroups.filter((group) => group.id === category),
@@ -153,8 +158,12 @@
   ]);
 
   function commit(keepOpen: boolean) {
-    if (!selected || selected.disabled) return;
-    selected.onSelect(resolvePosition(canPlaceRelative ? where : "last", currentPageId), effectiveCount);
+    if (!selected || blocked) return;
+    selected.onSelect(
+      resolvePosition(canPlaceRelative ? where : "last", currentPageId),
+      effectiveCount,
+      behavior.pdf ? { pdfPages: pdfPages.trim() } : undefined,
+    );
     if (keepOpen) added += effectiveCount;
     else onClose();
   }
@@ -338,6 +347,27 @@
           {/each}
         </div>
       </section>
+
+      {#if behavior.pdf}
+        <!-- The one setting a PDF does read: which of its pages to bring in. -->
+        <section class="pdf-pages">
+          <label class="eyebrow" for="add-page-pdf-pages">{$t("workspace.pdfPageList")}</label>
+          <input
+            id="add-page-pdf-pages"
+            type="text"
+            inputmode="numeric"
+            spellcheck="false"
+            autocomplete="off"
+            bind:value={pdfPages}
+            placeholder={$t("workspace.pdfPageListPlaceholder")}
+            aria-invalid={!pdfPagesValid}
+            aria-describedby="add-page-pdf-pages-help"
+          />
+          <span id="add-page-pdf-pages-help" class="help" class:invalid={!pdfPagesValid}>
+            {pdfPagesValid ? $t("workspace.pdfPageListHelp") : $t("workspace.pdfPageListInvalid")}
+          </span>
+        </section>
+      {/if}
     </div>
 
     <!-- Column B. Filters and the import sit in a fixed band; only the papers scroll. -->
@@ -454,7 +484,7 @@
         <button
           type="button"
           class="add"
-          disabled={!selected || selected.disabled}
+          disabled={blocked}
           onclick={(event) => commit(event.shiftKey)}
         >{addLabel}</button>
         <span class="note">
@@ -616,6 +646,30 @@
   }
 
   section { display: flex; flex-direction: column; gap: 8px; }
+
+  .pdf-pages input {
+    box-sizing: border-box;
+    width: 100%;
+    height: var(--control);
+    padding: 0 10px;
+    border: 1px solid var(--edge);
+    border-radius: var(--radius);
+    background: var(--charcoal);
+    caret-color: var(--blueprint-light);
+    color: var(--text);
+    font: inherit;
+    font-size: var(--text-md);
+    font-variant-numeric: tabular-nums;
+    transition: border-color var(--fast) ease;
+  }
+
+  .pdf-pages input::placeholder { color: var(--quiet); }
+  .pdf-pages input::selection { background: var(--accent-select); }
+  .pdf-pages input:hover { border-color: var(--edge-strong); }
+  .pdf-pages input:focus-visible { border-color: var(--blueprint); outline: none; }
+  .pdf-pages input[aria-invalid="true"] { border-color: var(--oxide); }
+  .pdf-pages .help { color: var(--quiet); font-size: var(--text-sm); }
+  .pdf-pages .help.invalid { color: var(--oxide-text); }
 
   .eyebrow {
     color: var(--muted);

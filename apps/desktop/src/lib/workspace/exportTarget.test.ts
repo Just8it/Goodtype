@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { exportTarget, INCLUDE_EVERYTHING, parsePageList } from "./exportTarget";
+import { exportTarget, INCLUDE_EVERYTHING, isPageListSyntax, parsePageList } from "./exportTarget";
 
 const pages = ["p1", "p2", "p3", "p4", "p5", "p6", "p7", "p8", "p9"];
 const choice = { scope: "notebook" as const, pages: "", include: INCLUDE_EVERYTHING, splitCalculationsA4: false };
@@ -15,6 +15,16 @@ describe("parsePageList", () => {
     expect(parsePageList("0", 9)).toBeNull();
     expect(parsePageList("8-12", 9)).toBeNull();
     expect(parsePageList("a", 9)).toBeNull();
+  });
+});
+
+describe("isPageListSyntax", () => {
+  it("accepts numbers, ranges, commas and spaces, and an empty list", () => {
+    for (const text of ["", "  ", "7", "1-3, 7", "9–8 2", "1,2;3"]) expect(isPageListSyntax(text)).toBe(true);
+  });
+
+  it("refuses anything else while the writer is still typing", () => {
+    for (const text of ["a", "1-", "-3", "1--3", "2.5", "1-3x"]) expect(isPageListSyntax(text)).toBe(false);
   });
 });
 

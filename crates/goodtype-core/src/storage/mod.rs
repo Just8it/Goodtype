@@ -41,7 +41,7 @@ pub use history::{
 pub use pages::{
     CalculationExecutionPlan, CalculationStep, NotebookStructureHistory, PagePosition,
     StructureHistoryResult, advance_structure, calculation_execution_plan, create_calculation_page,
-    create_notebook, create_page, create_page_with_text, delete_page, duplicate_page,
+    create_notebook, create_page, create_page_with_text, delete_page, delete_pages, duplicate_page,
     import_calculation_page, import_pdf_pages, observe_structure, open_notebook, open_page,
     redo_structure, reorder_pages, save_notebook, undo_structure,
 };

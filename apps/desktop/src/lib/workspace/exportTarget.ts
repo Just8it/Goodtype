@@ -43,17 +43,29 @@ export type ExportTarget = {
   pageCount: number;
 };
 
+/** One entry of a page list: a page number, or a range written with a hyphen or an en dash. */
+const PAGE_LIST_ENTRY = /^(\d+)(?:[-–](\d+))?$/;
+const PAGE_LIST_SEPARATORS = /[,;\s]+/;
+
+/**
+ * Whether a page list is written right, before anything knows how many pages there are: numbers
+ * and ranges separated by commas or spaces. Empty counts as written right; it means every page.
+ */
+export function isPageListSyntax(text: string): boolean {
+  return text.split(PAGE_LIST_SEPARATORS).filter(Boolean).every((part) => PAGE_LIST_ENTRY.test(part));
+}
+
 /**
  * Reads a print-dialog page list: numbers and ranges separated by commas or spaces, one-based.
  * A range may be written backwards. Returns the pages in notebook order without repeats, or null
  * when anything in it is not a page of this notebook, so the menu can say so instead of guessing.
  */
 export function parsePageList(text: string, pageCount: number): number[] | null {
-  const parts = text.split(/[,;\s]+/).filter(Boolean);
+  const parts = text.split(PAGE_LIST_SEPARATORS).filter(Boolean);
   if (!parts.length) return null;
   const pages = new Set<number>();
   for (const part of parts) {
-    const match = /^(\d+)(?:[-–](\d+))?$/.exec(part);
+    const match = PAGE_LIST_ENTRY.exec(part);
     if (!match) return null;
     const a = Number(match[1]);
     const b = Number(match[2] ?? match[1]);
