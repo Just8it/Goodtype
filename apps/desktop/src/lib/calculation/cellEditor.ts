@@ -27,6 +27,13 @@ const cellHighlighting = syntaxHighlighting(HighlightStyle.define([
   { tag: tags.invalid, color: "var(--calculation-error, #ff8b94)" },
 ]));
 
+function outOfView(node: HTMLElement) {
+  const box = node.getBoundingClientRect();
+  const frame = node.closest(".page-scroll-content")?.getBoundingClientRect();
+  if (!frame) return false;
+  return box.bottom <= frame.top || box.top >= frame.bottom || box.right <= frame.left || box.left >= frame.right;
+}
+
 /**
  * One live view moves between the inline and side hosts. Each cell keeps its own state, so the
  * caret, selection and local undo survive both a host move and a switch to another cell.
@@ -46,6 +53,9 @@ export function createCellEditor(onChange: (key: string, source: string) => void
         { key: "Shift-Enter", run: () => { onRun(true); return true; } },
         { key: "Mod-Enter", run: () => { onRun(false); return true; } },
       ])),
+      // Typing into a cell scrolled out of view is how one types while reading another page, so
+      // a keystroke must not drag the cell back. Partly in view, it follows the caret as usual.
+      EditorView.scrollHandler.of(view => outOfView(view.dom)),
       EditorView.updateListener.of(update => { if (update.docChanged && active === key) onChange(key, update.state.doc.toString()); }),
       EditorView.theme({
         "&": { fontSize: "11px", color: "var(--text, #e9ebee)", backgroundColor: "#1f2329" },

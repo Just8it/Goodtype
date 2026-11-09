@@ -19,6 +19,7 @@
   let name = $state("");
   let sizeId = $state(DEFAULT_PAGE_SIZE.id);
   let orientation = $state<Orientation>("portrait");
+  let fromPdf = $state(false);
   let toneId = $state(PAPER_TONES[0].id);
   let templateId = $state("blank-white");
   let preset = $state<PresetChoice>({ kind: "none" });
@@ -72,6 +73,7 @@
       geometry: geometryOf(size, orientation),
       background: { kind: "template", template },
       preset,
+      fromPdf,
     });
   }
 </script>
@@ -85,6 +87,16 @@
       </label>
 
       <div class="fields">
+      <fieldset class="wide">
+        <legend>{$t("library.startWith")}</legend>
+        <div class="segmented">
+          <button type="button" class:active={!fromPdf} aria-pressed={!fromPdf} onclick={() => (fromPdf = false)}>{$t("library.blankPaper")}</button>
+          <button type="button" class:active={fromPdf} aria-pressed={fromPdf} onclick={() => (fromPdf = true)}>{$t("library.pdfPages")}</button>
+        </div>
+        {#if fromPdf}<small>{$t("library.pdfStartHelp")}</small>{/if}
+      </fieldset>
+      <!-- A PDF brings its own page sizes, so the paper controls only apply to blank paper. -->
+      {#if !fromPdf}
       <label>{$t("library.pageSize")}
         <select bind:value={sizeId}>{#each pageSizes($t) as size}<option value={size.id}>{size.name} · {size.detail}</option>{/each}</select>
       </label>
@@ -101,6 +113,7 @@
       <label>{$t("library.paperTemplate")}
         <select bind:value={templateId}>{#each templates as template}<option value={template.id}>{template.name}</option>{/each}</select>
       </label>
+      {/if}
       <label class="wide">{$t("library.typstPreset")}
         <select value={presetValue} onchange={(event) => void choosePreset(event.currentTarget.value)}>
           <option value="none">{$t("library.none")}</option>
@@ -116,7 +129,7 @@
   {/snippet}
   {#snippet actions()}
     <button type="button" class="control" disabled={busy} onclick={onCancel}>{$t("library.cancel")}</button>
-    <button type="submit" form="notebook-setup-form" class="primary" disabled={!ready}>{$t("library.createNotebook")}</button>
+    <button type="submit" form="notebook-setup-form" class="primary" disabled={!ready}>{fromPdf ? $t("library.createAndChoosePdf") : $t("library.createNotebook")}</button>
   {/snippet}
 </Dialog>
 

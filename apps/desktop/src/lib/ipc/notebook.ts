@@ -109,10 +109,12 @@ export function importPdfPages(
   sourcePath: string,
   geometries: PageGeometry[],
   activePageId: string,
+  /** A page the imported pages take the place of, in the same undo step. */
+  replacing?: string,
 ): Promise<StructureHistoryResult> {
   return invoke<StructureHistoryResult>("import_pdf_pages", {
     root,
-    request: { modifiedAt, position, sourcePath, geometries, activePageId },
+    request: { modifiedAt, position, sourcePath, geometries, activePageId, replacing },
   });
 }
 

@@ -515,6 +515,9 @@ pub struct ImportPdfPagesRequest {
     source_path: String,
     geometries: Vec<PageGeometry>,
     active_page_id: String,
+    /// A page the import takes the place of: the blank starter page of a notebook made from a PDF.
+    #[serde(default)]
+    replacing: Option<String>,
 }
 
 #[tauri::command]
@@ -532,6 +535,7 @@ pub async fn import_pdf_pages(
             &request.position,
             &request.source_path,
             &request.geometries,
+            request.replacing.as_deref(),
         )
         .map_err(NotebookError::from)?;
         advance_structure_result(store, root, snapshot)

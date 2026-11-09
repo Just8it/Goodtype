@@ -590,6 +590,7 @@ pub fn import_pdf_pages(
     position: &PagePosition,
     source_path: &str,
     geometries: &[PageGeometry],
+    replacing: Option<&str>,
 ) -> Result<NotebookSnapshot, StorageError> {
     if geometries.is_empty() || geometries.len() > 1_000 {
         return invalid("a PDF import must contain between 1 and 1000 pages");
@@ -648,6 +649,17 @@ pub fn import_pdf_pages(
             },
             ink_path,
         ));
+    }
+    // A notebook started from a PDF swaps its blank starter page for the document in the same
+    // manifest write, so it is one step to undo. As with deletion, only the reference goes.
+    if let Some(page_id) = replacing {
+        let index = guard
+            .manifest
+            .pages
+            .iter()
+            .position(|page| page.id == page_id)
+            .ok_or_else(|| invalid_error("the page to replace is not in this notebook"))?;
+        guard.manifest.pages.remove(index);
     }
     guard.manifest.modified_at = modified_at.to_owned();
 
@@ -1735,6 +1747,7 @@ mod tests {
                     height_pt: 595.0,
                 },
             ],
+            None,
         )
         .unwrap();
 
@@ -1758,6 +1771,67 @@ mod tests {
             second.page.background,
             PageBackground::Pdf { page: 2, .. }
         ));
+    }
+
+    #[test]
+    fn a_pdf_import_can_replace_the_starter_page() {
+        let temporary = tempfile::tempdir().unwrap();
+        let notebook_root = temporary.path().join("notebook");
+        create_notebook(&notebook_root, &snapshot()).unwrap();
+        let source = store_pdf_reference(
+            &notebook_root,
+            "lecture.pdf",
+            b"%PDF-1.7
+fixture",
+        )
+        .unwrap();
+        let geometry = PageGeometry {
+            width_pt: 595.0,
+            height_pt: 842.0,
+        };
+        let starter = PagePosition::Before {
+            page_id: "page-001".into(),
+        };
+
+        let imported = import_pdf_pages(
+            &notebook_root,
+            "2026-11-08T12:00:00Z",
+            &starter,
+            &source,
+            &[geometry.clone(), geometry.clone()],
+            Some("page-001"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            imported
+                .manifest
+                .pages
+                .iter()
+                .map(|page| page.id.as_str())
+                .collect::<Vec<_>>(),
+            ["page-002", "page-003"]
+        );
+        assert!(matches!(
+            imported.page.background,
+            PageBackground::Pdf { page: 1, .. }
+        ));
+        // Naming a page the notebook does not have changes nothing.
+        assert!(
+            import_pdf_pages(
+                &notebook_root,
+                "2026-11-08T12:01:00Z",
+                &PagePosition::Last,
+                &source,
+                &[geometry],
+                Some("page-404"),
+            )
+            .is_err()
+        );
+        assert_eq!(
+            open_notebook(&notebook_root).unwrap().manifest.pages.len(),
+            2
+        );
     }
 
     #[test]

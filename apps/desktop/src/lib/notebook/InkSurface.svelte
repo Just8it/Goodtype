@@ -261,6 +261,9 @@
   const SHAPE_HOLD_MS = 500;
   const SHAPE_SNAP_DEGREES = 15;
   const SHAPE_HOLD_DRIFT_PT = 4;
+  // Once a held mark has snapped, the hand relaxes and the tip creeps; only a deliberate move
+  // past this many screen points goes back to freehand.
+  const SHAPE_RELEASE_DRIFT_PT = 14;
 
   $effect(() => {
     // Reads `strokes`, never `localStrokes`: now that the local copy is reactive, reading it here
@@ -961,7 +964,8 @@
   function updateHoldPreview(active: Extract<Gesture, { kind: "draw" }>): void {
     const point = active.points.at(-1);
     if (!point) return;
-    if (Math.hypot(point.x - active.holdAnchor.x, point.y - active.holdAnchor.y) <= SHAPE_HOLD_DRIFT_PT / zoom) return;
+    const drift = active.shapePreview ? SHAPE_RELEASE_DRIFT_PT : SHAPE_HOLD_DRIFT_PT;
+    if (Math.hypot(point.x - active.holdAnchor.x, point.y - active.holdAnchor.y) <= drift / zoom) return;
     active.holdAnchor = point;
     active.shapePreview = null;
     armHoldPreview(active);

@@ -51,6 +51,8 @@ export type NotebookSetup = {
   geometry: PageGeometry;
   background: PageBackground;
   preset: PresetChoice;
+  /** Start from a PDF: once created, the chosen document's pages replace the blank first page. */
+  fromPdf?: boolean;
 };
 
 export const DEFAULT_PRESET_PATH = "/styles/default.typ";

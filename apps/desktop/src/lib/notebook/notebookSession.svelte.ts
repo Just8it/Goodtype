@@ -735,7 +735,7 @@ export function createSession(env: SessionEnvironment) {
         scheduleFocus(Math.max(FOCUS_SETTLE_MS - still, 50));
         return;
       }
-      if (!env.pageViewport) return;
+      if (!env.pageViewport || typingOnActivePage()) return;
       const bestId = pageAtViewportCenter(
         [...pageNodes].filter(([id]) => nearPageIds.has(id)).map(([id, node]) => ({ id, bounds: node.getBoundingClientRect() })),
         env.pageViewport.getBoundingClientRect(),
@@ -745,6 +745,19 @@ export function createSession(env: SessionEnvironment) {
         else void activatePage(bestId, true);
       }
     }, delay);
+  }
+
+  /**
+   * A caret in an editor on the active page (a Python cell, a title being renamed) pins that
+   * page: scrolling away to look something up must not take the editor away mid-sentence.
+   * Clicking anywhere else moves the focus, and the focusout that follows lets focus catch up.
+   */
+  function typingOnActivePage() {
+    const focused = globalThis.document?.activeElement;
+    if (!(focused instanceof HTMLElement)) return false;
+    if (!focused.isContentEditable && !(focused instanceof HTMLTextAreaElement) && !(focused instanceof HTMLInputElement)) return false;
+    if (pageNodes.get(activePageId)?.contains(focused)) return true;
+    return Boolean(activeSnapshot?.page.calculation && focused.closest(".side-editor"));
   }
 
   async function activatePage(pageId: string, automatic = false) {
@@ -806,7 +819,7 @@ export function createSession(env: SessionEnvironment) {
       }
       // A new contact or scroll may begin while Rust reads the page. Never retarget that gesture.
       if (env.navigation.pagePointers.size || env.navigation.panFrom || env.navigation.touchPanStart || env.navigation.pinchStart || env.navigation.touchInertiaFrame ||
-        (automatic && (env.navigation.automaticPageFocusLocked || performance.now() - lastScrollAt < FOCUS_SETTLE_MS))) {
+        (automatic && (env.navigation.automaticPageFocusLocked || typingOnActivePage() || performance.now() - lastScrollAt < FOCUS_SETTLE_MS))) {
         scheduleFocus();
         return;
       }
@@ -1354,7 +1367,8 @@ export function createSession(env: SessionEnvironment) {
     });
   }
 
-  async function importPdf(position: PagePosition) {
+  /** `replacing` names a page the PDF takes the place of: a new notebook's blank first page. */
+  async function importPdf(position: PagePosition, replacing?: string) {
     env.moreOpen = false;
     if (!env.tauriAvailable) return;
     await replacingPage(async () => {
@@ -1362,7 +1376,10 @@ export function createSession(env: SessionEnvironment) {
       busy = true;
       try {
         const sourcePath = await pickPdfReference(root);
-        if (!sourcePath) return;
+        if (!sourcePath) {
+          if (replacing) status = notice("workspace.noPdfChosen");
+          return;
+        }
         status = notice("workspace.readingPDFPages");
         const geometries = await pdfPageGeometries(root, sourcePath);
         const result = await importPdfPages(
@@ -1372,6 +1389,7 @@ export function createSession(env: SessionEnvironment) {
           sourcePath,
           geometries,
           activePageId,
+          replacing,
         );
         resetPageEntries();
         applySnapshot(result.snapshot);
@@ -1384,6 +1402,7 @@ export function createSession(env: SessionEnvironment) {
         await tick();
         scrollToPage(result.snapshot.page.id);
         status = notice("counts.importedPdf", { count: geometries.length });
+        if (replacing) void writeCover();
       } catch (error) {
         status = notice("workspace.couldNotImportPDF", { "value1": env.message(error) });
       } finally {

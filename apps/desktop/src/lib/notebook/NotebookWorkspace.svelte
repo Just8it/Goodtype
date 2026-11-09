@@ -1826,7 +1826,7 @@
 <main tabindex="-1" class="workspace-app" class:ai-open={aiPanelOpen} onpointerdowncapture={event => {
     if (event.target instanceof Element && event.target.closest(".active-page") && !event.target.closest(".helper-crop, .selection-actions") && tool !== "lasso") region = null;
     selection.closeObjectSelection(event);
-  }} onwheel={navigation.wheelZoom}>
+  }} onfocusout={() => session.scheduleFocus()} onwheel={navigation.wheelZoom}>
 <HelperWorkspace pages={helperPages} {session} bind:activityOpen bind:panelOpen={aiPanelOpen} hasConversation={Boolean(codexSelection && $codexStatus)} available={tauriAvailable} onError={helperError}>
 {#snippet conversation(review)}
 {#if codexSelection && $codexStatus}
@@ -1853,7 +1853,10 @@
         onOpen={(nextRoot) => void session.openNotebookAt(nextRoot)}
         onCreate={(nextRoot, setup) => {
           showInitialSetup = false;
-          void session.openNotebookAt(nextRoot, { createIfMissing: true, setup });
+          void session.openNotebookAt(nextRoot, { createIfMissing: true, setup }).then((opened) => {
+            const starter = session.activePageId;
+            if (opened && setup.fromPdf) void session.importPdf({ kind: "before", pageId: starter }, starter);
+          });
         }}
         onMove={session.moveLibrarySelection}
         returnLabel={session.openTabs.find((tab) => tab.root === session.root)?.title}
