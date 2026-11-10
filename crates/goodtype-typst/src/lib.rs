@@ -587,19 +587,20 @@ fn check_candidate_with(
 }
 
 /// Check a preset from granted bytes only (`/styles/<filename>` and its dependencies in
-/// `files`). Nothing is read from the notebook and no package is downloaded: a missing
-/// dependency or uncached package is a diagnostic, never a fallback.
+/// `files`). Notebook reads never fall back to disk. Package imports follow the caller's
+/// policy, independently of the project-file grant.
 pub fn check_preset_granted(
     root: &Path,
     filename: &str,
     files: &GrantedFiles,
+    allow_remote_packages: bool,
 ) -> Result<PresetCheck, String> {
     check_preset(
         root,
         filename,
         Some(files),
-        false,
-        embedded::package_loader(false),
+        allow_remote_packages,
+        embedded::package_loader(allow_remote_packages),
     )
 }
 
@@ -622,7 +623,7 @@ fn check_preset(
             source,
             width_pt,
             generation: 0,
-            allow_remote_packages: allow_remote_packages && files.is_none(),
+            allow_remote_packages,
         },
         files,
         packages,
@@ -1022,7 +1023,7 @@ mod tests {
 mod preset_tests;
 
 /// Compile Page text against a granted snapshot, retaining caller-relative diagnostics.
-/// Packages resolve from the local cache only.
+/// Project reads are grant-only; packages follow the request's download policy.
 pub fn compile_page_text_granted(
     root: &Path,
     page: &export::ExportPage,
@@ -1032,12 +1033,9 @@ pub fn compile_page_text_granted(
     compile_page_text_with(
         root,
         page,
-        &CompileRequest {
-            allow_remote_packages: false,
-            ..request.clone()
-        },
+        request,
         Some(files),
-        embedded::package_loader(false),
+        embedded::package_loader(request.allow_remote_packages),
     )
     .map(|(result, _)| result)
 }

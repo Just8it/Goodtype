@@ -58,7 +58,7 @@
     {#if prompt.length}<small>{$t("codex.limit", { length: formatNumber(prompt.length) })}</small>{/if}
     {#if onEnd}<button class="end" type="button" title={$t("proposal.lifetime")} disabled={ending} onclick={onEnd}>{$t("codex.endConversation")}</button>{/if}
   </div>
-  <div id={id + "-details"} class="details" popover="auto"><p>{$t("codex.experimentalHint")}</p><p>{details} {$t("codex.disclosure")}</p></div>
+  <div id={id + "-details"} class="details" popover="auto"><p>{$t("codex.experimentalHint")}</p><p>{details} {$t("codex.disclosure")}</p><p>{$t("codex.packageDownloads")}</p></div>
 </form>
 <style>
   .context-block { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 2px; margin: -2px; }

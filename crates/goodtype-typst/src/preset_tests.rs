@@ -216,13 +216,11 @@ fn cold_cache_package_presets_follow_the_download_policy() {
     assert_eq!(requests.load(Ordering::SeqCst), 1);
 }
 
-/// P4 helper boundary: granted checks read only granted bytes and cached packages. A denied
-/// project file on disk and an uncached package never reach disk or network, even when the
-/// loader handed in could download.
+/// Package-download policy must never widen the notebook-file grant.
 #[test]
-fn granted_checks_never_fall_back_to_disk_or_network() {
+fn granted_checks_preserve_file_grants_and_follow_package_policy() {
     let root = notebook(&[("styles/secret.typ", "#let secret = \"SECRET_UNSHARED\"")]);
-    let (_cache, downloading, requests) = isolated_packages();
+    let (cache, downloading, requests) = isolated_packages();
     let files = GrantedFiles::from([(
         "/styles/a.typ".to_owned(),
         b"#import \"secret.typ\": secret\n#let preset(body, rhythm: 16pt) = [#secret #body]"
@@ -236,10 +234,58 @@ fn granted_checks_never_fall_back_to_disk_or_network() {
         "/styles/a.typ".to_owned(),
         PACKAGE_PRESET.as_bytes().to_vec(),
     )]);
-    let check = check_preset(root.path(), "a.typ", Some(&files), true, downloading).unwrap();
+    let offline = offline_packages(cache.path());
+    let check = check_preset(root.path(), "a.typ", Some(&files), false, offline).unwrap();
     assert!(!check.rendered);
     assert_eq!(requests.load(Ordering::SeqCst), 0);
-    assert!(!check_preset_granted(root.path(), "missing.typ", &files).is_ok_and(|c| c.rendered));
+    let check = check_preset(root.path(), "a.typ", Some(&files), true, downloading).unwrap();
+    assert!(check.rendered, "{:?}", check.diagnostics);
+    assert_eq!(requests.load(Ordering::SeqCst), 1);
+    let check = check_preset(root.path(), "a.typ", Some(&files), false, offline).unwrap();
+    assert!(check.rendered, "{:?}", check.diagnostics);
+    assert_eq!(requests.load(Ordering::SeqCst), 1);
+    assert!(
+        !check_preset_granted(root.path(), "missing.typ", &files, false).is_ok_and(|c| c.rendered)
+    );
+}
+
+#[test]
+fn granted_block_and_page_previews_fetch_once_and_work_offline_afterward() {
+    for page_text in [false, true] {
+        let root = notebook(&[("private.typ", "PRIVATE_NOTE")]);
+        let (cache, downloading, requests) = isolated_packages();
+        let offline = offline_packages(cache.path());
+        let source = "#import \"@preview/goodtype-fixture:0.1.0\": shade\n#text(fill: shade)[Fetched package]";
+        let page = preset_sample_page();
+        let compile = |source: &str, allowed: bool| {
+            let request = CompileRequest {
+                source: source.into(),
+                width_pt: 300.0,
+                generation: 0,
+                allow_remote_packages: allowed,
+            };
+            let files = GrantedFiles::new();
+            let packages = if allowed { downloading } else { offline };
+            if page_text {
+                compile_page_text_with(root.path(), &page, &request, Some(&files), packages)
+                    .unwrap()
+                    .0
+            } else {
+                compile_block_with(root.path(), &request, Some(&files), packages).unwrap()
+            }
+        };
+        assert!(compile(source, false).svg.is_none());
+        assert_eq!(requests.load(Ordering::SeqCst), 0);
+        let fetched = compile(source, true);
+        assert!(fetched.svg.is_some(), "{:?}", fetched.diagnostics);
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+        assert!(compile(source, false).svg.is_some());
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+        let denied = compile("#include \"private.typ\"", true);
+        assert!(denied.svg.is_none());
+        assert!(!format!("{:?}", denied.diagnostics).contains("PRIVATE_NOTE"));
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+    }
 }
 
 /// P6: relative imports and includes in a preamble preset resolve beside the preset file, both
@@ -275,7 +321,7 @@ fn nested_relative_dependencies_resolve_from_each_importer_on_disk_and_granted()
     .map(|(path, text)| (path.to_owned(), text.as_bytes().to_vec()))
     .collect();
     let empty = tempfile::tempdir().unwrap();
-    let granted = check_preset_granted(empty.path(), "a.typ", &files).unwrap();
+    let granted = check_preset_granted(empty.path(), "a.typ", &files, false).unwrap();
     assert!(granted.rendered, "{:?}", granted.diagnostics);
     let page = preset_sample_page();
     let body =
@@ -362,19 +408,19 @@ const SAMPLE_DIGEST: u64 = 17418189714946132605;
 #[test]
 fn reviewed_package_capture_replays_exact_consumed_bytes_and_denies_new_reads() {
     let (cache, downloading, requests) = isolated_packages();
-    assert!(
-        check_candidate_with(PACKAGE_PRESET, true, downloading)
-            .unwrap()
-            .rendered
-    );
     let offline = offline_packages(cache.path());
     let root = notebook(&[]);
     let files = GrantedFiles::from([("/styles/a.typ".into(), PACKAGE_PRESET.as_bytes().to_vec())]);
     let (first, captured) = with_preset_packages(None, || {
-        check_preset(root.path(), "a.typ", Some(&files), false, offline)
+        check_preset(root.path(), "a.typ", Some(&files), true, downloading)
     })
     .unwrap();
     assert!(first.rendered);
+    assert_eq!(
+        requests.load(Ordering::SeqCst),
+        1,
+        "cold preview fetches and captures once"
+    );
     assert!(!captured.0.is_empty());
     for (path, _) in captured.0.values() {
         std::fs::write(path, b"corrupted cached package").unwrap();
@@ -385,7 +431,7 @@ fn reviewed_package_capture_replays_exact_consumed_bytes_and_denies_new_reads() 
     .unwrap();
     assert!(replayed.rendered, "{:?}", replayed.diagnostics);
     let (denied, _) = with_preset_packages(Some(&PresetPackageBytes::default()), || {
-        check_preset(root.path(), "a.typ", Some(&files), false, offline)
+        check_preset(root.path(), "a.typ", Some(&files), true, downloading)
     })
     .unwrap();
     assert!(!denied.rendered);

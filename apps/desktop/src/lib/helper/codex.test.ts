@@ -34,7 +34,7 @@ describe("Codex composer", () => {
   });
   it("discloses provider, account, experiment, attachments and all input controls without autofocus", () => {
     const html = render(CodexComposer, { props: { status, count: 2, async onSend() { return true; }, onClose() {} } }).body;
-    for (const text of ["Codex sends this to OpenAI with your account.", "Experimental", "not fully sandboxed", "2 selected items attached", "Model M", "Web search", 'maxlength="4000"']) expect(html).toContain(text);
+    for (const text of ["Codex sends this to OpenAI with your account.", "Experimental", "not fully sandboxed", "2 selected items attached", "Model M", "Web search", 'maxlength="4000"', "packages.typst.org", "not your notebook content"]) expect(html).toContain(text);
     expect(html).not.toContain("autofocus");
   });
   it("shows the selection action only when provided", () => {

@@ -847,7 +847,7 @@ pub fn compose_page_text(
 ) -> Result<PageTextComposition, String> {
     validate_page(root, page, files).map_err(|error| error.to_string())?;
     let prepared = match files {
-        Some(f) => crate::page_source::prepare_granted(root, source, f)?,
+        Some(f) => crate::page_source::prepare_granted(root, source, f, allow_remote_packages)?,
         None => crate::page_source::prepare(root, source, allow_remote_packages)?,
     };
     let (body, preamble_start) = page_text_source_with(
