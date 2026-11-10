@@ -2,9 +2,9 @@
   import { t, renderMessage } from "../i18n";
   import type { CodexRunState, CodexToolEvent, CodexProblem } from "../ipc/helper";
   import { codexProblem } from "./codex";
-  let { state, text, tools, problem = null, onStop, stopping = false }:
+  let { state, text, tools, problem = null, onStop, onRetry, retryDisabled = false, stopping = false }:
     { state: CodexRunState; text: string; tools: CodexToolEvent[]; problem?: CodexProblem | null;
-      onStop: () => void; onClose?: () => void; stopping?: boolean } = $props();
+      onStop: () => void; onRetry?: () => void; retryDisabled?: boolean; onClose?: () => void; stopping?: boolean } = $props();
   const active = $derived(!["done", "failed", "stopped"].includes(state));
   const steps = $derived(tools.filter((step, index) => !tools.slice(index + 1).some(next => next.server === step.server && next.tool === step.tool && next.phase !== "start" && step.phase === "start")));
 </script>
@@ -13,8 +13,11 @@
   <div class="status-row"><p class:active role="status"><span class="dot"></span>{$t(`codex.${state}`)}</p>
     {#if active}<button type="button" disabled={stopping} onclick={onStop}>{$t("codex.stop")}</button>{/if}
   </div>
-  {#if problem}<p role="alert">{renderMessage(codexProblem(problem), $t)}</p>{/if}
-  {#if problem?.params.detail && ["codex_crashed", "confinement_failed", "codex_version_unsupported", "codex_not_found"].includes(problem.code)}
+  {#if problem}<p role={problem.code === "connection_retrying" ? "status" : "alert"}>{renderMessage(codexProblem(problem), $t)}</p>{/if}
+  {#if state === "failed" && problem?.code === "provider_unreachable" && onRetry}
+    <div><button type="button" disabled={retryDisabled} onclick={onRetry}>{$t("codex.retry")}</button></div>
+  {/if}
+  {#if problem?.params.detail && ["provider_unreachable", "codex_crashed", "confinement_failed", "codex_version_unsupported", "codex_not_found"].includes(problem.code)}
     <details><summary>{$t("codex.details")}</summary><pre>{problem.params.detail}</pre></details>
   {/if}
   {#if text}<div class="transcript">{text}</div>{/if}

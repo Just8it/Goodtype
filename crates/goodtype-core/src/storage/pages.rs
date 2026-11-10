@@ -580,9 +580,10 @@ fn create_calculation_page_inner(
     open_page(&root, &fresh.id)
 }
 
-/// Add every source page from one preserved PDF as consecutive notebook pages.
+/// Add source pages from one preserved PDF as consecutive notebook pages.
 ///
-/// Page and ink files land first and the manifest lands last. A failed import can therefore
+/// `pdf_pages` names the one-based PDF page each entry of `geometries` shows; without it the
+/// geometries are the PDF's pages from the first on. Page and ink files land first and the manifest lands last. A failed import can therefore
 /// leave recoverable orphan files, but it cannot make the notebook reference half an import.
 pub fn import_pdf_pages(
     selected_root: &Path,
@@ -590,9 +591,23 @@ pub fn import_pdf_pages(
     position: &PagePosition,
     source_path: &str,
     geometries: &[PageGeometry],
+    pdf_pages: Option<&[u32]>,
+    replacing: Option<&str>,
 ) -> Result<NotebookSnapshot, StorageError> {
     if geometries.is_empty() || geometries.len() > 1_000 {
         return invalid("a PDF import must contain between 1 and 1000 pages");
+    }
+    if let Some(numbers) = pdf_pages {
+        if numbers.len() != geometries.len() {
+            return invalid("a PDF import must name one source page per imported page");
+        }
+        let mut seen = HashSet::with_capacity(numbers.len());
+        if numbers
+            .iter()
+            .any(|&number| number == 0 || !seen.insert(number))
+        {
+            return invalid("PDF page numbers must start at 1 and must not repeat");
+        }
     }
 
     let mut guard = ManifestGuard::open_resolved(selected_root, modified_at)?;
@@ -628,7 +643,10 @@ pub fn import_pdf_pages(
             geometry: geometry.clone(),
             background: PageBackground::Pdf {
                 source_path: source_path.to_owned(),
-                page: u32::try_from(index + 1).expect("PDF import capped at 1000 pages"),
+                page: match pdf_pages {
+                    Some(numbers) => numbers[index],
+                    None => u32::try_from(index + 1).expect("PDF import capped at 1000 pages"),
+                },
             },
             objects: Vec::new(),
             reading_order: Vec::new(),
@@ -648,6 +666,17 @@ pub fn import_pdf_pages(
             },
             ink_path,
         ));
+    }
+    // A notebook started from a PDF swaps its blank starter page for the document in the same
+    // manifest write, so it is one step to undo. As with deletion, only the reference goes.
+    if let Some(page_id) = replacing {
+        let index = guard
+            .manifest
+            .pages
+            .iter()
+            .position(|page| page.id == page_id)
+            .ok_or_else(|| invalid_error("the page to replace is not in this notebook"))?;
+        guard.manifest.pages.remove(index);
     }
     guard.manifest.modified_at = modified_at.to_owned();
 
@@ -939,6 +968,54 @@ pub fn delete_page(
         .id
         .clone();
     open_page(&root, &neighbor)
+}
+
+/// Remove several page references in one manifest write, so they are one step to undo. As with
+/// [`delete_page`], only the references go; the page and ink files stay on disk.
+///
+/// The returned snapshot opens `active_page_id` when it survives, and otherwise the page that now
+/// stands where the first removed page was.
+pub fn delete_pages(
+    selected_root: &Path,
+    page_ids: &[String],
+    modified_at: &str,
+    active_page_id: &str,
+) -> Result<NotebookSnapshot, StorageError> {
+    if page_ids.is_empty() {
+        return invalid("a page deletion must name at least one page");
+    }
+    let mut guard = ManifestGuard::open(selected_root, modified_at)?;
+    let root = guard.root().to_path_buf();
+    let manifest = &mut guard.manifest;
+    let doomed: HashSet<&str> = page_ids.iter().map(String::as_str).collect();
+    if doomed
+        .iter()
+        .any(|id| !manifest.pages.iter().any(|page| page.id == *id))
+    {
+        return invalid("page is not referenced by the notebook manifest");
+    }
+    if doomed.len() >= manifest.pages.len() {
+        return invalid("the final remaining page cannot be deleted");
+    }
+    let first = manifest
+        .pages
+        .iter()
+        .position(|page| doomed.contains(page.id.as_str()))
+        .expect("validated page ids");
+    manifest
+        .pages
+        .retain(|page| !doomed.contains(page.id.as_str()));
+    manifest.modified_at = modified_at.to_owned();
+
+    let manifest = guard.commit("deleting pages")?;
+    let open = if manifest.pages.iter().any(|page| page.id == active_page_id) {
+        active_page_id.to_owned()
+    } else {
+        manifest.pages[first.min(manifest.pages.len() - 1)]
+            .id
+            .clone()
+    };
+    open_page(&root, &open)
 }
 
 /// Reorder the manifest page list. `ordered_ids` must be a permutation of the current page IDs;
@@ -1735,6 +1812,8 @@ mod tests {
                     height_pt: 595.0,
                 },
             ],
+            None,
+            None,
         )
         .unwrap();
 
@@ -1758,6 +1837,130 @@ mod tests {
             second.page.background,
             PageBackground::Pdf { page: 2, .. }
         ));
+    }
+
+    #[test]
+    fn a_pdf_import_can_replace_the_starter_page() {
+        let temporary = tempfile::tempdir().unwrap();
+        let notebook_root = temporary.path().join("notebook");
+        create_notebook(&notebook_root, &snapshot()).unwrap();
+        let source = store_pdf_reference(
+            &notebook_root,
+            "lecture.pdf",
+            b"%PDF-1.7
+fixture",
+        )
+        .unwrap();
+        let geometry = PageGeometry {
+            width_pt: 595.0,
+            height_pt: 842.0,
+        };
+        let starter = PagePosition::Before {
+            page_id: "page-001".into(),
+        };
+
+        let imported = import_pdf_pages(
+            &notebook_root,
+            "2026-11-08T12:00:00Z",
+            &starter,
+            &source,
+            &[geometry.clone(), geometry.clone()],
+            None,
+            Some("page-001"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            imported
+                .manifest
+                .pages
+                .iter()
+                .map(|page| page.id.as_str())
+                .collect::<Vec<_>>(),
+            ["page-002", "page-003"]
+        );
+        assert!(matches!(
+            imported.page.background,
+            PageBackground::Pdf { page: 1, .. }
+        ));
+        // Naming a page the notebook does not have changes nothing.
+        assert!(
+            import_pdf_pages(
+                &notebook_root,
+                "2026-11-08T12:01:00Z",
+                &PagePosition::Last,
+                &source,
+                &[geometry],
+                None,
+                Some("page-404"),
+            )
+            .is_err()
+        );
+        assert_eq!(
+            open_notebook(&notebook_root).unwrap().manifest.pages.len(),
+            2
+        );
+    }
+
+    #[test]
+    fn a_pdf_import_can_take_chosen_pages() {
+        let temporary = tempfile::tempdir().unwrap();
+        let notebook_root = temporary.path().join("notebook");
+        create_notebook(&notebook_root, &snapshot()).unwrap();
+        let source = store_pdf_reference(
+            &notebook_root,
+            "lecture.pdf",
+            b"%PDF-1.7
+fixture",
+        )
+        .unwrap();
+        let geometry = PageGeometry {
+            width_pt: 595.0,
+            height_pt: 842.0,
+        };
+        let two = [geometry.clone(), geometry.clone()];
+
+        let imported = import_pdf_pages(
+            &notebook_root,
+            "2026-11-09T12:00:00Z",
+            &PagePosition::Last,
+            &source,
+            &two,
+            Some(&[2, 4]),
+            None,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            imported.page.background,
+            PageBackground::Pdf { page: 2, .. }
+        ));
+        assert!(matches!(
+            open_page(&notebook_root, "page-003")
+                .unwrap()
+                .page
+                .background,
+            PageBackground::Pdf { page: 4, .. }
+        ));
+        // A list that does not match the geometries, a zero or a repeat imports nothing.
+        for numbers in [&[2][..], &[0, 1], &[3, 3]] {
+            assert!(
+                import_pdf_pages(
+                    &notebook_root,
+                    "2026-11-09T12:01:00Z",
+                    &PagePosition::Last,
+                    &source,
+                    &two,
+                    Some(numbers),
+                    None,
+                )
+                .is_err()
+            );
+        }
+        assert_eq!(
+            open_notebook(&notebook_root).unwrap().manifest.pages.len(),
+            3
+        );
     }
 
     #[test]
@@ -1817,6 +2020,72 @@ mod tests {
         delete_page(&notebook_root, "page-002", "2026-07-23T19:05:00Z").unwrap();
         let error = delete_page(&notebook_root, "page-003", "2026-07-23T19:06:00Z").unwrap_err();
         assert!(matches!(error, StorageError::InvalidNotebook(_)));
+    }
+
+    #[test]
+    fn deletes_several_pages_in_one_write_with_guards() {
+        let temporary = tempfile::tempdir().unwrap();
+        let notebook_root = temporary.path().join("notebook");
+        create_notebook(&notebook_root, &snapshot()).unwrap();
+        for minute in 0..3 {
+            create_page(
+                &notebook_root,
+                &format!("2026-11-09T10:0{minute}:00Z"),
+                &PagePosition::Last,
+                None,
+                None,
+            )
+            .unwrap();
+        }
+        let ids = |names: &[&str]| {
+            names
+                .iter()
+                .map(|name| name.to_string())
+                .collect::<Vec<_>>()
+        };
+
+        // Nothing, an unknown page, or every page is refused and changes nothing.
+        for refused in [
+            ids(&[]),
+            ids(&["page-002", "page-404"]),
+            ids(&["page-001", "page-002", "page-003", "page-004"]),
+        ] {
+            let error = delete_pages(&notebook_root, &refused, "2026-11-09T10:05:00Z", "page-001")
+                .unwrap_err();
+            assert!(matches!(error, StorageError::InvalidNotebook(_)));
+        }
+        assert_eq!(
+            open_notebook(&notebook_root).unwrap().manifest.pages.len(),
+            4
+        );
+
+        let kept = delete_pages(
+            &notebook_root,
+            &ids(&["page-002", "page-004"]),
+            "2026-11-09T10:06:00Z",
+            "page-001",
+        )
+        .unwrap();
+        assert_eq!(kept.page.id, "page-001");
+        assert_eq!(
+            kept.manifest
+                .pages
+                .iter()
+                .map(|page| page.id.as_str())
+                .collect::<Vec<_>>(),
+            ["page-001", "page-003"]
+        );
+        assert!(notebook_root.join("pages/page-002.json").is_file());
+
+        // Removing the open page opens the one now standing in its place.
+        let moved = delete_pages(
+            &notebook_root,
+            &ids(&["page-001"]),
+            "2026-11-09T10:07:00Z",
+            "page-001",
+        )
+        .unwrap();
+        assert_eq!(moved.page.id, "page-003");
     }
 
     #[test]

@@ -315,6 +315,19 @@ export function shapeFromDrag(
 }
 
 /**
+ * A held line after its snap: its start stays where the mark began and its end follows the pen.
+ *
+ * A held draft comes from `shapeFromDrag`, so it is unrotated and its start sits at its origin.
+ * A pen back on the start would make a line too short to keep; the line stays as it was instead
+ * of dropping back to ink.
+ */
+export function followHeldLine(held: ShapeDraft, pen: Point, constrain: boolean): ShapeDraft {
+  if (held.geometry.kind !== "line" || held.rotation !== 0) return held;
+  const start = { x: held.x + held.geometry.start.x, y: held.y + held.geometry.start.y };
+  return shapeFromDrag("line", start, pen, held.style, constrain) ?? held;
+}
+
+/**
  * Reduce a sampled curve, then derive smooth cubic handles with the Catmull-Rom tangent rule.
  * The fitted geometry is deterministic and bounded; raw input samples remain ink, never hidden
  * inside a shape object.

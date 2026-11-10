@@ -9,6 +9,7 @@
   import { DEFAULT_PAGE_SIZE, PAGE_SIZES, pageSizes, geometryOf, type Orientation } from "../page/sizes";
   import { PAPER_TONES, paperTones, templateGroups } from "../page/templates";
   import { nameProblem } from "./library";
+  import { isPageListSyntax } from "../workspace/exportTarget";
 
   let { busy = false, onConfirm, onCancel }: {
     busy?: boolean;
@@ -19,6 +20,8 @@
   let name = $state("");
   let sizeId = $state(DEFAULT_PAGE_SIZE.id);
   let orientation = $state<Orientation>("portrait");
+  let fromPdf = $state(false);
+  let pdfPages = $state("");
   let toneId = $state(PAPER_TONES[0].id);
   let templateId = $state("blank-white");
   let preset = $state<PresetChoice>({ kind: "none" });
@@ -30,7 +33,8 @@
   const tone = $derived(PAPER_TONES.find((item) => item.id === toneId) ?? PAPER_TONES[0]);
   const templates = $derived(templateGroups(tone, $t).flatMap((group) => group.templates));
   const problem = $derived(name ? nameProblem(name, $t) : null);
-  const ready = $derived(Boolean(name) && !problem && !busy);
+  const pdfPagesValid = $derived(!fromPdf || isPageListSyntax(pdfPages));
+  const ready = $derived(Boolean(name) && !problem && !busy && pdfPagesValid);
 
   onMount(async () => {
     field?.focus();
@@ -72,6 +76,8 @@
       geometry: geometryOf(size, orientation),
       background: { kind: "template", template },
       preset,
+      fromPdf,
+      ...(fromPdf && pdfPages.trim() ? { pdfPages: pdfPages.trim() } : {}),
     });
   }
 </script>
@@ -85,6 +91,22 @@
       </label>
 
       <div class="fields">
+      <fieldset class="wide">
+        <legend>{$t("library.startWith")}</legend>
+        <div class="segmented">
+          <button type="button" class:active={!fromPdf} aria-pressed={!fromPdf} onclick={() => (fromPdf = false)}>{$t("library.blankPaper")}</button>
+          <button type="button" class:active={fromPdf} aria-pressed={fromPdf} onclick={() => (fromPdf = true)}>{$t("library.pdfPages")}</button>
+        </div>
+        {#if fromPdf}<small>{$t("library.pdfStartHelp")}</small>{/if}
+      </fieldset>
+      {#if fromPdf}
+      <label class="wide">{$t("library.pdfPageList")}
+        <input bind:value={pdfPages} type="text" inputmode="numeric" spellcheck="false" autocomplete="off" placeholder={$t("library.pdfPageListPlaceholder")} aria-invalid={!pdfPagesValid} aria-describedby="notebook-pdf-pages-help" />
+        <small id="notebook-pdf-pages-help" class:error={!pdfPagesValid}>{pdfPagesValid ? $t("library.pdfPageListHelp") : $t("library.pdfPageListInvalid")}</small>
+      </label>
+      {/if}
+      <!-- A PDF brings its own page sizes, so the paper controls only apply to blank paper. -->
+      {#if !fromPdf}
       <label>{$t("library.pageSize")}
         <select bind:value={sizeId}>{#each pageSizes($t) as size}<option value={size.id}>{size.name} · {size.detail}</option>{/each}</select>
       </label>
@@ -101,6 +123,7 @@
       <label>{$t("library.paperTemplate")}
         <select bind:value={templateId}>{#each templates as template}<option value={template.id}>{template.name}</option>{/each}</select>
       </label>
+      {/if}
       <label class="wide">{$t("library.typstPreset")}
         <select value={presetValue} onchange={(event) => void choosePreset(event.currentTarget.value)}>
           <option value="none">{$t("library.none")}</option>
@@ -116,7 +139,7 @@
   {/snippet}
   {#snippet actions()}
     <button type="button" class="control" disabled={busy} onclick={onCancel}>{$t("library.cancel")}</button>
-    <button type="submit" form="notebook-setup-form" class="primary" disabled={!ready}>{$t("library.createNotebook")}</button>
+    <button type="submit" form="notebook-setup-form" class="primary" disabled={!ready}>{fromPdf ? $t("library.createAndChoosePdf") : $t("library.createNotebook")}</button>
   {/snippet}
 </Dialog>
 

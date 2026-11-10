@@ -52,12 +52,18 @@ fn compile(
     files: GrantedFiles,
     replay: Option<PresetPackageBytes>,
     edge: u32,
+    allow_remote_packages: bool,
 ) -> Result<(ReviewedPreset, Vec<u8>, u32, u32), String> {
     let filename = filename(&files);
     let mut world_files = files.clone();
     world_files.insert(format!("/styles/{filename}"), source.as_bytes().to_vec());
     let ((check, image), packages) = goodtype_typst::with_preset_packages(replay.as_ref(), || {
-        let check = goodtype_typst::check_preset_granted(root, &filename, &world_files)?;
+        let check = goodtype_typst::check_preset_granted(
+            root,
+            &filename,
+            &world_files,
+            allow_remote_packages && replay.is_none(),
+        )?;
         if !check.rendered {
             return Err(serde_json::to_string(&check).map_err(|e| e.to_string())?);
         }
@@ -175,8 +181,19 @@ impl bridge::Bridge {
             .as_ref()
             .map_or_else(|| request.files(), |p| p.files.clone());
         let replay = matched.as_ref().map(|p| p.packages.clone());
+        let allow_remote_packages = self
+            .app
+            .as_ref()
+            .is_some_and(|app| app.state::<crate::settings::RemotePackages>().allowed());
         let checked = tauri::async_runtime::spawn_blocking(move || {
-            compile(Path::new(&root), source, files, replay, edge)
+            compile(
+                Path::new(&root),
+                source,
+                files,
+                replay,
+                edge,
+                allow_remote_packages,
+            )
         })
         .await
         .map_err(|e| e.to_string())?;
@@ -307,6 +324,7 @@ pub async fn edit(
             saved.files,
             Some(saved.packages),
             1000,
+            false,
         )
         .map(|v| v.0)
     })
@@ -405,6 +423,7 @@ pub fn install(
         reviewed.files.clone(),
         Some(reviewed.packages.clone()),
         1000,
+        false,
     )?;
     if checked.candidate_hash != reviewed.candidate_hash {
         return Err("changed: preset compile".into());
@@ -502,7 +521,7 @@ pub(super) fn validate_dependencies(root: &Path, p: &ReviewedPreset) -> Result<(
 pub async fn helper_install_preset(
     app: tauri::AppHandle,
     helper: tauri::State<'_, Helper>,
-    roots: tauri::State<'_, Arc<crate::workspace::AllowedRoots>>,
+    roots: tauri::State<'_, crate::workspace::AllowedRoots>,
     histories: tauri::State<'_, crate::notebook::NotebookHistories>,
     input: InstallPreset,
 ) -> Result<InstallResult, String> {
@@ -520,6 +539,23 @@ pub async fn helper_install_preset(
 mod tests {
     use super::*;
     #[test]
+    fn install_command_uses_registered_notebook_root_state() {
+        // Tauri resolves managed state by exact type; main registers AllowedRoots, not Arc<AllowedRoots>.
+        fn accepts_registered_state<'a, F, Fut>(_: F)
+        where
+            F: FnOnce(
+                tauri::AppHandle,
+                tauri::State<'a, Helper>,
+                tauri::State<'a, crate::workspace::AllowedRoots>,
+                tauri::State<'a, crate::notebook::NotebookHistories>,
+                InstallPreset,
+            ) -> Fut,
+        {
+        }
+        accepts_registered_state(helper_install_preset);
+    }
+
+    #[test]
     fn candidate_never_overwrites_granted_path_and_package_changes_are_stale() {
         let root = tempfile::tempdir().unwrap();
         let files = GrantedFiles::from([(
@@ -527,7 +563,8 @@ mod tests {
             b"Granted original".to_vec(),
         )]);
         let source = "#include \"helper-candidate-0.typ\"";
-        let (mut p, _, _, _) = compile(root.path(), source.into(), files, None, 400).unwrap();
+        let (mut p, _, _, _) =
+            compile(root.path(), source.into(), files, None, 400, false).unwrap();
         assert_eq!(p.filename, "helper-candidate-1.typ");
         assert_eq!(
             p.files["/styles/helper-candidate-0.typ"],

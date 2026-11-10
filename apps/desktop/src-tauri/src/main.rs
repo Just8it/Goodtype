@@ -128,6 +128,7 @@ fn main() {
             notebook::redo_notebook,
             notebook::duplicate_page,
             notebook::delete_page,
+            notebook::delete_pages,
             notebook::reorder_pages,
             notebook::undo_page_structure,
             notebook::redo_page_structure,

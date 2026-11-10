@@ -1,5 +1,24 @@
 use super::*;
 #[test]
+fn connection_failure_is_distinct_from_safety_checks_and_turn_failures() {
+    let detail =
+        json!({"code":-32603,"message":"workspace routing discovery timed out"}).to_string();
+    assert_eq!(
+        problem("confinement_failed", &detail).code,
+        "provider_unreachable"
+    );
+    assert_eq!(
+        problem("confinement_failed", "app-server response timed out").code,
+        "provider_unreachable"
+    );
+    assert_eq!(
+        problem("confinement_failed", "unexpected shell permission").code,
+        "confinement_failed"
+    );
+    assert_eq!(problem("codex_crashed", &detail).code, "codex_crashed");
+}
+
+#[test]
 fn approval_responses_deny_authority() {
     for method in [
         "item/commandExecution/requestApproval",

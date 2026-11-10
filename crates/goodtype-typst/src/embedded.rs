@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
-use typst::diag::{FileError, FileResult, PackageError, Severity, SourceDiagnostic};
+use typst::diag::{FileError, FileResult, Severity, SourceDiagnostic};
 use typst::foundations::{Bytes, Datetime, Duration};
 use typst::syntax::Side;
 use typst::syntax::{FileId, RootedPath, Source, VirtualPath, VirtualRoot};
@@ -418,7 +418,7 @@ impl Downloader for OfflineDownloader {
     }
 }
 
-/// Exact cached package inputs consumed by a reviewed helper preset.
+/// Exact package inputs consumed (and possibly fetched) by a reviewed helper preset.
 #[derive(Clone, Default)]
 pub struct PresetPackageBytes(pub std::collections::BTreeMap<String, (PathBuf, Vec<u8>)>);
 type PresetPackageBinding = std::sync::Arc<Mutex<(bool, PresetPackageBytes)>>;
@@ -456,7 +456,7 @@ pub(crate) struct BlockWorld {
     preset_packages: Option<PresetPackageBinding>,
     main: FileId,
     /// Resolves packages: local directories, plus a download on a cache miss when the policy
-    /// allows it. A granted-only world never uses the download half.
+    /// allows it. Project-file grants do not override this caller-owned package policy.
     packages: &'static SystemPackages,
     /// Generated, in-memory files (the entry document and its helpers) keyed by file id.
     overlay: HashMap<FileId, Bytes>,
@@ -517,21 +517,9 @@ impl BlockWorld {
             VirtualRoot::Package(spec) => {
                 // Offline-first: the local data and cache directories are consulted first, and a
                 // download happens only on a miss — and only when the user allows it.
-                let root = if self.granted_only {
-                    // Granted (helper) compilation reads already-cached packages only: no
-                    // request is made whatever loader the caller passed.
-                    self.packages
-                        .data()
-                        .and_then(|packages| packages.obtain(spec))
-                        .or_else(|| {
-                            self.packages
-                                .cache()
-                                .and_then(|packages| packages.obtain(spec))
-                        })
-                        .ok_or_else(|| FileError::Package(PackageError::NotFound(spec.clone())))?
-                } else {
-                    self.packages.obtain(spec).map_err(FileError::Package)?
-                };
+                // Project grants and package-download policy are independent. Offline callers
+                // supply the offline loader; reviewed preset replay never reaches this fallback.
+                let root = self.packages.obtain(spec).map_err(FileError::Package)?;
                 // FsRoot::resolve denies a virtual path that would escape the package root.
                 root.resolve(id.vpath())
             }

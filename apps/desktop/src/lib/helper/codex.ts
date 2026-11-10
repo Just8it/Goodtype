@@ -14,7 +14,7 @@ export function composerKey(event: Pick<KeyboardEvent, "key" | "shiftKey" | "isC
     event.preventDefault(); event.stopPropagation(); send();
   }
 }
-const codes = ["codex_not_found", "codex_version_unsupported", "codex_signed_out", "codex_not_chatgpt", "confinement_failed", "codex_crashed", "run_busy", "share_required", "model_unavailable"] as const;
+const codes = ["codex_not_found", "codex_version_unsupported", "codex_signed_out", "codex_not_chatgpt", "confinement_failed", "codex_crashed", "run_busy", "share_required", "model_unavailable", "provider_unreachable", "connection_retrying"] as const;
 export function codexProblem(problem: CodexProblem | unknown) {
   const value = typeof problem === "object" && problem !== null && "code" in problem ? problem as CodexProblem : null;
   if (value && value.code in cellProblemKeys) return notice(cellProblemKeys[value.code as keyof typeof cellProblemKeys]);

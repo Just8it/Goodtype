@@ -514,7 +514,13 @@ pub struct ImportPdfPagesRequest {
     position: PagePosition,
     source_path: String,
     geometries: Vec<PageGeometry>,
+    /// The one-based PDF page each geometry shows; absent means the PDF's pages from the first.
+    #[serde(default)]
+    pdf_pages: Option<Vec<u32>>,
     active_page_id: String,
+    /// A page the import takes the place of: the blank starter page of a notebook made from a PDF.
+    #[serde(default)]
+    replacing: Option<String>,
 }
 
 #[tauri::command]
@@ -532,6 +538,8 @@ pub async fn import_pdf_pages(
             &request.position,
             &request.source_path,
             &request.geometries,
+            request.pdf_pages.as_deref(),
+            request.replacing.as_deref(),
         )
         .map_err(NotebookError::from)?;
         advance_structure_result(store, root, snapshot)
@@ -701,6 +709,24 @@ pub async fn delete_page(
         observe_structure(store, root, &page_id)?;
         let snapshot =
             storage::delete_page(root, &page_id, &modified_at).map_err(NotebookError::from)?;
+        advance_structure_result(store, root, snapshot)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn delete_pages(
+    roots: tauri::State<'_, AllowedRoots>,
+    histories: tauri::State<'_, NotebookHistories>,
+    root: String,
+    page_ids: Vec<String>,
+    modified_at: String,
+    active_page_id: String,
+) -> Result<StructureHistoryResult, NotebookError> {
+    on_notebook(&roots, &histories, root, move |root, store| {
+        observe_structure(store, root, &active_page_id)?;
+        let snapshot = storage::delete_pages(root, &page_ids, &modified_at, &active_page_id)
+            .map_err(NotebookError::from)?;
         advance_structure_result(store, root, snapshot)
     })
     .await

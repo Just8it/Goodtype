@@ -94,9 +94,17 @@ impl Manager {
     }
 }
 fn problem(code: &str, detail: impl Into<String>) -> UiProblem {
+    let detail = detail.into();
+    let code = if code == "confinement_failed"
+        && (client::routing_timeout(&detail) || detail == "app-server response timed out")
+    {
+        "provider_unreachable"
+    } else {
+        code
+    };
     UiProblem {
         code: code.into(),
-        params: HashMap::from([("detail".into(), detail.into())]),
+        params: HashMap::from([("detail".into(), detail)]),
     }
 }
 fn state(
@@ -510,30 +518,13 @@ fn actor(
                     if client.is_none() {
                         let token = random_hex(32).map_err(|e| problem("codex_crashed", e))?;
                         let relay = {
-                            let mut s = h.inner.lock().unwrap_or_else(|e| e.into_inner());
+                            let s = h.inner.lock().unwrap_or_else(|e| e.into_inner());
                             if !s.settings.enabled {
                                 return Err(problem("share_required", "helper disabled"));
                             }
-                            let relay = s.relay_path.clone().ok_or_else(|| {
-                                problem("confinement_failed", "relay unavailable")
-                            })?;
-                            let current_grant = s
-                                .requests
-                                .get(&grant.request_id)
-                                .cloned()
-                                .ok_or_else(|| problem("stale_request", "request revoked"))?;
-                            s.pending_launches.insert(
-                                token.clone(),
-                                Launch {
-                                    grant: Some(current_grant),
-                                    cancelled: cancelled.clone(),
-                                    created: Instant::now(),
-                                    conversation: id.into(),
-                                    share: (*share).clone(),
-                                    info: info.clone(),
-                                },
-                            );
-                            relay
+                            s.relay_path
+                                .clone()
+                                .ok_or_else(|| problem("confinement_failed", "relay unavailable"))?
                         };
                         let names = status
                             .mcp_servers
@@ -570,7 +561,33 @@ fn actor(
                         .map_err(|e| problem("confinement_failed", e))?;
                         c.cancelled = cancelled.clone();
                         let account = c
-                            .initialize(&mut |v| event(app, h, id, &active, v))
+                            .initialize_retrying(
+                                &mut |v| event(app, h, id, &active, v),
+                                &mut |attempt| {
+                                    state(
+                                        app,
+                                        &active,
+                                        id,
+                                        "starting",
+                                        Some(UiProblem {
+                                            code: "connection_retrying".into(),
+                                            params: HashMap::from([
+                                                ("attempt".into(), attempt.to_string()),
+                                                (
+                                                    "max".into(),
+                                                    client::CONNECTION_RETRIES.to_string(),
+                                                ),
+                                                (
+                                                    "seconds".into(),
+                                                    client::CONNECTION_RETRY_DELAY
+                                                        .as_secs()
+                                                        .to_string(),
+                                                ),
+                                            ]),
+                                        }),
+                                    );
+                                },
+                            )
                             .map_err(|e| problem("confinement_failed", e))?;
                         if account != "chatgpt" {
                             return Err(problem(
@@ -582,6 +599,31 @@ fn actor(
                                 "",
                             ));
                         }
+                        {
+                            // Issue the one-minute launch token only after connection retries finish.
+                            let mut s = h.inner.lock().unwrap_or_else(|e| e.into_inner());
+                            let current_grant = s
+                                .requests
+                                .get(&grant.request_id)
+                                .cloned()
+                                .filter(|_| {
+                                    s.settings.enabled
+                                        && !cancelled.load(std::sync::atomic::Ordering::SeqCst)
+                                })
+                                .ok_or_else(|| problem("stale_request", "request revoked"))?;
+                            s.pending_launches.insert(
+                                token,
+                                Launch {
+                                    grant: Some(current_grant),
+                                    cancelled: cancelled.clone(),
+                                    created: Instant::now(),
+                                    conversation: id.into(),
+                                    share: (*share).clone(),
+                                    info: info.clone(),
+                                },
+                            );
+                        }
+                        state(app, &active, id, "checking", None);
                         let started=c.call("thread/start",json!({"cwd":c.cwd.path(),"approvalPolicy":"never","sandbox":"read-only","developerInstructions":config::instructions(),"model":model}),&mut |v|event(app,h,id,&active,v)).map_err(|e|problem("confinement_failed",e))?;
                         thread = started["thread"]["id"]
                             .as_str()

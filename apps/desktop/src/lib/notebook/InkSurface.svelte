@@ -44,6 +44,7 @@
   import { eraseShapesThrough } from "../shape/erase";
   import type { ShapeView } from "./pageView";
   import {
+    followHeldLine,
     shapeFromDrag,
     shapeDashArray,
     shapePath,
@@ -52,6 +53,7 @@
     type ShapeKind,
   } from "../shape/geometry";
   import { closedOutline, recognizeHeldShape } from "../shape/recognize";
+  import { SNAP_RADIUS_SCREEN_PT, snapPoint, snapTargets } from "../shape/snap";
   import {
     eraseStrokeAt,
     hitStroke,
@@ -93,6 +95,8 @@
     shapeKind?: ShapeKind;
     shapeStyle?: ShapeStyle;
     shapeConstrain?: boolean;
+    /** Line ends and rectangle corners meet nearby shape ends; Alt bypasses it. */
+    shapeEndSnap?: boolean;
     drawAndHoldShapes?: boolean;
     heldLineMinimumPt?: number;
     eraseRadiusPt?: number;
@@ -157,6 +161,7 @@
       opacity: 1,
     },
     shapeConstrain = false,
+    shapeEndSnap = true,
     drawAndHoldShapes = true,
     heldLineMinimumPt = 6,
     eraseRadiusPt = 8,
@@ -210,6 +215,9 @@
         feedbackMs: number | null;
         holdAnchor: Point;
         shapePreview: ShapeDraft | null;
+        /** Ends a snapped held line may meet, gathered once as it snaps. */
+        snapTargets: Point[];
+        snapRing: Point | null;
       }
     | {
         kind: "shape";
@@ -218,6 +226,12 @@
         points: StrokePoint[];
         constrain: boolean;
         preview: ShapeDraft | null;
+        /** Ends a line or rectangle corner may meet, gathered once at pointerdown. */
+        snapTargets: Point[];
+        /** Where the moving end has snapped to, if anywhere. */
+        endSnap: Point | null;
+        /** The point the feedback ring marks: the snapped start, then the snapped end. */
+        snapRing: Point | null;
       }
     | { kind: "lasso"; pointerId: number; points: Point[] }
     | {
@@ -261,6 +275,9 @@
   const SHAPE_HOLD_MS = 500;
   const SHAPE_SNAP_DEGREES = 15;
   const SHAPE_HOLD_DRIFT_PT = 4;
+  // Once a held closed shape has snapped, the hand relaxes and the tip creeps; only a deliberate
+  // move past this many screen points goes back to freehand. A held line follows the pen instead.
+  const SHAPE_RELEASE_DRIFT_PT = 14;
 
   $effect(() => {
     // Reads `strokes`, never `localStrokes`: now that the local copy is reactive, reading it here
@@ -403,6 +420,8 @@
         feedbackMs: null,
         holdAnchor: pagePoint(event),
         shapePreview: null,
+        snapTargets: [],
+        snapRing: null,
       };
       gesture = drawGesture;
       armHoldPreview(drawGesture);
@@ -413,7 +432,10 @@
       return;
     }
     if (role === "shape") {
-      const point = sample(event);
+      const pressed = sample(event);
+      const targets = shapeKind === "line" || shapeKind === "rectangle" ? endSnapTargets() : [];
+      const startSnap = snappedEnd(targets, pressed, event);
+      const point = startSnap ? { ...pressed, x: startSnap.x, y: startSnap.y } : pressed;
       gesture = {
         kind: "shape",
         pointerId: event.pointerId,
@@ -421,6 +443,9 @@
         points: [point],
         constrain: shapeConstrain || event.shiftKey,
         preview: null,
+        snapTargets: targets,
+        endSnap: null,
+        snapRing: startSnap,
       };
       redrawImmediate();
       return;
@@ -490,13 +515,15 @@
       for (const next of events.length > 0 ? events : [event]) {
         gesture.points.push(sample(next));
       }
-      updateHoldPreview(gesture);
+      updateHoldPreview(gesture, event);
     } else if (gesture.kind === "shape") {
       const events = event.getCoalescedEvents?.() ?? [];
       for (const next of events.length > 0 ? events : [event]) {
         gesture.points.push(sample(next));
       }
       gesture.constrain = shapeConstrain || event.shiftKey;
+      gesture.endSnap = snappedEnd(gesture.snapTargets, gesture.points.at(-1) ?? gesture.start, event);
+      gesture.snapRing = gesture.endSnap;
       // A line, rectangle or ellipse is two points of arithmetic and can follow the pointer
       // exactly. A spline is a curve fit over every sample so far, which is far too much to
       // repeat per pointer event on a pen reporting hundreds a second — so it re-fits once a
@@ -531,11 +558,12 @@
       const commitStartedAt = performance.now();
       // Straighten before quantising, so the snapped angle is rounded once rather than twice, and
       // store the result: what is committed is the straightened stroke, not a flag to reinterpret.
+      const lifted = sample(event);
       const smoothed = smoothPoints(
-        gesture.points.concat(sample(event)),
+        gesture.points.concat(lifted),
         calibration.smoothing,
       );
-      const heldShape = gesture.shapePreview;
+      const heldShape = gesture.shapePreview && heldLineFollowing(gesture, gesture.shapePreview, lifted, event);
       const points = quantizePoints(
         heldShape ? smoothed : straighten ? straightenStroke(smoothed) : smoothed,
       );
@@ -557,10 +585,12 @@
         commitMs: performance.now() - commitStartedAt,
       });
     } else if (gesture.kind === "shape") {
+      const lifted = sample(event);
       const finalGesture = {
         ...gesture,
-        points: [...gesture.points, sample(event)],
+        points: [...gesture.points, lifted],
         constrain: shapeConstrain || event.shiftKey,
+        endSnap: snappedEnd(gesture.snapTargets, lifted, event),
       };
       const draft = shapeDraft(finalGesture);
       if (draft) {
@@ -811,8 +841,10 @@
     if (!context || !immediateCanvas) return;
     context.clearRect(0, 0, pageWidthPt, pageHeightPt);
     if (gesture?.kind === "draw") {
-      if (gesture.shapePreview) drawShapePreview(context, gesture.shapePreview);
-      else
+      if (gesture.shapePreview) {
+        drawShapePreview(context, gesture.shapePreview);
+        if (gesture.snapRing) drawSnapRing(context, gesture.snapRing);
+      } else
         drawPoints(
           context,
           gesture.points,
@@ -823,8 +855,9 @@
           gesture.strokeTool === "pen" ? pattern : "solid",
           opacity,
         );
-    } else if (gesture?.kind === "shape" && gesture.preview) {
-      drawShapePreview(context, gesture.preview);
+    } else if (gesture?.kind === "shape") {
+      if (gesture.preview) drawShapePreview(context, gesture.preview);
+      if (gesture.snapRing) drawSnapRing(context, gesture.snapRing);
     } else if (gesture?.kind === "lasso") {
       context.save();
       context.strokeStyle = "#206acb";
@@ -930,12 +963,13 @@
       const { outline, closed } = closedOutline(active.points);
       return splineFromPoints(outline, shapeStyle, 1.5 / Math.max(zoom, 0.1), closed);
     }
+    // A snapped end lands exactly on what it met; squaring or angle steps would pull it off.
     return shapeFromDrag(
       shapeKind,
       active.start,
-      active.points.at(-1) ?? active.start,
+      active.endSnap ?? active.points.at(-1) ?? active.start,
       shapeStyle,
-      active.constrain,
+      active.constrain && !active.endSnap,
     );
   }
 
@@ -952,19 +986,52 @@
         { snapDegrees: shapeConstrain ? SHAPE_SNAP_DEGREES : 0, minimumLineLengthPt: heldLineMinimumPt },
       )?.draft ?? null;
       if (active.shapePreview) {
-        status = notice("workspace.releaseToUseContinueDrawingToKeep", { "kind": shapeMessage(active.shapePreview.geometry.kind) });
+        if (active.shapePreview.geometry.kind === "line") active.snapTargets = endSnapTargets();
+        status = active.shapePreview.geometry.kind === "line"
+          ? notice("workspace.releaseToUseLineMoveToAim")
+          : notice("workspace.releaseToUseContinueDrawingToKeep", { "kind": shapeMessage(active.shapePreview.geometry.kind) });
         redrawImmediate();
       }
     }, SHAPE_HOLD_MS);
   }
 
-  function updateHoldPreview(active: Extract<Gesture, { kind: "draw" }>): void {
+  function updateHoldPreview(active: Extract<Gesture, { kind: "draw" }>, event: PointerEvent): void {
     const point = active.points.at(-1);
     if (!point) return;
-    if (Math.hypot(point.x - active.holdAnchor.x, point.y - active.holdAnchor.y) <= SHAPE_HOLD_DRIFT_PT / zoom) return;
+    // A snapped line is being aimed, not abandoned: its end follows the pen until it lifts.
+    if (active.shapePreview?.geometry.kind === "line") {
+      active.shapePreview = heldLineFollowing(active, active.shapePreview, point, event);
+      return;
+    }
+    const drift = active.shapePreview ? SHAPE_RELEASE_DRIFT_PT : SHAPE_HOLD_DRIFT_PT;
+    if (Math.hypot(point.x - active.holdAnchor.x, point.y - active.holdAnchor.y) <= drift / zoom) return;
     active.holdAnchor = point;
     active.shapePreview = null;
     armHoldPreview(active);
+  }
+
+  /** A snapped held line with its end on the pen; any other held shape stays as it snapped. */
+  function heldLineFollowing(
+    active: Extract<Gesture, { kind: "draw" }>,
+    held: ShapeDraft,
+    pen: Point,
+    event: PointerEvent,
+  ): ShapeDraft {
+    if (held.geometry.kind !== "line") return held;
+    const snapped = snappedEnd(active.snapTargets, pen, event);
+    active.snapRing = snapped;
+    return followHeldLine(held, snapped ?? pen, shapeConstrain && !snapped);
+  }
+
+  /** The page points a line end or rectangle corner may meet; none while snapping is off. */
+  function endSnapTargets(): Point[] {
+    return shapeEndSnap ? snapTargets(shapes ?? []) : [];
+  }
+
+  /** Where `point` snaps to, or null when nothing is near, snapping is off or Alt is held. */
+  function snappedEnd(targets: readonly Point[], point: Point, event: PointerEvent): Point | null {
+    if (!shapeEndSnap || event.altKey || targets.length === 0) return null;
+    return snapPoint(point, targets, SNAP_RADIUS_SCREEN_PT / zoom);
   }
 
   function clearHoldTimer(): void {
@@ -1010,6 +1077,18 @@
       context.fill(path);
     }
     context.stroke(path);
+    context.restore();
+  }
+
+  /** A small ring on the end a dragged point has met. It is feedback only and never stored. */
+  function drawSnapRing(context: CanvasRenderingContext2D, point: Point): void {
+    if (!surface) return;
+    context.save();
+    context.strokeStyle = getComputedStyle(surface).getPropertyValue("--paper-select").trim();
+    context.lineWidth = 1.5 / zoom;
+    context.beginPath();
+    context.arc(point.x, point.y, 4 / zoom, 0, Math.PI * 2);
+    context.stroke();
     context.restore();
   }
 

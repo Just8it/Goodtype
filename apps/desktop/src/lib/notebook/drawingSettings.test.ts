@@ -22,6 +22,7 @@ describe("drawing length controls", () => {
     const props = { dock: "bottom" as const, kind: "line" as const, fill: false, constrain: false,
       drawAndHold: true, strokeColor: "#000000", strokeWidthPt: 2, pattern: "solid" as const, spacing: 1,
       onKindChange: noop, onFillChange: noop, onConstrainChange: noop, onDrawAndHoldChange: noop,
+      endSnap: true, onEndSnapChange: noop,
       onPatternChange: noop, onSpacingChange: noop, onMinimumLineLengthChange: noop, onClose: noop };
     expect(render(ShapeCard, { props }).body).toContain('aria-valuetext="2.1 millimetres"');
     expect(render(ShapeCard, { props: { ...props, minimumLineLengthPt: 24 } }).body)

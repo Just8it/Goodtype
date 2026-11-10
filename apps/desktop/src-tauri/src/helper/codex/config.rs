@@ -242,7 +242,7 @@ pub fn instructions() -> String {
         .and_then(|s| s.find("\n---").map(|i| &s[i + 4..]))
         .unwrap_or(skill);
     format!(
-        "In-app Goodtype mode: use Goodtype tools and create proposals; do not answer with paste-able text. The panel shows your replies as plain text: keep them short, never use LaTeX delimiters such as \\( \\) or $...$, and write formulas readably with Unicode (C_L = L / (q·S), ρ = 0.905 kg/m³). Reply in the language the user writes in.\n{body}"
+        "In-app Goodtype mode: answer questions and feedback directly. For requested notebook changes, use Goodtype tools and create review proposals instead of giving paste-able text. Before unfamiliar package code, read the exact-version documentation using available assistant web tools; respect the web setting and never bypass grants. The panel shows your replies as plain text: keep them short, never use LaTeX delimiters such as \\( \\) or $...$, and write formulas readably with Unicode (C_L = L / (q·S), ρ = 0.905 kg/m³). Reply in the language the user writes in.\n{body}"
     )
 }
 #[cfg(test)]

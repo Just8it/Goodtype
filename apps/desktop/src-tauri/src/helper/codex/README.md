@@ -4,6 +4,14 @@ The app-server process is the user's installed `codex-cli 0.166.0`. No credentia
 Goodtype. Prompt submission happens only after the ChatGPT account check and strict config/MCP
 preflight. A failure destroys the process tree and revokes the launch/session grants.
 
+Connection recovery (2026-11-09, user authorized): local RPC responses allow 90 seconds.
+Only Codex's explicit `-32603 / workspace routing discovery timed out` account error
+is retried, up to five times 15 seconds apart before thread/model creation. Counts
+are emitted as localized run status; Stop/End cancels within the 100 ms wait poll.
+After exhaustion, provider-unreachable copy offers manual Retry. Model turns and
+permission failures are never automatically repeated. Launch-token issuance follows
+successful account startup, preserving its existing one-minute expiry and revocation.
+
 `client.rs` owns bounded JSONL, request routing, decline responses and the hidden process/Job
 Object. `config.rs` owns per-launch overrides and the strict comparison. `mod.rs` owns discovery,
 conversations, run events and commands. The bridge's session share accessor separates terminal

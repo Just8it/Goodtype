@@ -8,6 +8,8 @@ use std::{
     time::{Duration, Instant},
 };
 pub const LINE_LIMIT: usize = 4 * 1024 * 1024;
+pub const CONNECTION_RETRIES: usize = 5;
+pub const CONNECTION_RETRY_DELAY: Duration = Duration::from_secs(15);
 pub struct Client {
     pub cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
     child: Option<Child>,
@@ -104,7 +106,7 @@ impl Client {
         self.next += 1;
         let id = self.next;
         self.send(json!({"id":id,"method":method,"params":params}))?;
-        let until = Instant::now() + Duration::from_secs(30);
+        let until = Instant::now() + Duration::from_secs(90);
         loop {
             if self.cancelled.load(std::sync::atomic::Ordering::SeqCst) {
                 return Err("cancelled".into());
@@ -119,6 +121,9 @@ impl Client {
             ) {
                 Ok(value) => value?,
                 Err(mpsc::RecvTimeoutError::Timeout) if Instant::now() < until => continue,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    return Err("app-server response timed out".into());
+                }
                 Err(e) => return Err(e.to_string()),
             };
             if value.get("method").is_some() {
@@ -170,6 +175,9 @@ impl Client {
     pub fn initialize(&mut self, event: &mut impl FnMut(&Value)) -> Result<String, String> {
         self.call("initialize",json!({"clientInfo":{"name":"goodtype","version":env!("CARGO_PKG_VERSION")},"capabilities":{"experimentalApi":true}}),event)?;
         self.send(json!({"method":"initialized","params":{}}))?;
+        self.read_account(event)
+    }
+    fn read_account(&mut self, event: &mut impl FnMut(&Value)) -> Result<String, String> {
         let account = self.call("account/read", json!({"refreshToken":false}), event)?;
         Ok(match account["account"]["type"].as_str() {
             Some("chatgpt") => "chatgpt",
@@ -178,6 +186,47 @@ impl Client {
         }
         .into())
     }
+    pub fn initialize_retrying(
+        &mut self,
+        event: &mut impl FnMut(&Value),
+        retrying: &mut impl FnMut(usize),
+    ) -> Result<String, String> {
+        let result = self.initialize(event);
+        self.retry_account(result, event, retrying, CONNECTION_RETRY_DELAY)
+    }
+    fn retry_account(
+        &mut self,
+        mut result: Result<String, String>,
+        event: &mut impl FnMut(&Value),
+        retrying: &mut impl FnMut(usize),
+        delay: Duration,
+    ) -> Result<String, String> {
+        // Only retry an explicit routing failure, before any thread or model turn exists.
+        for attempt in 1..=CONNECTION_RETRIES {
+            if !result.as_ref().is_err_and(|e| routing_timeout(e)) {
+                break;
+            }
+            retrying(attempt);
+            let until = Instant::now() + delay;
+            loop {
+                if self.cancelled.load(std::sync::atomic::Ordering::SeqCst) {
+                    return Err("cancelled".into());
+                }
+                let remaining = until.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    break;
+                }
+                std::thread::sleep(remaining.min(Duration::from_millis(100)));
+            }
+            result = self.read_account(event);
+        }
+        result
+    }
+}
+pub fn routing_timeout(error: &str) -> bool {
+    serde_json::from_str::<Value>(error).is_ok_and(|v| {
+        v["code"] == -32603 && v["message"] == "workspace routing discovery timed out"
+    })
 }
 impl Drop for Client {
     fn drop(&mut self) {
@@ -302,6 +351,90 @@ mod routing_tests {
             Ok(())
         }
     }
+    #[test]
+    fn account_routing_retries_are_bounded_cancellable_and_never_start_a_turn() {
+        let timeout = json!({"code":-32603,"message":"workspace routing discovery timed out"});
+        for scenario in ["success", "exhausted", "cancelled", "other"] {
+            let output = Capture(Default::default());
+            let (tx, incoming) = mpsc::sync_channel(8);
+            for id in 1..=CONNECTION_RETRIES {
+                tx.send(Ok(if scenario == "success" && id == 2 {
+                    json!({"id":id,"result":{"account":{"type":"chatgpt"}}})
+                } else {
+                    json!({"id":id,"error":timeout})
+                }))
+                .unwrap();
+            }
+            let mut c = Client {
+                cancelled: Default::default(),
+                child: None,
+                input: Box::new(output.clone()),
+                incoming,
+                next: 0,
+                responses: HashMap::new(),
+                cwd: tempfile::tempdir().unwrap(),
+                #[cfg(windows)]
+                job: None,
+            };
+            let cancelled = c.cancelled.clone();
+            let mut attempts = vec![];
+            let initial = if scenario == "other" {
+                "permission denied".into()
+            } else {
+                timeout.to_string()
+            };
+            let result = c.retry_account(
+                Err(initial.clone()),
+                &mut |_| {},
+                &mut |attempt| {
+                    attempts.push(attempt);
+                    if scenario == "cancelled" {
+                        cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
+                },
+                Duration::ZERO,
+            );
+            let expected = match scenario {
+                "success" => {
+                    assert_eq!(result.unwrap(), "chatgpt");
+                    2
+                }
+                "cancelled" => {
+                    assert_eq!(result.unwrap_err(), "cancelled");
+                    0
+                }
+                "other" => {
+                    assert_eq!(result.unwrap_err(), initial);
+                    0
+                }
+                _ => {
+                    assert!(routing_timeout(&result.unwrap_err()));
+                    CONNECTION_RETRIES
+                }
+            };
+            assert_eq!(
+                attempts,
+                (1..=if scenario == "cancelled" { 1 } else { expected }).collect::<Vec<_>>()
+            );
+            let written = output.0.lock().unwrap();
+            let requests = written
+                .split(|b| *b == b'\n')
+                .filter(|b| !b.is_empty())
+                .map(|b| serde_json::from_slice::<Value>(b).unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(requests.len(), expected);
+            assert!(
+                requests
+                    .iter()
+                    .all(|r| r["method"] == "account/read" && r["params"]["refreshToken"] == false)
+            );
+        }
+        assert!(!routing_timeout("workspace routing discovery timed out"));
+        assert!(!routing_timeout(
+            &json!({"code":-32603,"message":"invalid permissions"}).to_string()
+        ));
+    }
+
     #[test]
     fn inventory_queries_each_existing_thread_connection_and_rejects_incomplete_results() {
         for bad in [

@@ -95,11 +95,12 @@ pub fn prepare(
     )
 }
 
-/// Prepare from granted bytes only: no notebook disk read and no package download.
+/// Prepare from granted project bytes only; package imports follow the caller's policy.
 pub(crate) fn prepare_granted(
     root: &Path,
     source: &str,
     files: &crate::GrantedFiles,
+    allow_remote_packages: bool,
 ) -> Result<PageSource, String> {
     prepare_with(
         source,
@@ -117,7 +118,7 @@ pub(crate) fn prepare_granted(
             crate::embedded::binds_preset_function(
                 root,
                 path,
-                crate::embedded::package_loader(false),
+                crate::embedded::package_loader(allow_remote_packages),
                 Some(files),
             )
         },

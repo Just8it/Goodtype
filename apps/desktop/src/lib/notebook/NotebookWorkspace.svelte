@@ -39,6 +39,8 @@
   import EraserPanel from "./EraserPanel.svelte";
   import ToolCard from "./ToolCard.svelte";
   import ShapeCard from "./ShapeCard.svelte";
+  import BackToCellChip from "./BackToCellChip.svelte";
+  import PageOverview from "./PageOverview.svelte";
   import PythonInstall from "../calculation/PythonInstall.svelte";
   import CalculationPage from "../calculation/CalculationPage.svelte";
   import { createCalculationWorkspace } from "../calculation/calculationWorkspace.svelte";
@@ -382,6 +384,22 @@
   // an overlay, so the canvas genuinely narrows — and the palette, which is positioned inside
   // that region, follows the paper instead of colliding with the panel.
   let sideEditorOpen = $state(false);
+  /// The page overview and the side editor share the right side of the window, so they never
+  /// stack: opening one closes the other.
+  let overviewOpen = $state(false);
+  const OVERVIEW_ID = "page-overview";
+  $effect(() => { if (sideEditorOpen) untrack(() => { overviewOpen = false; }); });
+
+  async function toggleOverview() {
+    if (overviewOpen) { overviewOpen = false; return; }
+    if (sideEditorOpen) await closeSideEditor();
+    if (!sideEditorOpen) overviewOpen = true;
+  }
+
+  function closeOverview() {
+    overviewOpen = false;
+    void tick().then(() => document.getElementById("page-overview-toggle")?.focus());
+  }
   let sideEditorStyle = $state(false);
   /// A page template open in the side editor (style mode), instead of the shared notebook style.
   const templateEditor = createTemplateEditing({
@@ -1110,7 +1128,7 @@
             compact: true,
             preview:
               '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48"><rect x="8" y="5" width="29" height="38" rx="3" fill="#fff" stroke="#9aa3ad"/><path d="M29 5v10h8" fill="none" stroke="#9aa3ad"/><rect x="12" y="25" width="29" height="13" rx="3" fill="#d85b55"/><text x="26.5" y="34.5" fill="#fff" font-size="8" font-family="sans-serif" font-weight="700" text-anchor="middle">PDF</text></svg>',
-            onSelect: (position) => void session.importPdf(position),
+            onSelect: (position, _count, options) => void session.importPdf(position, undefined, options?.pdfPages),
           },
         ],
       },
@@ -1826,7 +1844,7 @@
 <main tabindex="-1" class="workspace-app" class:ai-open={aiPanelOpen} onpointerdowncapture={event => {
     if (event.target instanceof Element && event.target.closest(".active-page") && !event.target.closest(".helper-crop, .selection-actions") && tool !== "lasso") region = null;
     selection.closeObjectSelection(event);
-  }} onwheel={navigation.wheelZoom}>
+  }} onfocusout={() => session.scheduleFocus()} onwheel={navigation.wheelZoom}>
 <HelperWorkspace pages={helperPages} {session} bind:activityOpen bind:panelOpen={aiPanelOpen} hasConversation={Boolean(codexSelection && $codexStatus)} available={tauriAvailable} onError={helperError}>
 {#snippet conversation(review)}
 {#if codexSelection && $codexStatus}
@@ -1853,7 +1871,10 @@
         onOpen={(nextRoot) => void session.openNotebookAt(nextRoot)}
         onCreate={(nextRoot, setup) => {
           showInitialSetup = false;
-          void session.openNotebookAt(nextRoot, { createIfMissing: true, setup });
+          void session.openNotebookAt(nextRoot, { createIfMissing: true, setup }).then((opened) => {
+            const starter = session.activePageId;
+            if (opened && setup.fromPdf) void session.importPdf({ kind: "before", pageId: starter }, starter, setup.pdfPages);
+          });
         }}
         onMove={session.moveLibrarySelection}
         returnLabel={session.openTabs.find((tab) => tab.root === session.root)?.title}
@@ -2114,6 +2135,7 @@
                     shapeKind={settings.shapeKind}
                     shapeStyle={currentShapeStyle()}
                     shapeConstrain={settings.shapeConstrain}
+                    shapeEndSnap={settings.shapeEndSnap}
                     drawAndHoldShapes={settings.drawAndHoldShapes}
                     heldLineMinimumPt={settings.heldLineMinimumPt}
                     eraseRadiusPt={ERASER_RADIUS_PT[settings.eraserSize]}
@@ -2202,6 +2224,34 @@
         {/each}
         </div>
       </div>
+
+      {#if overviewOpen && session.notebookManifest}
+        <PageOverview
+          id={OVERVIEW_ID}
+          pages={session.pageEntries.map((entry) => {
+            const geometry = entry.id === session.activePageId ? session.activeGeometry : (entry.snapshot?.page.geometry ?? entry.geometry);
+            return { id: entry.id, widthPt: geometry.widthPt, heightPt: geometry.heightPt, calculation: Boolean(entry.snapshot?.page.calculation) };
+          })}
+          activePageId={session.activePageId}
+          root={session.root}
+          thumbnails={tauriAvailable}
+          pageTextBaselineGrid={settings.pageTextBaselineGrid}
+          pageSaves={session.pageSaves}
+          reducedMotion={settings.reducedMotion}
+          onOpenPage={(pageId) => session.scrollToPage(pageId)}
+          onGoToNumber={(number) => void session.goToPageNumber(number)}
+          onReorder={(order) => void session.reorderTo(order)}
+          onDelete={(ids) => void session.deletePages(ids)}
+          onClose={closeOverview}
+        />
+      {/if}
+
+      <BackToCellChip
+        viewport={pageViewport}
+        pageNumber={(pageId) => session.pageEntries.findIndex((entry) => entry.id === pageId) + 1}
+        overPalette={paletteDock === "bottom"}
+        reducedMotion={settings.reducedMotion}
+      />
 
       {#if navigation.touchHistoryToast}
         {#key navigation.touchHistoryToast}
@@ -2309,6 +2359,7 @@
               kind={settings.shapeKind}
               fill={settings.shapeFill}
               constrain={settings.shapeConstrain}
+              endSnap={settings.shapeEndSnap}
               drawAndHold={settings.drawAndHoldShapes}
               minimumLineLengthPt={settings.heldLineMinimumPt}
               onMinimumLineLengthChange={(heldLineMinimumPt) => changeSettings({ ...settings, heldLineMinimumPt })}
@@ -2323,6 +2374,7 @@
               onFillChange={(shapeFill) => changeSettings({ ...settings, shapeFill })}
               onConstrainChange={(shapeConstrain) =>
                 changeSettings({ ...settings, shapeConstrain })}
+              onEndSnapChange={(shapeEndSnap) => changeSettings({ ...settings, shapeEndSnap })}
               onDrawAndHoldChange={(drawAndHoldShapes) =>
                 changeSettings({ ...settings, drawAndHoldShapes })}
               onClose={closeToolCard}
@@ -2520,7 +2572,8 @@
   <WorkspaceStatus toolLabel={currentToolLabel()} toolDetail={currentToolDetail()} status={session.status} transactionFailed={session.transactionFailed}
     pageNumber={session.activePageNumber()} pageCount={session.notebookManifest?.pages.length ?? 1} {zoom}
     {saveNeedsAttention} {savePending} onZoom={navigation.changeZoom}
-    onGoToPage={(number) => void session.goToPageNumber(number)} onSave={() => void session.persist()} />
+    {overviewOpen} overviewId={OVERVIEW_ID} onToggleOverview={() => void toggleOverview()}
+    onSave={() => void session.persist()} />
 
   {#if searchOpen}
     <SearchOverlay

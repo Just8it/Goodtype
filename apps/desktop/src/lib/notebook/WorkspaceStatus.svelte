@@ -1,53 +1,27 @@
 <script lang="ts">
   import { t, renderMessage, type UiText } from "../i18n";
-  import { tick } from "svelte";
-  let { toolLabel, toolDetail, status, transactionFailed, pageNumber, pageCount, zoom, saveNeedsAttention, savePending, onZoom, onGoToPage, onSave }: {
+  let { toolLabel, toolDetail, status, transactionFailed, pageNumber, pageCount, zoom, saveNeedsAttention, savePending, overviewOpen, overviewId, onZoom, onToggleOverview, onSave }: {
     toolLabel: string; toolDetail: string; status: UiText; transactionFailed: boolean;
     pageNumber: number; pageCount: number; zoom: number; saveNeedsAttention: boolean; savePending: boolean;
-    onZoom: (zoom: number) => void; onGoToPage: (pageNumber: number) => void; onSave: () => void;
+    overviewOpen: boolean; overviewId: string;
+    onZoom: (zoom: number) => void; onToggleOverview: () => void; onSave: () => void;
   } = $props();
-
-  // The page count is where you look to learn where you are, so it is also where you say where
-  // to go: click it, type a number, Enter.
-  let jumping = $state(false);
-  let jumpInput = $state<HTMLInputElement>();
-
-  async function startJump() {
-    jumping = true;
-    await tick();
-    jumpInput?.select();
-  }
-
-  function finishJump(commit: boolean) {
-    if (!jumping) return;
-    jumping = false;
-    const wanted = Number.parseInt(jumpInput?.value ?? "", 10);
-    if (commit && !Number.isNaN(wanted)) onGoToPage(Math.min(pageCount, Math.max(1, wanted)));
-  }
 </script>
 
   <footer class="status-strip">
     <div class="tool-status"><strong>{toolLabel}</strong><span>{toolDetail}</span></div>
     <div class:failure={transactionFailed} class="operation-status" title={renderMessage(status, $t)}>{renderMessage(status, $t)}</div>
-    {#if jumping}
-      <span class="page-count">
-        <input
-          bind:this={jumpInput}
-          type="number"
-          min="1"
-          max={pageCount}
-          value={pageNumber}
-          aria-label={$t("workspace.goToPage")}
-          onkeydown={(event) => {
-            if (event.key === "Enter") finishJump(true);
-            if (event.key === "Escape") { event.stopPropagation(); finishJump(false); }
-          }}
-          onblur={() => finishJump(true)}
-        />{$t("workspace.of", { "pageCount": pageCount })}
-      </span>
-    {:else}
-      <button type="button" class="page-count" title={$t("workspace.goToPage")} disabled={pageCount < 2} onclick={() => void startJump()}>{$t("workspace.pageOf", { "value2": pageNumber, "value4": pageCount })}</button>
-    {/if}
+    <!-- The page count is where you look to learn where you are, so it also opens every page. -->
+    <button
+      type="button"
+      id="page-overview-toggle"
+      class="page-count"
+      class:open={overviewOpen}
+      title={$t("pageOverview.show")}
+      aria-expanded={overviewOpen}
+      aria-controls={overviewId}
+      onclick={onToggleOverview}
+    >{$t("workspace.pageOf", { "value2": pageNumber, "value4": pageCount })}</button>
     <span class="footer-divider"></span>
     <!-- Zoom reads and is changed in one place. It used to be a floating pill over the canvas
          *and* a number down here, so neither looked like the answer. -->
@@ -92,27 +66,13 @@
     font-variant-numeric: tabular-nums;
   }
   .status-strip button.page-count { color: var(--quiet); }
-  .status-strip button.page-count:hover:not(:disabled) { color: var(--text); }
-  .status-strip button.page-count:disabled { cursor: default; }
-  .status-strip button.page-count:disabled:hover { background: transparent; }
-  .page-count input {
-    box-sizing: border-box;
-    width: 44px;
-    height: 20px;
-    margin-right: 4px;
-    padding: 0 4px;
-    border: 1px solid var(--blueprint);
-    border-radius: var(--radius);
-    background: var(--surround);
-    color: var(--text);
-    font: inherit;
-    text-align: center;
-    outline: none;
-  }
+  .status-strip button.page-count:hover { color: var(--text); }
+  .status-strip button.page-count.open { background: var(--accent-fill); color: var(--text); }
 
   .zoom-group { display: flex; align-items: center; gap: 1px; }
   .zoom-group .zoom-value { min-width: 42px; font-variant-numeric: tabular-nums; text-align: center; }
 
 
-  @media (max-width: 800px) { .operation-status, .page-count { display: none; } }
+  /* The page count stays: it is the way into the page overview. */
+  @media (max-width: 800px) { .operation-status { display: none; } }
 </style>
