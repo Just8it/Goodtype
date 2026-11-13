@@ -60,8 +60,43 @@ const MIN_DIRECTION_SPAN_PT = 0.5;
 const TAPER_MAX_NIB_WIDTHS = 6;
 
 /** Distance between two samples, used to decide whether they are far enough apart to mean anything. */
-function span(a: OutlinePoint, b: OutlinePoint): number {
+export function span(a: OutlinePoint, b: OutlinePoint): number {
   return Math.hypot(a.x - b.x, a.y - b.y);
+}
+
+/** Keep `point` unless it lies too close to the last kept sample to carry a direction. */
+export function keepSample(path: OutlinePoint[], point: OutlinePoint): void {
+  if (span(point, path[path.length - 1]) > MIN_SAMPLE_SPACING_PT) path.push(point);
+}
+
+/** The longest a taper can ever run for this nib, whatever the stroke's length. */
+export function maximumTaperLength(options: OutlineOptions): number {
+  return options.taper > 0 ? options.widthPt * TAPER_MAX_NIB_WIDTHS : 0;
+}
+
+/** How far each end tapers, for a stroke (or fragment) whose centreline is `total` long. */
+export function taperLengthFor(total: number, options: OutlineOptions): number {
+  const before = options.trim?.start ?? 0;
+  const after = options.trim?.end ?? 0;
+  return options.taper > 0
+    ? Math.min((before + total + after) * options.taper, options.widthPt * TAPER_MAX_NIB_WIDTHS)
+    : 0;
+}
+
+/** Drawn half-width of a sample `distance` along a centreline `total` long. */
+export function sampleRadius(
+  point: OutlinePoint,
+  distance: number,
+  total: number,
+  taperLength: number,
+  options: OutlineOptions,
+): number {
+  const before = options.trim?.start ?? 0;
+  const after = options.trim?.end ?? 0;
+  const ramp = taperLength > 0
+    ? Math.min(1, (before + distance) / taperLength, (after + total - distance) / taperLength)
+    : 1;
+  return outlineWidthAt(point, options) / 2 * ramp;
 }
 
 /**
@@ -94,20 +129,19 @@ export function outlineDot(center: OutlinePoint, radius: number): { x: number; y
 /**
  * Resolve filtered samples and their pressure/taper radii for both nib projections.
  */
+export type OutlineSample = { point: OutlinePoint; radius: number };
+
 function outlineSamples(
   points: OutlinePoint[],
   options: OutlineOptions,
-): { point: OutlinePoint; radius: number }[] {
+): OutlineSample[] {
   if (points.length === 0) return [];
 
   // Samples too close together carry no direction and would produce a noisy normal. Exact
   // duplicates were already dropped here; near-duplicates were not, and they are what a slowly
   // drawn stroke is made of.
   const path: OutlinePoint[] = [points[0]];
-  for (const point of points.slice(1)) {
-    const previous = path[path.length - 1];
-    if (span(point, previous) > MIN_SAMPLE_SPACING_PT) path.push(point);
-  }
+  for (const point of points.slice(1)) keepSample(path, point);
 
   // A fragment keeps its real geometry, however short: a full-width dot would be fatter than the
   // ink it stands for and could reach back into the area the eraser just cleared.
@@ -138,18 +172,12 @@ function outlineSamples(
   }
   const total = cumulative[cumulative.length - 1];
   // The taper belongs to the original stroke: a fragment measures it from the original ends.
-  const taperLength =
-    options.taper > 0
-      ? Math.min((before + total + after) * options.taper, options.widthPt * TAPER_MAX_NIB_WIDTHS)
-      : 0;
+  const taperLength = taperLengthFor(total, options);
 
-  return path.map((point, index) => {
-    const ramp = taperLength > 0
-      ? Math.min(1, (before + cumulative[index]) / taperLength,
-        (after + total - cumulative[index]) / taperLength)
-      : 1;
-    return { point, radius: outlineWidthAt(point, options) / 2 * ramp };
-  });
+  return path.map((point, index) => ({
+    point,
+    radius: sampleRadius(point, cumulative[index], total, taperLength, options),
+  }));
 }
 
 /**
@@ -231,41 +259,74 @@ export function roundedOutlinePoints(points: OutlinePoint[], options: OutlineOpt
   const samples = outlineSamples(points, options);
   if (samples.length === 0) return [];
   if (samples.length === 1) return [outlineDot(samples[0].point, samples[0].radius)];
-  const polygons: { x: number; y: number }[][] = [];
+  const polygons: Polygon[] = [];
   const angles: number[] = [];
-  const at = (index: number, angle: number) => ({
-    x: quantize(samples[index].point.x + samples[index].radius * Math.cos(angle)),
-    y: quantize(samples[index].point.y + samples[index].radius * Math.sin(angle)),
-  });
-  const arc = (index: number, start: number, sweep: number) => {
-    if (samples[index].radius <= 0 || sweep <= 0) return;
-    const steps = Math.max(1, Math.ceil(sweep / (Math.PI / 6)));
-    polygons.push([
-      { x: quantize(samples[index].point.x), y: quantize(samples[index].point.y) },
-      ...Array.from({ length: steps + 1 }, (_, step) => at(index, start - sweep * step / steps)),
-    ]);
-  };
   for (let index = 0; index + 1 < samples.length; index += 1) {
-    const from = samples[index].point, to = samples[index + 1].point;
-    const angle = Math.atan2(to.y - from.y, to.x - from.x);
+    const angle = segmentAngle(samples[index], samples[index + 1]);
     angles.push(angle);
-    polygons.push([at(index, angle + Math.PI / 2), at(index + 1, angle + Math.PI / 2),
-      at(index + 1, angle - Math.PI / 2), at(index, angle - Math.PI / 2)]);
+    polygons.push(roundedStrip(samples[index], samples[index + 1], angle));
   }
-  arc(0, angles[0] - Math.PI / 2, Math.PI);
-  arc(samples.length - 1, angles.at(-1)! + Math.PI / 2, Math.PI);
+  polygons.push(...roundedCaps(samples[0], samples[samples.length - 1], angles[0], angles.at(-1)!));
   for (let index = 1; index + 1 < samples.length; index += 1) {
-    const before = angles[index - 1], after = angles[index];
-    const turn = Math.atan2(Math.sin(after - before), Math.cos(after - before));
-    arc(index, turn > 0 ? after - Math.PI / 2 : before + Math.PI / 2, Math.abs(turn));
+    const join = roundedJoin(samples[index], angles[index - 1], angles[index]);
+    if (join) polygons.push(join);
   }
   return polygons;
+}
+
+// The pieces of round pen geometry. Each depends only on the samples named in its arguments, so
+// the live painter can keep finished pieces and rebuild only those that still change.
+
+type Polygon = { x: number; y: number }[];
+
+function rimPoint(sample: OutlineSample, angle: number): { x: number; y: number } {
+  return {
+    x: quantize(sample.point.x + sample.radius * Math.cos(angle)),
+    y: quantize(sample.point.y + sample.radius * Math.sin(angle)),
+  };
+}
+
+/** Direction of travel from one sample to the next. */
+export function segmentAngle(from: OutlineSample, to: OutlineSample): number {
+  return Math.atan2(to.point.y - from.point.y, to.point.x - from.point.x);
+}
+
+/** The strip between two neighbouring samples. */
+export function roundedStrip(from: OutlineSample, to: OutlineSample, angle: number): Polygon {
+  return [rimPoint(from, angle + Math.PI / 2), rimPoint(to, angle + Math.PI / 2),
+    rimPoint(to, angle - Math.PI / 2), rimPoint(from, angle - Math.PI / 2)];
+}
+
+function roundedArc(sample: OutlineSample, start: number, sweep: number): Polygon | null {
+  if (sample.radius <= 0 || sweep <= 0) return null;
+  const steps = Math.max(1, Math.ceil(sweep / (Math.PI / 6)));
+  return [
+    { x: quantize(sample.point.x), y: quantize(sample.point.y) },
+    ...Array.from({ length: steps + 1 }, (_, step) => rimPoint(sample, start - sweep * step / steps)),
+  ];
+}
+
+/** Round caps on the first and last sample, given the first and last segment directions. */
+export function roundedCaps(first: OutlineSample, last: OutlineSample, firstAngle: number, lastAngle: number): Polygon[] {
+  return [roundedArc(first, firstAngle - Math.PI / 2, Math.PI), roundedArc(last, lastAngle + Math.PI / 2, Math.PI)]
+    .filter((polygon): polygon is Polygon => polygon !== null);
+}
+
+/** The outside arc where the segments before and after `sample` meet, if they turn. */
+export function roundedJoin(sample: OutlineSample, before: number, after: number): Polygon | null {
+  const turn = Math.atan2(Math.sin(after - before), Math.cos(after - before));
+  return roundedArc(sample, turn > 0 ? after - Math.PI / 2 : before + Math.PI / 2, Math.abs(turn));
 }
 
 /** Resolve a pen's maximum taper into the existing per-stroke length fraction. */
 export function limitedTaper(points: OutlinePoint[], taper: number, maximumLengthPt: number): number {
   let length = 0;
   for (let index = 1; index < points.length; index += 1) length += span(points[index - 1], points[index]);
+  return taperForLength(length, taper, maximumLengthPt);
+}
+
+/** `limitedTaper` for a stroke whose raw sample length is already summed, in the same order. */
+export function taperForLength(length: number, taper: number, maximumLengthPt: number): number {
   return length > 0 ? Math.min(taper, Math.max(0, maximumLengthPt) / length) : taper;
 }
 

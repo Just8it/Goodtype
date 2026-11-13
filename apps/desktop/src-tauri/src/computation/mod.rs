@@ -531,6 +531,63 @@ mod tests {
         assert_ne!(state.lifecycle.load(Ordering::SeqCst), epoch);
     }
     #[test]
+    #[ignore = "requires an explicitly prepared scientific runtime in GOODTYPE_PYTHON_TEST_RUNTIME"]
+    fn restricted_python_runs_assistant_csv_plot_recipe() {
+        let runtime = std::env::var_os("GOODTYPE_PYTHON_TEST_RUNTIME")
+            .expect("set GOODTYPE_PYTHON_TEST_RUNTIME");
+        let skill = include_str!("../../../../../crates/goodtype-mcp/skill/goodtype/SKILL.md")
+            .replace("\r\n", "\n");
+        let section = skill.split("### CSV data and Python plots").nth(1).unwrap();
+        let recipe = section
+            .split("```python\n")
+            .nth(1)
+            .unwrap()
+            .split("```")
+            .next()
+            .unwrap();
+        for _ in 0..2 {
+            // The saved source must recreate its CSV and plot even after the old session ends.
+            let session = Session::new(Path::new(&runtime)).unwrap();
+            let (result, _, _) = session.execute("csv-plot", recipe, false).unwrap();
+            let outputs = result["outputs"].as_array().unwrap();
+            assert!(
+                !outputs
+                    .iter()
+                    .any(|output| output["output_type"] == "error"),
+                "{result}"
+            );
+            assert!(
+                outputs
+                    .iter()
+                    .any(|output| output["data"]["image/png"].is_string()),
+                "{result}"
+            );
+            assert_eq!(
+                std::fs::read_to_string(session.output.join("plot_data/example.csv"))
+                    .unwrap()
+                    .replace("\r\n", "\n"),
+                "x,y\n0,0\n1,2\n2,4\n"
+            );
+            let (loaded, _, _) = session
+                .execute(
+                    "csv-read",
+                    "assert data['y'].tolist() == [0, 2, 4]\nassert '__file__' not in globals()",
+                    false,
+                )
+                .unwrap();
+            assert!(
+                !loaded["outputs"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|output| output["output_type"] == "error"),
+                "{loaded}"
+            );
+            session.stop();
+        }
+    }
+
+    #[test]
     #[ignore = "requires an explicitly prepared portable runtime in GOODTYPE_PYTHON_TEST_RUNTIME"]
     fn restricted_python_protocol_preserves_state_isolates_sessions_and_bounds_output() {
         let runtime = std::env::var_os("GOODTYPE_PYTHON_TEST_RUNTIME")

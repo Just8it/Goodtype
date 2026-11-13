@@ -185,7 +185,7 @@ pub(super) fn commit_current_with_precondition(
     // and the page about to be written. The manifest states the version and the page and its ink
     // layers move with it, so a partially upgraded notebook is not representable.
     raise_schema_version(&mut snapshot);
-    snapshot.page.revision = current.page.revision + 1;
+    snapshot.page.revision = next_revision(&current)?;
     if precondition
         .as_ref()
         .is_some_and(|condition| condition.require_retained_history)
@@ -242,7 +242,7 @@ fn restore_notebook(
     // Undo restores this page's content. Page ordering and the notebook-wide schema maximum may
     // have advanced since the entry was retained and must never be resurrected from old history.
     target.manifest = current.manifest.clone();
-    target.page.revision = current.page.revision + 1;
+    target.page.revision = next_revision(&current)?;
     let (restored, fingerprint) = save_and_return(&root, &current, target)?;
 
     if undo {
@@ -262,6 +262,16 @@ fn restore_notebook(
     }
     history.record(&restored, fingerprint);
     Ok(history_result(restored, history))
+}
+
+/// The revision a write over `current` lands at. A stored page can carry any `u64`, so the
+/// increment is checked and refuses before anything is staged instead of wrapping or panicking.
+fn next_revision(current: &NotebookSnapshot) -> Result<u64, StorageError> {
+    current
+        .page
+        .revision
+        .checked_add(1)
+        .ok_or_else(|| invalid_error("page revision overflow"))
 }
 
 pub(super) fn ensure_current(
@@ -429,6 +439,77 @@ mod tests {
         assert_eq!(
             fs::read(root.join(&observed.calculations[0].path)).unwrap(),
             before
+        );
+    }
+
+    /// A stored page at `u64::MAX` cannot advance. Commit, undo and redo must refuse with an
+    /// error before staging anything, and must not panic, so the caller's history lock stays
+    /// usable for the next command.
+    #[test]
+    fn maximum_revision_is_refused_on_commit_undo_and_redo_without_changing_bytes() {
+        let overflow = |result: Result<HistoryResult, StorageError>| {
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("page revision overflow")
+            );
+        };
+        let at = |revision: u64| {
+            let temporary = tempfile::tempdir().unwrap();
+            let root = temporary.path().join("notebook");
+            let mut seeded = snapshot();
+            seeded.page.revision = revision;
+            create_notebook(&root, &seeded).unwrap();
+            (temporary, root)
+        };
+        let history = std::sync::Mutex::new(NotebookHistory::default());
+
+        // Commit and undo from the maximum.
+        let (_commit_dir, root) = at(u64::MAX - 1);
+        let working = observe_notebook(&root, &mut history.lock().unwrap()).unwrap();
+        let landed = commit_notebook(&root, &mut history.lock().unwrap(), working).unwrap();
+        assert_eq!(landed.snapshot.page.revision, u64::MAX);
+        let before = tree_bytes(&root);
+        overflow(commit_notebook(
+            &root,
+            &mut history.lock().unwrap(),
+            landed.snapshot.clone(),
+        ));
+        assert_eq!(tree_bytes(&root), before);
+        overflow(undo_notebook(&root, &mut history.lock().unwrap()));
+        assert_eq!(tree_bytes(&root), before);
+
+        // Redo from the maximum: undo itself lands on the next revision.
+        let (_redo_dir, root) = at(u64::MAX - 2);
+        let mut guard = history.lock().unwrap();
+        let working = observe_notebook(&root, &mut guard).unwrap();
+        commit_notebook(&root, &mut guard, working).unwrap();
+        assert_eq!(
+            undo_notebook(&root, &mut guard)
+                .unwrap()
+                .snapshot
+                .page
+                .revision,
+            u64::MAX
+        );
+        let before = tree_bytes(&root);
+        overflow(redo_notebook(&root, &mut guard));
+        assert_eq!(tree_bytes(&root), before);
+        drop(guard);
+
+        // The history lock is not poisoned and the next command on a valid notebook succeeds.
+        assert!(!history.is_poisoned());
+        let (_valid_dir, root) = at(1);
+        let mut guard = history.lock().unwrap();
+        let working = observe_notebook(&root, &mut guard).unwrap();
+        assert_eq!(
+            commit_notebook(&root, &mut guard, working)
+                .unwrap()
+                .snapshot
+                .page
+                .revision,
+            2
         );
     }
 

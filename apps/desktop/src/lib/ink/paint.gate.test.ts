@@ -42,10 +42,18 @@ function elapsed(run: () => unknown): number {
 
 describe("five thousand strokes", () => {
   // Writing switches colour by the paragraph, not by the stroke, so colours arrive in runs — and
-  // a run is what merges. Measured at 84 nodes for 5,000 strokes.
+  // each spatial bucket within a run merges. More nodes allow raster tiles to cull distant ink.
   it("collapses a realistic page to a manageable number of nodes", () => {
     const painted = paintOrder(page(5000, 60), 0.5);
-    expect(painted.length).toBeLessThan(200);
+    expect(painted.length).toBeLessThan(600);
+    // Outline paths contain absolute M/L coordinates; every bucket stays local, not page-sized.
+    for (const { d } of painted) {
+      const points = [...d.matchAll(/[ML] (-?[\d.]+) (-?[\d.]+)/g)];
+      const xs = points.map(point => Number(point[1]));
+      const ys = points.map(point => Number(point[2]));
+      expect(Math.max(...xs) - Math.min(...xs)).toBeLessThan(160);
+      expect(Math.max(...ys) - Math.min(...ys)).toBeLessThan(160);
+    }
   });
 
   it("re-derives only what changed when a stroke is added or dragged", () => {
@@ -60,4 +68,28 @@ describe("five thousand strokes", () => {
     );
     expect(elapsed(() => paintOrder(dragged, 0.5))).toBeLessThan(25);
   });
+});
+import { paintStrata, installSilhouette } from "./paint";
+
+it("matches restarting bands for 5000 x 60 strokes, duplicate boundaries and unordered input", () => {
+  const strokes = page(5000, 60).map((s, i) => ({...s, zIndex:i,
+    points:Array.from({length:60}, (_, j)=>s.points[j % s.points.length])}));
+  strokes.forEach(s=>installSilhouette(s,0,`M ${s.zIndex} 0 L 1 1 Z`));
+  for (const count of [10,100,1000]) {
+    const boundaries=Array.from({length:count},(_,i)=>Math.floor(i/2)*2);
+    let oldComparisons=0, newComparisons=0, cursor=0;
+    const groups=new Map<number,Stroke[]>();
+    for (const s of strokes) {
+      let band=0;
+      while (band<boundaries.length) {oldComparisons++; if(boundaries[band]>s.zIndex!)break;band++;}
+      while(cursor<boundaries.length) {newComparisons++;if(boundaries[cursor]>s.zIndex!)break;cursor++;}
+      expect(cursor).toBe(band);
+      const group=groups.get(band); if(group)group.push(s);else groups.set(band,[s]);
+    }
+    expect(oldComparisons).toBe(({10:49968,100:495198,1000:4501998})[count]);
+    expect(newComparisons).toBe(({10:18,100:198,1000:1998})[count]);
+    const expected=[...groups.values()].map(group=>({key:group[0].id,zIndex:group[0].zIndex,paths:paintOrder(group)}));
+    expect(paintStrata(strokes,boundaries)).toEqual(expected);
+    expect(paintStrata([...strokes].reverse(),[...boundaries].reverse())).toEqual(expected);
+  }
 });

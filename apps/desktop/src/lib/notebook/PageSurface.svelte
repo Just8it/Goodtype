@@ -54,6 +54,7 @@
     pageWidthPt,
     pageHeightPt,
     zoom = 1,
+    zooming = false,
     interactive = false,
     root = null,
     inlineEditing = true,
@@ -108,7 +109,6 @@
     onSelectShape,
     onChangeShape,
     onEditShape,
-    onEraseShape,
     onShapesErased,
     onStrokeFinalized,
     onShapeFinalized,
@@ -135,6 +135,7 @@
     pageWidthPt: number;
     pageHeightPt: number;
     zoom?: number;
+    zooming?: boolean;
     interactive?: boolean;
     /** Notebook root, forwarded to the editor for completions. */
     root?: string | null;
@@ -191,7 +192,6 @@
     onSelectShape?: (id: string) => void;
     onChangeShape?: (shape: ShapeView, commit?: ShapeEditCommit) => void;
     onEditShape?: (id: string, editing: boolean) => void;
-    onEraseShape?: (id: string) => void;
     onShapesErased?: (replaced: ReadonlyMap<string, ShapeView[]>) => void;
     onStrokeFinalized?: (stroke: Stroke) => void;
     onShapeFinalized?: (shape: ShapeDraft) => void;
@@ -202,7 +202,7 @@
   } = $props();
 
   /**
-   * Shapes as a precise erase is cutting them. Held here rather than in the page's shapes so the
+   * Shapes as an erase is cutting or taking them (a taken shape maps to no pieces). Held here rather than in the page's shapes so the
    * gesture stays local; the pieces become real shapes once, on pen-up.
    */
   let shapeErasePreview = $state.raw<ReadonlyMap<string, ShapeView[]> | null>(null);
@@ -334,6 +334,7 @@
     {showSelectionBounds}
     {pageWidthPt}
     {pageHeightPt}
+    {zooming}
     {zoom}
     {tool}
     {color}
@@ -359,11 +360,11 @@
     {pointerMapping}
     shapeAt={interactive
       ? (point, reachPt) => {
-          const found = topmostShapeAt(shapes, point, reachPt);
+          // As displayed: a shape this erase has already taken is hidden, and must not be hit again.
+          const found = topmostShapeAt(displayedShapes, point, reachPt);
           return found && { id: found.id, zIndex: found.zIndex };
         }
       : undefined}
-    onEraseShape={interactive ? (id) => onEraseShape?.(id) : undefined}
     shapes={interactive ? shapes : undefined}
     onShapeErasePreview={(preview) => (shapeErasePreview = preview)}
     onShapesErased={interactive ? (replaced) => onShapesErased?.(replaced) : undefined}

@@ -1832,21 +1832,10 @@ export function createSession(env: SessionEnvironment) {
   /// A finished drag is one decision and is written straight away. A held arrow or bracket key
   /// is one continuous adjustment, and settles first so a nudge across the page is a single undo
   /// step rather than one transaction per repeat.
-  /// The eraser takes a whole shape, the way it takes a whole stroke.
-  function eraseShape(id: string) {
-    if (!shapes.some((shape) => shape.id === id)) return;
-    shapes = shapes.filter((shape) => shape.id !== id);
-    if (env.selection.selectedShapeId === id) {
-      env.selection.selectedShapeId = null;
-      env.selection.editingShapeId = null;
-    }
-    scheduleInkCommit(notice("workspace.erasedShape"));
-    status = notice("workspace.erasedTheShape");
-  }
-
   /**
-   * The precise eraser's shape pieces, landing on pen-up. They go through the same ink commit as
-   * the cut strokes from the same gesture, so the whole erase is one undo step.
+   * An erase gesture's shapes, landing on pen-up: the precise eraser's pieces, or no pieces for a
+   * shape the whole-mark eraser took. They go through the same ink commit as the gesture's ink,
+   * so the whole erase is one undo step; nothing reaches the session while the pen is down.
    */
   function replaceErasedShapes(replaced: ReadonlyMap<string, ShapeView[]>) {
     shapes = shapes.flatMap((shape) => replaced.get(shape.id) ?? [shape]);
@@ -1854,7 +1843,9 @@ export function createSession(env: SessionEnvironment) {
       env.selection.selectedShapeId = null;
       env.selection.editingShapeId = null;
     }
-    scheduleInkCommit(notice("workspace.erasedInk"));
+    const taken = [...replaced.values()].every((pieces) => pieces.length === 0);
+    scheduleInkCommit(notice(taken ? "workspace.erasedShape" : "workspace.erasedInk"));
+    if (taken) status = notice("workspace.erasedTheShape");
   }
 
   function changeShape(next: ShapeView, commit: ShapeEditCommit = "now") {
@@ -2317,7 +2308,6 @@ export function createSession(env: SessionEnvironment) {
     addShape,
     promoteHeldInk,
     convertSelectedInkToShape,
-    eraseShape,
     replaceErasedShapes,
     changeShape,
     changeImage,

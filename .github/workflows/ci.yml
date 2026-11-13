@@ -48,6 +48,10 @@ jobs:
           node-version-file: .node-version
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      # Reuse compiled Rust dependencies between runs; every runner otherwise rebuilds them all.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          cache-on-failure: true
       - run: cargo xtask doctor
       - run: cargo xtask verify
       - name: Build and test portable Windows package
@@ -83,6 +87,10 @@ jobs:
           node-version-file: .node-version
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      # Reuse compiled Rust dependencies between runs; every runner otherwise rebuilds them all.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          cache-on-failure: true
       # Tinymist Gate 1 currently ships only the pinned Windows x64 sidecar. Tauri otherwise
       # derives a target-specific external-binary name here and rejects these source-only smoke
       # builds before Rust is checked. Keep the native sidecar mandatory in Windows verification;

@@ -1,5 +1,26 @@
 use super::*;
 #[test]
+fn newer_codex_versions_are_accepted_and_older_or_malformed_ones_refused() {
+    for version in [
+        "codex-cli 0.166.0",
+        "codex-cli 0.167.0",
+        "codex-cli 1.0.0",
+        "codex-cli 0.170.2-beta.1",
+    ] {
+        assert!(version_supported(version), "{version}");
+    }
+    for version in [
+        "codex-cli 0.165.9",
+        "codex-cli 0.166",
+        "codex 0.167.0",
+        "codex-cli x.y.z",
+        "",
+    ] {
+        assert!(!version_supported(version), "{version}");
+    }
+}
+
+#[test]
 fn connection_failure_is_distinct_from_safety_checks_and_turn_failures() {
     let detail =
         json!({"code":-32603,"message":"workspace routing discovery timed out"}).to_string();

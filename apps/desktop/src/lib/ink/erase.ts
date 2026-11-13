@@ -21,7 +21,7 @@ import type { Stroke, StrokePoint } from "../model";
 import { inkRadii } from "./outline";
 import { placedTrim } from "./paint";
 import { quantizePoints } from "./pipeline";
-import { distanceToSegment, strokeBounds, transformedPoint, type StrokeFilter } from "./selection";
+import { distanceToSegment, placedPoints, strokeBounds, transformedPoint, type StrokeFilter } from "./selection";
 
 /** One stretch of the eraser's path: everything within `radius` of the segment is under it. */
 export type EraserSweep = { from: Point; to: Point; radius: number };
@@ -47,16 +47,10 @@ const BISECT_STEPS = 40;
 const SAMPLE_QUANTUM_PT = 0.01;
 const GOLDEN = (Math.sqrt(5) - 1) / 2;
 
-const placedCache = new WeakMap<Stroke, Point[]>();
-
-function placed(stroke: Stroke): Point[] {
-  let points = placedCache.get(stroke);
-  if (!points) {
-    points = stroke.points.map((point) => transformedPoint(stroke, point));
-    placedCache.set(stroke, points);
-  }
-  return points;
-}
+// Layer arrays, like committed strokes, are replaced rather than mutated. Carry totals
+// onto each result with the accepted fragment deltas; a new external array recounts once.
+const pointCounts = new WeakMap<Stroke[], number>();
+const placed = placedPoints;
 
 /**
  * Cut every reachable stroke the sweeps touch. Untouched strokes keep their identity, so every
@@ -72,13 +66,18 @@ export function eraseThrough(
   const area = sweepBounds(sweeps);
   const reaches = options.reaches ?? (() => true);
   let strokeCount = strokes.length;
-  let pointCount = options.limits ? strokes.reduce((count, stroke) => count + stroke.points.length, 0) : 0;
+  let pointCount = options.limits ? pointCounts.get(strokes) : 0;
+  if (pointCount === undefined) {
+    pointCount = strokes.reduce((count, stroke) => count + stroke.points.length, 0);
+    pointCounts.set(strokes, pointCount);
+  }
   let limited = false;
-  const next: Stroke[] = [];
-  for (const stroke of strokes) {
+  let next: Stroke[] | undefined;
+  for (let index = 0; index < strokes.length; index += 1) {
+    const stroke = strokes[index];
     const fragments = reaches(stroke) && near(stroke, area) ? cutStroke(stroke, sweeps, options.newId) : null;
     if (!fragments) {
-      next.push(stroke);
+      next?.push(stroke);
       continue;
     }
     const addedStrokes = fragments.length - 1;
@@ -89,15 +88,17 @@ export function eraseThrough(
       (strokeCount + addedStrokes > options.limits.maxStrokes ||
         pointCount + addedPoints > options.limits.maxPoints)) {
       limited = true;
-      next.push(stroke);
+      next?.push(stroke);
       continue;
     }
     strokeCount += addedStrokes;
     pointCount += addedPoints;
+    next ??= strokes.slice(0, index);
     next.push(...fragments);
     replaced.set(stroke.id, fragments.map((fragment) => fragment.id));
   }
-  return { strokes: replaced.size > 0 ? next : strokes, replaced, limited };
+  if (next && options.limits) pointCounts.set(next, pointCount);
+  return { strokes: next ?? strokes, replaced, limited };
 }
 
 /**
@@ -255,6 +256,11 @@ function removedSpan(
   const b = page[index + 1];
   const ra = radii[index];
   const rb = radii[index + 1];
+  const reachBounds = sweep.radius + Math.max(ra, rb);
+  if (Math.max(a.x, b.x) + reachBounds < Math.min(sweep.from.x, sweep.to.x) ||
+    Math.min(a.x, b.x) - reachBounds > Math.max(sweep.from.x, sweep.to.x) ||
+    Math.max(a.y, b.y) + reachBounds < Math.min(sweep.from.y, sweep.to.y) ||
+    Math.min(a.y, b.y) - reachBounds > Math.max(sweep.from.y, sweep.to.y)) return null;
   if (segmentDistance(a, b, sweep.from, sweep.to) > sweep.radius + Math.max(ra, rb)) return null;
   const length = Math.hypot(b.x - a.x, b.y - a.y);
   const contact = flat && length > 0

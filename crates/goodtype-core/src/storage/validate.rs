@@ -11,8 +11,8 @@ use std::{
 
 use crate::{
     BINARY_INK_SCHEMA_VERSION, MIN_SUPPORTED_SCHEMA_VERSION, NotebookManifest, Page,
-    PageBackground, PageObject, PageReference, SCHEMA_VERSION, SHAPE_SCHEMA_VERSION, SourceRef,
-    SourceRole, layout, nonnegative, positive, valid_page_dimension,
+    PageBackground, PageObject, PageReference, SCHEMA_VERSION, SHAPE_SCHEMA_VERSION, SourceRole,
+    layout, nonnegative, positive, valid_page_dimension,
 };
 
 use super::{
@@ -168,32 +168,40 @@ pub(crate) fn page_reference<'a>(
         .ok_or_else(|| invalid_error("page is not referenced by the notebook manifest"))
 }
 
+/// Full validation, run by every public entry that accepts or loads a snapshot.
 pub(crate) fn validate_snapshot(
     root: &Path,
     snapshot: &NotebookSnapshot,
 ) -> Result<(), StorageError> {
+    validate_snapshot_content(snapshot)?;
+    validate_snapshot_files(root, snapshot)
+}
+
+/// The roles whose files a snapshot carries, with the files it carries for each.
+fn carried_files(snapshot: &NotebookSnapshot) -> [(&[StoredFile], SourceRole); 3] {
+    [
+        (&snapshot.blocks, SourceRole::Block),
+        (&snapshot.assets, SourceRole::Asset),
+        (&snapshot.calculations, SourceRole::Calculation),
+    ]
+}
+
+/// Every rule decidable from the snapshot alone. A transaction holds its candidate immutably
+/// from validation to write, so it runs this once; [`validate_snapshot_files`] still runs again
+/// at the point of writing.
+pub(crate) fn validate_snapshot_content(snapshot: &NotebookSnapshot) -> Result<(), StorageError> {
     validate_manifest(&snapshot.manifest)?;
     json_bytes(&snapshot.manifest, true, MAX_JSON_BYTES)?;
-    prepare_target(root, layout::MANIFEST)?;
-    let page_reference = page_reference(&snapshot.manifest, &snapshot.page.id)?;
-    prepare_target(root, &page_reference.path)?;
+    page_reference(&snapshot.manifest, &snapshot.page.id)?;
     validate_snapshot_versions(snapshot)?;
     validate_page_content(snapshot)?;
     json_bytes(&snapshot.page, true, MAX_JSON_BYTES)?;
-    let block_paths = referenced_paths(&snapshot.manifest, &snapshot.page, SourceRole::Block);
-    let asset_paths = referenced_paths(&snapshot.manifest, &snapshot.page, SourceRole::Asset);
-    validate_files(root, &snapshot.blocks, &block_paths, SourceRole::Block)?;
-    validate_files(root, &snapshot.assets, &asset_paths, SourceRole::Asset)?;
-    let calculation_paths =
-        referenced_paths(&snapshot.manifest, &snapshot.page, SourceRole::Calculation);
-    validate_files(
-        root,
-        &snapshot.calculations,
-        &calculation_paths,
-        SourceRole::Calculation,
-    )?;
+    for (files, role) in carried_files(snapshot) {
+        let expected = referenced_paths(&snapshot.manifest, &snapshot.page, role);
+        validate_file_contents(files, &expected, role)?;
+    }
     if let Some(reference) = &snapshot.page.calculation {
-        use crate::calculation::{A4_WIDTH_PT, Calculation};
+        use crate::calculation::A4_WIDTH_PT;
         if !crate::calculation::valid_id(&reference.id)
             || !crate::calculation::valid_id(&reference.part_id)
             || reference.source_path != format!("calculations/{}.ipynb", reference.id)
@@ -203,37 +211,22 @@ pub(crate) fn validate_snapshot(
         {
             return invalid("computational page identity, geometry or content is invalid");
         }
-        let bytes = snapshot
+        // A document that is not carried is read and checked by `validate_snapshot_files`.
+        if let Some(file) = snapshot
             .calculations
             .iter()
             .find(|file| file.path == reference.source_path)
-            .map(|file| file.bytes.clone())
-            .map(Ok)
-            .unwrap_or_else(|| {
-                read_limited(
-                    resolve_existing(root, &reference.source_path)?,
-                    SourceRole::Calculation.max_bytes(),
-                )
-            })?;
-        let document = Calculation::parse(&bytes)?;
-        if document.id() != reference.id
-            || !document
-                .parts()?
-                .iter()
-                .any(|part| part.id == reference.part_id)
         {
-            return invalid("computational page references an unknown calculation or part");
+            validate_calculation_document(reference, &file.bytes)?;
         }
     }
-    validate_background(root, &snapshot.manifest.default_page.background)?;
-    validate_background(root, &snapshot.page.background)?;
-
-    // Material the store only reads still has to resolve, or the page renders a hole.
+    validate_background_content(&snapshot.manifest.default_page.background)?;
+    validate_background_content(&snapshot.page.background)?;
     for object in &snapshot.page.objects {
         if let Some(source) = object.source()
             && !source.role.is_written()
         {
-            validate_source_path(root, source)?;
+            validate_stored_path(source.path, source.role)?;
         }
     }
 
@@ -247,7 +240,6 @@ pub(crate) fn validate_snapshot(
         if !is_in_directory(&reference.path, layout::INK_DIR) {
             return Err(StorageError::InvalidPath(reference.path.clone()));
         }
-        prepare_target(root, &reference.path)?;
         let matches = snapshot
             .ink_layers
             .iter()
@@ -275,6 +267,74 @@ pub(crate) fn validate_snapshot(
         if binary != (snapshot.page.schema_version >= BINARY_INK_SCHEMA_VERSION) {
             return invalid("ink layer encoding does not match its page schema version");
         }
+    }
+    Ok(())
+}
+
+/// What has to hold on disk for the snapshot to be written: every destination is an ordinary
+/// contained file (never a symlink), originals are unchanged, and material the store only reads
+/// still resolves. Runs again immediately before writing, because the disk can change between a
+/// transaction's validation and its write while the snapshot cannot. Assumes the snapshot already
+/// passed [`validate_snapshot_content`].
+pub(crate) fn validate_snapshot_files(
+    root: &Path,
+    snapshot: &NotebookSnapshot,
+) -> Result<(), StorageError> {
+    prepare_target(root, layout::MANIFEST)?;
+    prepare_target(
+        root,
+        &page_reference(&snapshot.manifest, &snapshot.page.id)?.path,
+    )?;
+    for (files, role) in carried_files(snapshot) {
+        let expected = referenced_paths(&snapshot.manifest, &snapshot.page, role);
+        validate_file_targets(root, files, &expected, role)?;
+    }
+    if let Some(reference) = &snapshot.page.calculation
+        && !snapshot
+            .calculations
+            .iter()
+            .any(|file| file.path == reference.source_path)
+    {
+        let bytes = read_limited(
+            resolve_existing(root, &reference.source_path)?,
+            SourceRole::Calculation.max_bytes(),
+        )?;
+        validate_calculation_document(reference, &bytes)?;
+    }
+    // Material the store only reads still has to resolve, or the page renders a hole.
+    for background in [
+        &snapshot.manifest.default_page.background,
+        &snapshot.page.background,
+    ] {
+        if let Some(source) = background.source() {
+            resolve_existing(root, source.path)?;
+        }
+    }
+    for object in &snapshot.page.objects {
+        if let Some(source) = object.source()
+            && !source.role.is_written()
+        {
+            resolve_existing(root, source.path)?;
+        }
+    }
+    for reference in &snapshot.page.ink_layers {
+        prepare_target(root, &reference.path)?;
+    }
+    Ok(())
+}
+
+fn validate_calculation_document(
+    reference: &crate::calculation::CalculationReference,
+    bytes: &[u8],
+) -> Result<(), StorageError> {
+    let document = crate::calculation::Calculation::parse(bytes)?;
+    if document.id() != reference.id
+        || !document
+            .parts()?
+            .iter()
+            .any(|part| part.id == reference.part_id)
+    {
+        return invalid("computational page references an unknown calculation or part");
     }
     Ok(())
 }
@@ -519,9 +579,9 @@ pub(crate) fn validate_ink_layer(layer: &crate::InkLayer) -> Result<(), StorageE
     Ok(())
 }
 
-fn validate_background(root: &Path, background: &PageBackground) -> Result<(), StorageError> {
+fn validate_background_content(background: &PageBackground) -> Result<(), StorageError> {
     if let Some(source) = background.source() {
-        validate_source_path(root, source)?;
+        validate_stored_path(source.path, source.role)?;
     }
     // Checked on the way in so that anything already on disk can be resolved and drawn
     // without a renderer having to second-guess it.
@@ -531,8 +591,7 @@ fn validate_background(root: &Path, background: &PageBackground) -> Result<(), S
     Ok(())
 }
 
-fn validate_files(
-    root: &Path,
+fn validate_file_contents(
     files: &[StoredFile],
     expected: &[&str],
     role: SourceRole,
@@ -549,7 +608,6 @@ fn validate_files(
                 file.path
             )));
         }
-        let target = prepare_target(root, &file.path)?;
         if role.is_written() && file.bytes.len() > role.max_bytes() {
             if role == SourceRole::Asset {
                 return Err(StorageError::ImageTooLarge {
@@ -567,22 +625,37 @@ fn validate_files(
         if role == SourceRole::Block && std::str::from_utf8(&file.bytes).is_err() {
             return invalid("Typst source must be valid UTF-8");
         }
-        // Content that cannot be rewritten has to be identical to whatever is already there,
-        // because every page sharing the path would otherwise change with it.
-        if !role.is_rewritable() {
-            if file.bytes.is_empty() {
-                return Err(StorageError::ImageTooLarge {
-                    size: file.bytes.len(),
-                    maximum: role.max_bytes(),
-                });
-            }
-            if target.exists() && !super::files::has_contents(&target, &file.bytes)? {
-                return Err(StorageError::AlreadyExists(file.path.clone()));
-            }
+        if !role.is_rewritable() && file.bytes.is_empty() {
+            return Err(StorageError::ImageTooLarge {
+                size: file.bytes.len(),
+                maximum: role.max_bytes(),
+            });
         }
     }
     for path in expected {
         validate_stored_path(path, role)?;
+    }
+    Ok(())
+}
+
+fn validate_file_targets(
+    root: &Path,
+    files: &[StoredFile],
+    expected: &[&str],
+    role: SourceRole,
+) -> Result<(), StorageError> {
+    for file in files {
+        let target = prepare_target(root, &file.path)?;
+        // Content that cannot be rewritten has to be identical to whatever is already there,
+        // because every page sharing the path would otherwise change with it.
+        if !role.is_rewritable()
+            && target.exists()
+            && !super::files::has_contents(&target, &file.bytes)?
+        {
+            return Err(StorageError::AlreadyExists(file.path.clone()));
+        }
+    }
+    for path in expected {
         if !files.iter().any(|file| file.path == *path) {
             resolve_existing(root, path)?;
         }
@@ -605,14 +678,6 @@ pub(crate) fn validate_stored_path(path: &str, role: SourceRole) -> Result<(), S
             }
         }
     }
-}
-
-/// A file the store reads but never writes: it has to sit in its role's directory and already
-/// exist. One check for imported page material and for a PDF background.
-fn validate_source_path(root: &Path, source: SourceRef<'_>) -> Result<(), StorageError> {
-    validate_stored_path(source.path, source.role)?;
-    resolve_existing(root, source.path)?;
-    Ok(())
 }
 
 /// Every file the page owns in one role, in reading order and deduplicated.

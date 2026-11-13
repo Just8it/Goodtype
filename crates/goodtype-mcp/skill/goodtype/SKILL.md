@@ -88,6 +88,36 @@ Attached Python pages appear under `calculations` in `get_context`, alongside or
 - Append self-contained cells: only for an existing page with `kind:"python"`, use `targetPageId` on the Python `propose_page`. This proposes **Add cells** without reading existing code or assuming variables/runtime state. Reading/editing existing cells requires their grant.
 - A PDF/image/notes page is not a Python target. For ?Python below this page,? use that source page's stable ID as the `after` anchor for a new Python page; do not ask the user to create it first.
 
+### CSV data and Python plots
+
+Python imports are not restricted to a module whitelist. Use any package available in Goodtype's selected Python environment. Missing packages raise normal import errors; imports never install packages. Do not use pip, subprocesses or network calls to install them.
+
+For a requested Python plot, propose self-contained cells that write the supplied data to CSV, read it back and plot it. Use only granted data; label illustrative or synthetic data explicitly and never invent missing measurements. Keep the CSV text or data-generation code in the proposed cell source, so the saved notebook can recreate the files after a restart. Put setup before plotting in execution order, or in the same cell.
+
+Relative paths resolve in the calculation's isolated, writable session folder, not the notebook directory. Use a named subfolder such as `plot_data`; do not use `__file__`, absolute host paths or `../`. CSVs in this folder are temporary and disappear when the session ends. They are not canonical notebook assets or an exported CSV attachment. Never claim that creating a file in this folder saves it to the notebook. Existing CSVs beside the notebook are not automatically accessible; request their data rather than guessing a path or bypassing the grant.
+
+The assistant proposes source through the existing Python proposal tools. Only the user confirms insertion and Runs; the assistant never writes files directly. `plt.show()` displays a plot as a saved cell output after a successful Run. No `savefig` is needed for this.
+
+Example with explicitly illustrative values (replace them with the user's granted data):
+
+```python
+from pathlib import Path
+import pandas as pd
+import matplotlib.pyplot as plt
+
+data_dir = Path("plot_data")
+data_dir.mkdir(exist_ok=True)
+csv_path = data_dir / "example.csv"
+csv_path.write_text("x,y\n0,0\n1,2\n2,4\n", encoding="utf-8")
+data = pd.read_csv(csv_path)
+
+fig, ax = plt.subplots()
+ax.plot(data["x"], data["y"], marker="o")
+ax.set(xlabel="x [dimensionless]", ylabel="y [dimensionless]")
+ax.grid(alpha=0.3)
+plt.show()
+```
+
 ## Typst essentials and tested examples
 
 Use markup, `#` code and `$ ... $` math appropriately. Display math has interior spaces; never use `$$`, LaTeX backslash commands or LaTeX grouping braces. Numeric evaluation uses `calc.*`; typeset math does not solve/evaluate expressions. Block widths are points (72 pt = 1 inch), natural height comes from Typst, and independent blocks must not set page geometry. Labels need quantities/units and plots need explicit domains/sampling; split discontinuities.

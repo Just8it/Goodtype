@@ -92,6 +92,9 @@ pub(crate) fn write_ink(
     Ok(bytes)
 }
 
+/// Production writes new ink from the bytes already encoded for the recovery intent; the
+/// interrupted-write tests still need to place a new layer by itself.
+#[cfg(test)]
 pub(crate) fn write_ink_new(
     root: &Path,
     relative: &str,

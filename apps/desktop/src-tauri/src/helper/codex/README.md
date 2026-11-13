@@ -1,6 +1,7 @@
 # In-app Codex (experimental, step 3)
 
-The app-server process is the user's installed `codex-cli 0.166.0`. No credentials are loaded by
+The app-server process is the user's installed Codex, `codex-cli 0.166.0` or newer (0.166.0 is the
+version this was written against; newer ones are accepted because Codex updates itself). No credentials are loaded by
 Goodtype. Prompt submission happens only after the ChatGPT account check and strict config/MCP
 preflight. A failure destroys the process tree and revokes the launch/session grants.
 
