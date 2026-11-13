@@ -109,10 +109,14 @@ export function importPdfPages(
   sourcePath: string,
   geometries: PageGeometry[],
   activePageId: string,
+  /** A page the imported pages take the place of, in the same undo step. */
+  replacing?: string,
+  /** The one-based PDF page each geometry shows; absent imports the PDF's pages from the first. */
+  pdfPages?: number[],
 ): Promise<StructureHistoryResult> {
   return invoke<StructureHistoryResult>("import_pdf_pages", {
     root,
-    request: { modifiedAt, position, sourcePath, geometries, activePageId },
+    request: { modifiedAt, position, sourcePath, geometries, activePageId, replacing, pdfPages },
   });
 }
 
@@ -122,6 +126,16 @@ export function duplicatePage(
   modifiedAt: string,
 ): Promise<StructureHistoryResult> {
   return invoke<StructureHistoryResult>("duplicate_page", { root, pageId, modifiedAt });
+}
+
+/** Remove several page references in one manifest write and one page-list undo step. */
+export function deletePages(
+  root: string,
+  pageIds: string[],
+  modifiedAt: string,
+  activePageId: string,
+): Promise<StructureHistoryResult> {
+  return invoke<StructureHistoryResult>("delete_pages", { root, pageIds, modifiedAt, activePageId });
 }
 
 export function deletePage(

@@ -13,10 +13,17 @@ import type { PagePosition } from "../model";
 /** The writer's choice, before it is resolved against whichever page is open. */
 export type AddPageWhere = "before" | "after" | "last";
 
+/** Choices only some sources read. */
+export type AddPageOptions = {
+  /** PDF pages to import, in print-dialog form ("1-3, 7"). Empty or absent imports every page. */
+  pdfPages?: string;
+};
+
 /** One thing a new page can be made from: a paper template, or a document brought in. */
 export type AddPageSource = {
   /** Stable identity for the keyed each block. */
   id: string;
+  kind?: "paper" | "pdf" | "calculation" | "calculation-import";
   label: string;
   /** Second line: what the source is, or why it cannot be used yet. */
   detail?: string;
@@ -30,9 +37,10 @@ export type AddPageSource = {
   preview?: string;
   /**
    * Commit. `count` is how many of this page to make; a source that cannot honour it — an import
-   * brings whatever the file holds — is free to ignore it.
+   * brings whatever the file holds — is free to ignore it. `options` carries what only one kind of
+   * source reads, such as the PDF page list.
    */
-  onSelect: (position: PagePosition, count: number) => void;
+  onSelect: (position: PagePosition, count: number, options?: AddPageOptions) => void;
 };
 
 /**
@@ -65,4 +73,14 @@ export type AddPageGroup = {
 export function resolvePosition(where: AddPageWhere, currentPageId: string): PagePosition {
   if (where === "last" || !currentPageId) return { kind: "last" };
   return { kind: where, pageId: currentPageId };
+}
+
+/** Layout placement does not decide behavior: computational sources can share the pinned shelf. */
+export function sourceBehavior(source: Pick<AddPageSource, "kind"> | undefined) {
+  const kind = source?.kind ?? "paper";
+  return {
+    kind, paper: kind === "paper", pdf: kind === "pdf",
+    calculation: kind === "calculation" || kind === "calculation-import",
+    importFile: kind === "pdf" || kind === "calculation-import", single: kind !== "paper",
+  };
 }

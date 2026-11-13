@@ -229,6 +229,34 @@ function cubicAt(
   };
 }
 
+/**
+ * The drawn outline as one polyline in the shape's own coordinates, closed shapes ending where
+ * they began. Rounded rectangle corners are drawn square: close enough for a recognizer, which
+ * is the only reader.
+ */
+export function shapeOutline(geometry: ShapeGeometry): ShapePoint[] {
+  switch (geometry.kind) {
+    case "line":
+      return [geometry.start, geometry.end];
+    case "rectangle": {
+      const { widthPt: w, heightPt: h } = geometry;
+      return [{ x: 0, y: 0 }, { x: w, y: 0 }, { x: w, y: h }, { x: 0, y: h }, { x: 0, y: 0 }];
+    }
+    case "ellipse": {
+      const rx = geometry.widthPt / 2;
+      const ry = geometry.heightPt / 2;
+      return Array.from({ length: 33 }, (_, index) => {
+        const angle = (index / 32) * 2 * Math.PI;
+        return { x: rx + rx * Math.cos(angle), y: ry + ry * Math.sin(angle) };
+      });
+    }
+    case "spline": {
+      const points = splinePolyline(geometry.nodes, geometry.closed);
+      return geometry.closed && points.length > 1 ? [...points, points[0]] : points;
+    }
+  }
+}
+
 export function shapeBounds(geometry: ShapeGeometry): ShapeBounds {
   if (geometry.kind === "rectangle" || geometry.kind === "ellipse") {
     return { left: 0, top: 0, right: geometry.widthPt, bottom: geometry.heightPt };
@@ -284,6 +312,19 @@ export function shapeFromDrag(
         : { kind, widthPt, heightPt },
     style,
   };
+}
+
+/**
+ * A held line after its snap: its start stays where the mark began and its end follows the pen.
+ *
+ * A held draft comes from `shapeFromDrag`, so it is unrotated and its start sits at its origin.
+ * A pen back on the start would make a line too short to keep; the line stays as it was instead
+ * of dropping back to ink.
+ */
+export function followHeldLine(held: ShapeDraft, pen: Point, constrain: boolean): ShapeDraft {
+  if (held.geometry.kind !== "line" || held.rotation !== 0) return held;
+  const start = { x: held.x + held.geometry.start.x, y: held.y + held.geometry.start.y };
+  return shapeFromDrag("line", start, pen, held.style, constrain) ?? held;
 }
 
 /**

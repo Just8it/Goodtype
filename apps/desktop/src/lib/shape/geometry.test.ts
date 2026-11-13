@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ShapeStyle } from "../model";
-import { shapeDashArray, shapeFromDrag, shapePath, splineFromPoints } from "./geometry";
+import { followHeldLine, shapeDashArray, shapeFromDrag, shapePath, splineFromPoints } from "./geometry";
 
 const style: ShapeStyle = {
   strokeColor: "#16212b",
@@ -124,5 +124,25 @@ describe("spline roundness", () => {
       expect(min).toBeGreaterThan(0.8);
       expect(max).toBeLessThan(1.2);
     }
+  });
+});
+describe("a held line following the pen", () => {
+  const held = shapeFromDrag("line", { x: 10, y: 20 }, { x: 60, y: 20 }, style)!;
+
+  it("keeps the start fixed and puts the end on the pen", () => {
+    const moved = followHeldLine(held, { x: 40, y: 70 }, false);
+    expect(moved).toMatchObject({ x: 10, y: 20, rotation: 0 });
+    expect(moved.geometry).toEqual({ kind: "line", start: { x: 0, y: 0 }, end: { x: 30, y: 50 } });
+  });
+
+  it("snaps the angle to 15 degree steps when constrained", () => {
+    const moved = followHeldLine(held, { x: 110, y: 24 }, true);
+    if (moved.geometry.kind !== "line") throw new Error("expected a line");
+    expect(moved.geometry.end.y).toBeCloseTo(0);
+    expect(moved.geometry.end.x).toBeCloseTo(Math.hypot(100, 4));
+  });
+
+  it("keeps the last line when the pen returns onto the start", () => {
+    expect(followHeldLine(held, { x: 11, y: 21 }, false)).toBe(held);
   });
 });

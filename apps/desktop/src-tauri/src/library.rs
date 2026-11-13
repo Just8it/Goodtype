@@ -20,6 +20,7 @@ use std::time::UNIX_EPOCH;
 
 use goodtype_core::{PageDefaults, layout, paths};
 use serde::{Deserialize, Serialize};
+use tauri::Manager;
 use tauri_plugin_dialog::DialogExt;
 
 use crate::settings::{StoredLibrary, read_library, relocate_recent_roots, write_library};
@@ -28,6 +29,10 @@ use crate::workspace::{AllowedRoots, allow_root, path_string};
 
 /// A notebook's manifest can be large; a listing only needs the page count out of it. Reading
 /// more than this means the file is not a manifest we wrote.
+// These commands used to execute serially on the window thread. Keep their
+// read/modify/write actions serialized after moving them to blocking workers.
+static LIBRARY_IO: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 const MAX_MANIFEST_BYTES: usize = 4 * 1024 * 1024;
 
 /// One row in a folder listing. Either a folder to descend into or a notebook to open — the
@@ -354,15 +359,21 @@ fn relative_child(parent: &str, name: &str) -> String {
 
 /// Make a folder, and answer with the path that lists it.
 #[tauri::command]
-pub fn create_library_folder(
+pub async fn create_library_folder(
     app: tauri::AppHandle,
     roots: tauri::State<'_, AllowedRoots>,
     parent: String,
     name: String,
 ) -> Result<String, String> {
-    let root = current_root(&app, &roots)?;
-    fs::create_dir(free_child(&root, &parent, &name)?).map_err(|error| error.to_string())?;
-    Ok(relative_child(&parent, &name))
+    let roots = AllowedRoots(roots.0.clone());
+    tauri::async_runtime::spawn_blocking(move || {
+        let _library_io = LIBRARY_IO.lock().map_err(|error| error.to_string())?;
+        let root = current_root(&app, &roots)?;
+        fs::create_dir(free_child(&root, &parent, &name)?).map_err(|error| error.to_string())?;
+        Ok(relative_child(&parent, &name))
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 /// Make an empty directory for a notebook and admit it, handing back the absolute root.
@@ -371,39 +382,51 @@ pub fn create_library_folder(
 /// it is the same path that created a notebook from the old start screen — and duplicating it in
 /// Rust would give the store two authors for the same file.
 #[tauri::command]
-pub fn create_library_notebook(
+pub async fn create_library_notebook(
     app: tauri::AppHandle,
     roots: tauri::State<'_, AllowedRoots>,
     parent: String,
     name: String,
 ) -> Result<String, String> {
-    let root = current_root(&app, &roots)?;
-    let target = free_child(&root, &parent, &name)?;
-    fs::create_dir(&target).map_err(|error| error.to_string())?;
-    path_string(allow_root(&roots, &target)?)
+    let roots = AllowedRoots(roots.0.clone());
+    tauri::async_runtime::spawn_blocking(move || {
+        let _library_io = LIBRARY_IO.lock().map_err(|error| error.to_string())?;
+        let root = current_root(&app, &roots)?;
+        let target = free_child(&root, &parent, &name)?;
+        fs::create_dir(&target).map_err(|error| error.to_string())?;
+        path_string(allow_root(&roots, &target)?)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 /// Rename in place. Answers with the new path, since the old one has stopped existing.
 #[tauri::command]
-pub fn rename_library_entry(
+pub async fn rename_library_entry(
     app: tauri::AppHandle,
     roots: tauri::State<'_, AllowedRoots>,
     path: String,
     name: String,
 ) -> Result<String, String> {
-    let root = current_root(&app, &roots)?;
-    let source = resolve(&root, &path)?;
-    reject_notebook_internals(&root, &source)?;
-    reject_open_notebooks(
-        &crate::settings::recent_session(&app)?.0,
-        &source,
-        "renaming",
-    )?;
-    let parent = parent_of(&path);
-    let target = free_child(&root, parent, &name)?;
-    fs::rename(&source, &target).map_err(|error| error.to_string())?;
-    forget_favourite(&root, &path)?;
-    Ok(relative_child(parent, &name))
+    let roots = AllowedRoots(roots.0.clone());
+    tauri::async_runtime::spawn_blocking(move || {
+        let _library_io = LIBRARY_IO.lock().map_err(|error| error.to_string())?;
+        let root = current_root(&app, &roots)?;
+        let source = resolve(&root, &path)?;
+        reject_notebook_internals(&root, &source)?;
+        reject_open_notebooks(
+            &crate::settings::recent_session(&app)?.0,
+            &source,
+            "renaming",
+        )?;
+        let parent = parent_of(&path);
+        let target = free_child(&root, parent, &name)?;
+        fs::rename(&source, &target).map_err(|error| error.to_string())?;
+        forget_favourite(&root, &path)?;
+        Ok(relative_child(parent, &name))
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 /// Validate a shelf move completely before changing the filesystem, then roll back any completed
@@ -539,57 +562,76 @@ fn relocated_path(path: &Path, moves: &[(PathBuf, PathBuf)]) -> Option<PathBuf> 
 
 /// Move a selection as one validated shelf action.
 #[tauri::command]
-pub fn move_library_entries(
+pub async fn move_library_entries(
     app: tauri::AppHandle,
     roots: tauri::State<'_, AllowedRoots>,
     tinymist: tauri::State<'_, crate::tinymist::Tinymist>,
     histories: tauri::State<'_, crate::notebook::NotebookHistories>,
+    computation: tauri::State<'_, crate::computation::RuntimeState>,
     paths: Vec<String>,
     destination: String,
 ) -> Result<LibraryMoveResult, String> {
-    let root = current_root(&app, &roots)?;
-    crate::notebook::with_notebook_lock(&histories, |store| {
-        // Hold the allowlist while the roots it names change identity. This prevents another command
-        // from observing the short interval between the filesystem rename and the in-memory update.
-        let mut allowed = roots.0.lock().map_err(|error| error.to_string())?;
-        tinymist.reset();
-        let moved = move_entries(&root, &paths, &destination)?;
+    let roots = AllowedRoots(roots.0.clone());
+    let tinymist = tinymist.inner().clone();
+    let histories = histories.inner().clone();
+    let _ = computation;
+    let computation_app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _library_io = LIBRARY_IO.lock().map_err(|error| error.to_string())?;
+        let computation = computation_app.state::<crate::computation::RuntimeState>();
 
-        let allowed_moves = allowed
-            .iter()
-            .filter_map(|from| {
-                relocated_path(from, &moved.directories).map(|to| (from.clone(), to))
-            })
-            .collect::<Vec<_>>();
-        for (from, to) in &allowed_moves {
-            allowed.remove(from);
-            allowed.insert(to.clone());
-        }
-        store.relocate_roots(&moved.directories);
-        drop(allowed);
+        let root = current_root(&app, &roots)?;
+        crate::notebook::with_notebook_lock(&histories, |store| {
+            // Hold the allowlist while the roots it names change identity. This prevents another command
+            // from observing the short interval between the filesystem rename and the in-memory update.
+            let mut allowed = roots.0.lock().map_err(|error| error.to_string())?;
+            tinymist.reset();
+            let moved = move_entries(&root, &paths, &destination)?;
 
-        let root_moves = allowed_moves
-            .iter()
-            .filter_map(|(from, to)| {
-                Some(LibraryRootMove {
-                    from: path_string(from.clone()).ok()?,
-                    to: path_string(to.clone()).ok()?,
+            let allowed_moves = allowed
+                .iter()
+                .filter_map(|from| {
+                    relocated_path(from, &moved.directories).map(|to| (from.clone(), to))
                 })
-            })
-            .collect();
-        let warning = relocate_recent_roots(&app, &moved.directories)
-            .err()
-            .map(|error| {
-                format!("the notebooks moved, but their reopening history was not updated: {error}")
-            });
+                .collect::<Vec<_>>();
+            // The notebook lock keeps output admission out of the rename interval.
+            for (from, _) in &allowed_moves {
+                crate::computation::end_root_sessions(&computation, from)?;
+            }
+            for (from, to) in &allowed_moves {
+                allowed.remove(from);
+                allowed.insert(to.clone());
+            }
+            store.relocate_roots(&moved.directories);
+            drop(allowed);
 
-        Ok(LibraryMoveResult {
-            paths: moved.paths,
-            root_moves,
-            warning,
+            let root_moves = allowed_moves
+                .iter()
+                .filter_map(|(from, to)| {
+                    Some(LibraryRootMove {
+                        from: path_string(from.clone()).ok()?,
+                        to: path_string(to.clone()).ok()?,
+                    })
+                })
+                .collect();
+            let warning = relocate_recent_roots(&app, &moved.directories)
+                .err()
+                .map(|error| {
+                    format!(
+                        "the notebooks moved, but their reopening history was not updated: {error}"
+                    )
+                });
+
+            Ok(LibraryMoveResult {
+                paths: moved.paths,
+                root_moves,
+                warning,
+            })
         })
+        .map_err(|error| error.to_string())
     })
-    .map_err(|error| error.to_string())
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 /// Move an entry to the library's trash.
@@ -605,41 +647,47 @@ pub fn move_library_entries(
 /// sidebar competing with the filesystem; it does not justify deleting a notebook outright, and
 /// the recycle bin would mean a new dependency for behaviour a hidden folder already gives.
 #[tauri::command]
-pub fn delete_library_entry(
+pub async fn delete_library_entry(
     app: tauri::AppHandle,
     roots: tauri::State<'_, AllowedRoots>,
     path: String,
 ) -> Result<(), String> {
-    let root = current_root(&app, &roots)?;
-    let source = resolve(&root, &path)?;
-    reject_notebook_internals(&root, &source)?;
-    if source == root {
-        return Err("the library itself cannot be deleted".to_owned());
-    }
-    reject_open_notebooks(
-        &crate::settings::recent_session(&app)?.0,
-        &source,
-        "deleting",
-    )?;
-    let name = source
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or("that entry has no name")?;
-    let internal = paths::ensure_dir(&root, &root.join(INTERNAL_DIR), INTERNAL_DIR)
-        .map_err(|_| "the library metadata directory leaves the library".to_owned())?;
-    let trash = paths::ensure_dir(&root, &internal.join(TRASH_DIR), TRASH_DIR)
-        .map_err(|_| "the library trash leaves the library".to_owned())?;
-    let stamp = std::time::SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|since| since.as_millis())
-        .unwrap_or(0);
-    let target = trash.join(format!("{stamp}-{name}"));
-    if target.exists() {
-        return Err("a trash entry with that name already exists".to_owned());
-    }
-    fs::rename(&source, target).map_err(|error| error.to_string())?;
-    forget_favourite(&root, &path)?;
-    Ok(())
+    let roots = AllowedRoots(roots.0.clone());
+    tauri::async_runtime::spawn_blocking(move || {
+        let _library_io = LIBRARY_IO.lock().map_err(|error| error.to_string())?;
+        let root = current_root(&app, &roots)?;
+        let source = resolve(&root, &path)?;
+        reject_notebook_internals(&root, &source)?;
+        if source == root {
+            return Err("the library itself cannot be deleted".to_owned());
+        }
+        reject_open_notebooks(
+            &crate::settings::recent_session(&app)?.0,
+            &source,
+            "deleting",
+        )?;
+        let name = source
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or("that entry has no name")?;
+        let internal = paths::ensure_dir(&root, &root.join(INTERNAL_DIR), INTERNAL_DIR)
+            .map_err(|_| "the library metadata directory leaves the library".to_owned())?;
+        let trash = paths::ensure_dir(&root, &internal.join(TRASH_DIR), TRASH_DIR)
+            .map_err(|_| "the library trash leaves the library".to_owned())?;
+        let stamp = std::time::SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|since| since.as_millis())
+            .unwrap_or(0);
+        let target = trash.join(format!("{stamp}-{name}"));
+        if target.exists() {
+            return Err("a trash entry with that name already exists".to_owned());
+        }
+        fs::rename(&source, target).map_err(|error| error.to_string())?;
+        forget_favourite(&root, &path)?;
+        Ok(())
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 fn parent_of(path: &str) -> &str {
@@ -731,21 +779,27 @@ const MAX_COVER_BYTES: usize = 2 * 1024 * 1024;
 /// for a root that has been opened. The bytes are checked to be a PNG rather than trusted: this
 /// writes a file inside a notebook, and "the frontend said so" is not a reason to.
 #[tauri::command]
-pub fn write_notebook_cover(
+pub async fn write_notebook_cover(
     roots: tauri::State<'_, AllowedRoots>,
     root: String,
     png: Vec<u8>,
 ) -> Result<(), String> {
-    const PNG_MAGIC: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
-    if png.len() > MAX_COVER_BYTES {
-        return Err("that cover is too large".to_owned());
-    }
-    if !png.starts_with(&PNG_MAGIC) {
-        return Err("a cover must be a PNG".to_owned());
-    }
-    let notebook = crate::workspace::ensure_allowed(&roots, &root)?;
-    let path = internal_file(&notebook, COVER_FILE, true)?;
-    crate::store::write_atomic(&path, &png)
+    let roots = AllowedRoots(roots.0.clone());
+    tauri::async_runtime::spawn_blocking(move || {
+        let _library_io = LIBRARY_IO.lock().map_err(|error| error.to_string())?;
+        const PNG_MAGIC: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+        if png.len() > MAX_COVER_BYTES {
+            return Err("that cover is too large".to_owned());
+        }
+        if !png.starts_with(&PNG_MAGIC) {
+            return Err("a cover must be a PNG".to_owned());
+        }
+        let notebook = crate::workspace::ensure_allowed(&roots, &root)?;
+        let path = internal_file(&notebook, COVER_FILE, true)?;
+        crate::store::write_atomic(&path, &png)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 /// A notebook's cover as a data URL, or `None` when it has never been saved with one.
@@ -753,23 +807,29 @@ pub fn write_notebook_cover(
 /// Fetched per tile rather than folded into the listing, so a folder of a hundred notebooks does
 /// not put a hundred rasters into one IPC reply for the sake of the dozen that are on screen.
 #[tauri::command]
-pub fn library_cover(
+pub async fn library_cover(
     app: tauri::AppHandle,
     roots: tauri::State<'_, AllowedRoots>,
     path: String,
 ) -> Result<Option<String>, String> {
-    let root = current_root(&app, &roots)?;
-    let notebook = resolve(&root, &path)?;
-    if !is_notebook(&notebook) {
-        return Ok(None);
-    }
-    let Ok(cover) = internal_file(&notebook, COVER_FILE, false) else {
-        return Ok(None);
-    };
-    let Ok(bytes) = read_bounded(&cover, MAX_COVER_BYTES) else {
-        return Ok(None);
-    };
-    Ok(Some(format!("data:image/png;base64,{}", base64(&bytes))))
+    let roots = AllowedRoots(roots.0.clone());
+    tauri::async_runtime::spawn_blocking(move || {
+        let _library_io = LIBRARY_IO.lock().map_err(|error| error.to_string())?;
+        let root = current_root(&app, &roots)?;
+        let notebook = resolve(&root, &path)?;
+        if !is_notebook(&notebook) {
+            return Ok(None);
+        }
+        let Ok(cover) = internal_file(&notebook, COVER_FILE, false) else {
+            return Ok(None);
+        };
+        let Ok(bytes) = read_bounded(&cover, MAX_COVER_BYTES) else {
+            return Ok(None);
+        };
+        Ok(Some(format!("data:image/png;base64,{}", base64(&bytes))))
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 /// Base64 without a dependency. The alphabet is four lines and the alternative is a crate in the
@@ -793,31 +853,43 @@ fn base64(bytes: &[u8]) -> String {
 }
 
 #[tauri::command]
-pub fn library_favourites(
+pub async fn library_favourites(
     app: tauri::AppHandle,
     roots: tauri::State<'_, AllowedRoots>,
 ) -> Result<Vec<String>, String> {
-    Ok(read_shelf(&current_root(&app, &roots)?).favourites)
+    let roots = AllowedRoots(roots.0.clone());
+    tauri::async_runtime::spawn_blocking(move || {
+        let _library_io = LIBRARY_IO.lock().map_err(|error| error.to_string())?;
+        Ok(read_shelf(&current_root(&app, &roots)?).favourites)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-pub fn set_library_favourite(
+pub async fn set_library_favourite(
     app: tauri::AppHandle,
     roots: tauri::State<'_, AllowedRoots>,
     path: String,
     favourite: bool,
 ) -> Result<Vec<String>, String> {
-    let root = current_root(&app, &roots)?;
-    // Resolve even when un-starring: a path the library cannot vouch for has no business being
-    // written into its preferences.
-    resolve(&root, &path)?;
-    let mut shelf = read_shelf(&root);
-    shelf.favourites.retain(|existing| existing != &path);
-    if favourite {
-        shelf.favourites.push(path);
-    }
-    write_shelf(&root, &shelf)?;
-    Ok(shelf.favourites)
+    let roots = AllowedRoots(roots.0.clone());
+    tauri::async_runtime::spawn_blocking(move || {
+        let _library_io = LIBRARY_IO.lock().map_err(|error| error.to_string())?;
+        let root = current_root(&app, &roots)?;
+        // Resolve even when un-starring: a path the library cannot vouch for has no business being
+        // written into its preferences.
+        resolve(&root, &path)?;
+        let mut shelf = read_shelf(&root);
+        shelf.favourites.retain(|existing| existing != &path);
+        if favourite {
+            shelf.favourites.push(path);
+        }
+        write_shelf(&root, &shelf)?;
+        Ok(shelf.favourites)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 /// Every favourite that still exists, as full entries ready for the shelf.
@@ -825,40 +897,46 @@ pub fn set_library_favourite(
 /// Reads each one rather than trusting the list, so a folder deleted in Explorer simply stops
 /// appearing instead of becoming a tile that cannot be opened.
 #[tauri::command]
-pub fn list_library_favourites(
+pub async fn list_library_favourites(
     app: tauri::AppHandle,
     roots: tauri::State<'_, AllowedRoots>,
 ) -> Result<Vec<LibraryEntry>, String> {
-    let root = current_root(&app, &roots)?;
-    let mut entries = Vec::new();
-    for path in read_shelf(&root).favourites {
-        let Ok(resolved) = resolve(&root, &path) else {
-            continue;
-        };
-        if !resolved.is_dir() {
-            continue;
+    let roots = AllowedRoots(roots.0.clone());
+    tauri::async_runtime::spawn_blocking(move || {
+        let _library_io = LIBRARY_IO.lock().map_err(|error| error.to_string())?;
+        let root = current_root(&app, &roots)?;
+        let mut entries = Vec::new();
+        for path in read_shelf(&root).favourites {
+            let Ok(resolved) = resolve(&root, &path) else {
+                continue;
+            };
+            if !resolved.is_dir() {
+                continue;
+            }
+            let name = parent_of(&path);
+            let name = path[if name.is_empty() { 0 } else { name.len() + 1 }..].to_owned();
+            if is_notebook(&resolved) {
+                let (page_count, paper) = peek_manifest(&resolved);
+                entries.push(LibraryEntry::Notebook {
+                    name,
+                    path,
+                    modified_ms: modified_ms(&resolved.join(layout::MANIFEST)),
+                    page_count,
+                    paper,
+                });
+            } else {
+                entries.push(LibraryEntry::Folder {
+                    name,
+                    path,
+                    modified_ms: modified_ms(&resolved),
+                    child_count: child_count(&resolved),
+                });
+            }
         }
-        let name = parent_of(&path);
-        let name = path[if name.is_empty() { 0 } else { name.len() + 1 }..].to_owned();
-        if is_notebook(&resolved) {
-            let (page_count, paper) = peek_manifest(&resolved);
-            entries.push(LibraryEntry::Notebook {
-                name,
-                path,
-                modified_ms: modified_ms(&resolved.join(layout::MANIFEST)),
-                page_count,
-                paper,
-            });
-        } else {
-            entries.push(LibraryEntry::Folder {
-                name,
-                path,
-                modified_ms: modified_ms(&resolved),
-                child_count: child_count(&resolved),
-            });
-        }
-    }
-    Ok(entries)
+        Ok(entries)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 /// The library the writer chose, if they have chosen one.
@@ -866,19 +944,25 @@ pub fn list_library_favourites(
 /// Re-admits it to the allowlist on the way out: the path outlives the process, the allowlist
 /// does not, so the first read after a restart is what puts it back.
 #[tauri::command]
-pub fn library_root(
+pub async fn library_root(
     app: tauri::AppHandle,
     roots: tauri::State<'_, AllowedRoots>,
 ) -> Result<Option<String>, String> {
-    let Some(root) = read_library(&app)?.root else {
-        return Ok(None);
-    };
-    let path = Path::new(&root);
-    if !path.is_dir() {
-        return Ok(None);
-    }
-    allow_root(&roots, path)?;
-    Ok(Some(root))
+    let roots = AllowedRoots(roots.0.clone());
+    tauri::async_runtime::spawn_blocking(move || {
+        let _library_io = LIBRARY_IO.lock().map_err(|error| error.to_string())?;
+        let Some(root) = read_library(&app)?.root else {
+            return Ok(None);
+        };
+        let path = Path::new(&root);
+        if !path.is_dir() {
+            return Ok(None);
+        }
+        allow_root(&roots, path)?;
+        Ok(Some(root))
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 /// Choose the library with the native dialog.
@@ -892,55 +976,73 @@ pub async fn pick_library_root(
     roots: tauri::State<'_, AllowedRoots>,
     ui_language: Option<String>,
 ) -> Result<Option<String>, String> {
-    let Some(picked) = app
-        .dialog()
-        .file()
-        .set_title(crate::settings::dialog_label(
-            ui_language.as_deref(),
-            "Choose library folder",
-            "Bibliotheksordner auswählen",
-        ))
-        .blocking_pick_folder()
-    else {
-        return Ok(None);
-    };
-    let picked = picked.into_path().map_err(|error| error.to_string())?;
-    let root = path_string(allow_root(&roots, &picked)?)?;
-    write_library(
-        &app,
-        &StoredLibrary {
-            root: Some(root.clone()),
-        },
-    )?;
-    Ok(Some(root))
+    let roots = AllowedRoots(roots.0.clone());
+    tauri::async_runtime::spawn_blocking(move || {
+        let _library_io = LIBRARY_IO.lock().map_err(|error| error.to_string())?;
+        let Some(picked) = app
+            .dialog()
+            .file()
+            .set_title(crate::settings::dialog_label(
+                ui_language.as_deref(),
+                "Choose library folder",
+                "Bibliotheksordner auswählen",
+            ))
+            .blocking_pick_folder()
+        else {
+            return Ok(None);
+        };
+        let picked = picked.into_path().map_err(|error| error.to_string())?;
+        let root = path_string(allow_root(&roots, &picked)?)?;
+        write_library(
+            &app,
+            &StoredLibrary {
+                root: Some(root.clone()),
+            },
+        )?;
+        Ok(Some(root))
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 /// List one folder of the library. `path` is relative to the root; empty means the root.
 #[tauri::command]
-pub fn list_library(
+pub async fn list_library(
     app: tauri::AppHandle,
     roots: tauri::State<'_, AllowedRoots>,
     path: String,
 ) -> Result<LibraryListing, String> {
-    let root = current_root(&app, &roots)?;
-    let entries = read_folder(&root, &path)?;
-    Ok(LibraryListing { path, entries })
+    let roots = AllowedRoots(roots.0.clone());
+    tauri::async_runtime::spawn_blocking(move || {
+        let _library_io = LIBRARY_IO.lock().map_err(|error| error.to_string())?;
+        let root = current_root(&app, &roots)?;
+        let entries = read_folder(&root, &path)?;
+        Ok(LibraryListing { path, entries })
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 /// Admit a notebook inside the library and hand back its absolute root, which is what every
 /// existing notebook command already takes. Nothing downstream needs to know about the library.
 #[tauri::command]
-pub fn open_library_notebook(
+pub async fn open_library_notebook(
     app: tauri::AppHandle,
     roots: tauri::State<'_, AllowedRoots>,
     path: String,
 ) -> Result<String, String> {
-    let root = current_root(&app, &roots)?;
-    let notebook = resolve(&root, &path)?;
-    if !is_notebook(&notebook) {
-        return Err("that folder is not a notebook".to_owned());
-    }
-    path_string(allow_root(&roots, &notebook)?)
+    let roots = AllowedRoots(roots.0.clone());
+    tauri::async_runtime::spawn_blocking(move || {
+        let _library_io = LIBRARY_IO.lock().map_err(|error| error.to_string())?;
+        let root = current_root(&app, &roots)?;
+        let notebook = resolve(&root, &path)?;
+        if !is_notebook(&notebook) {
+            return Err("that folder is not a notebook".to_owned());
+        }
+        path_string(allow_root(&roots, &notebook)?)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 /// The chosen library, verified against the allowlist so a stale settings file cannot widen what
@@ -1167,6 +1269,35 @@ mod tests {
         assert!(!root.path().join("Semester 3/Altklausuren").exists());
         assert!(!root.path().join("Semester 3/Thermodynamik").exists());
         assert!(read_shelf(root.path()).favourites.is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_later_rename_failure_rolls_back_the_first_move() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let root = library();
+        fs::create_dir(root.path().join("Archiv")).unwrap();
+        // Refuse delete sharing on the second directory, making its rename fail
+        // after the first directory has already moved.
+        let locked = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .custom_flags(0x0200_0000)
+            .open(root.path().join("Semester 3/Thermodynamik"))
+            .unwrap();
+        let result = move_entries(
+            root.path(),
+            &[
+                "Semester 3/Altklausuren".into(),
+                "Semester 3/Thermodynamik".into(),
+            ],
+            "Archiv",
+        );
+        assert!(result.is_err());
+        assert!(root.path().join("Semester 3/Altklausuren").is_dir());
+        assert!(root.path().join("Semester 3/Thermodynamik").is_dir());
+        assert!(!root.path().join("Archiv/Altklausuren").exists());
+        drop(locked);
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use goodtype_core::{PageObject, storage};
+use goodtype_core::{PageBackground, PageObject, StrokeTool, storage};
 use goodtype_typst::export::{
     ExportImage, ExportPage, ExportPoint, ExportShape, ExportStroke, ExportTransform,
     ExportTypstBlock, export_pages, render_page_pdf,
@@ -8,9 +8,12 @@ use crate::notebook::{NotebookHistories, with_notebook};
 use crate::settings::RemotePackages;
 use crate::workspace::{AllowedRoots, ensure_allowed};
 
-/// Export the whole notebook as one ordered multi-page PDF built from the canonical files,
-/// not from frontend state. The manifest defines the page order.
+/// Export the notebook, or the pages named in `page_ids`, as one ordered multi-page PDF built
+/// from the canonical files, not from frontend state. The manifest defines the page order; the
+/// selection only filters it, and naming a page the manifest does not have is an error rather
+/// than a silently shorter PDF.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)] // Tauri injects state separately from export options.
 pub async fn export_notebook_pdf(
     roots: tauri::State<'_, AllowedRoots>,
     histories: tauri::State<'_, NotebookHistories>,
@@ -18,7 +21,12 @@ pub async fn export_notebook_pdf(
     root: String,
     output_name: String,
     page_text_baseline_grid: bool,
+    split_calculations_a4: Option<bool>,
+    ui_language: Option<String>,
+    page_ids: Option<Vec<String>>,
+    include: Option<ExportInclude>,
 ) -> Result<String, String> {
+    let include = include.unwrap_or_default();
     let root = ensure_allowed(&roots, &root)?;
     let histories = histories.inner().clone();
     // Match the on-screen preview: an export resolves packages under the same policy.
@@ -32,13 +40,26 @@ pub async fn export_notebook_pdf(
                 .map_err(|error| error.to_string())?
                 .manifest;
 
-            let mut pages = Vec::with_capacity(manifest.pages.len());
-            for reference in &manifest.pages {
+            let references = selected_pages(&manifest.pages, page_ids.as_deref())?;
+            let mut pages = Vec::with_capacity(references.len());
+            for reference in references {
                 let bundle = storage::open_page(notebook_root, &reference.id)
                     .map_err(|error| format!("page {}: {error}", reference.id))?;
-                pages.push(export_page_from_bundle(&bundle, page_text_baseline_grid)?);
+                let mut page = export_page_from_bundle(&bundle, page_text_baseline_grid)?;
+                if page.calculation.is_some() && !include.calculations {
+                    continue;
+                }
+                include.apply(&mut page);
+                if let Some(calculation) = &mut page.calculation {
+                    calculation.split_a4 = split_calculations_a4.unwrap_or(false);
+                    calculation.german = ui_language.as_deref() == Some("de");
+                }
+                pages.push(page);
             }
 
+            if pages.is_empty() {
+                return Err("nothing to export: every selected page is a Jupyter page and Jupyter pages are switched off".to_owned());
+            }
             Ok(pages)
         })?;
         export_pages(root.as_path(), &output_name, &pages, allow_remote_packages)
@@ -49,19 +70,102 @@ pub async fn export_notebook_pdf(
     .map_err(|error| error.to_string())?
 }
 
-/// A disposable first-page preview uses the exact same material/order as ordinary export.
+/// Which kinds of content an export keeps. Everything is on unless the writer switches it off;
+/// switching something off leaves the notebook untouched and only thins this one PDF.
+#[derive(Clone, Copy, Debug, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ExportInclude {
+    pub handwriting: bool,
+    pub highlighter: bool,
+    pub typst: bool,
+    pub page_text: bool,
+    pub images: bool,
+    pub shapes: bool,
+    /// Paper templates, paper colour and imported PDF pages. Off exports on plain white.
+    pub background: bool,
+    pub calculations: bool,
+}
+
+impl Default for ExportInclude {
+    fn default() -> Self {
+        Self {
+            handwriting: true,
+            highlighter: true,
+            typst: true,
+            page_text: true,
+            images: true,
+            shapes: true,
+            background: true,
+            calculations: true,
+        }
+    }
+}
+
+impl ExportInclude {
+    fn apply(self, page: &mut goodtype_typst::export::ExportPage) {
+        page.strokes.retain(|stroke| match stroke.tool {
+            StrokeTool::Pen => self.handwriting,
+            StrokeTool::Highlighter => self.highlighter,
+        });
+        if !self.typst {
+            page.blocks.clear();
+        }
+        if !self.page_text {
+            page.page_typst = None;
+        }
+        if !self.images {
+            page.images.clear();
+        }
+        if !self.shapes {
+            page.shapes.clear();
+        }
+        if !self.background {
+            page.background = PageBackground::Plain {
+                color: "#ffffff".to_owned(),
+            };
+        }
+    }
+}
+
+/// The manifest's pages in manifest order, kept to `wanted` when a selection is given.
+fn selected_pages<'a>(
+    pages: &'a [goodtype_core::PageReference],
+    wanted: Option<&[String]>,
+) -> Result<Vec<&'a goodtype_core::PageReference>, String> {
+    let Some(wanted) = wanted else {
+        return Ok(pages.iter().collect());
+    };
+    if let Some(unknown) = wanted
+        .iter()
+        .find(|id| !pages.iter().any(|page| &page.id == *id))
+    {
+        return Err(format!("page {unknown} is not in this notebook"));
+    }
+    Ok(pages
+        .iter()
+        .filter(|page| wanted.contains(&page.id))
+        .collect())
+}
+
+/// A disposable page preview uses the exact same material/order as ordinary export: the first
+/// page for a notebook cover, or `page_id` for a tile in the page overview.
 #[tauri::command]
 pub async fn render_notebook_cover(
     roots: tauri::State<'_, AllowedRoots>,
     histories: tauri::State<'_, NotebookHistories>,
     root: String,
     page_text_baseline_grid: bool,
+    page_id: Option<String>,
 ) -> Result<tauri::ipc::Response, String> {
     let root = ensure_allowed(&roots, &root)?;
     let histories = histories.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let page = with_notebook(&histories, || {
-            let bundle = storage::open_notebook(&root).map_err(|error| error.to_string())?;
+            let bundle = match &page_id {
+                Some(page_id) => storage::open_page(&root, page_id),
+                None => storage::open_notebook(&root),
+            }
+            .map_err(|error| error.to_string())?;
             export_page_from_bundle(&bundle, page_text_baseline_grid)
         })?;
         let bytes = render_page_pdf(&root, &page).map_err(|error| error.to_string())?;
@@ -74,7 +178,7 @@ pub async fn render_notebook_cover(
     .map_err(|error| error.to_string())?
 }
 
-fn export_page_from_bundle(
+pub(crate) fn export_page_from_bundle(
     bundle: &storage::NotebookSnapshot,
     page_text_baseline_grid: bool,
 ) -> Result<ExportPage, String> {
@@ -188,7 +292,28 @@ fn export_page_from_bundle(
         })
         .collect();
 
+    let calculation = bundle
+        .page
+        .calculation
+        .as_ref()
+        .map(|reference| {
+            let bytes = bundle
+                .calculations
+                .iter()
+                .find(|file| file.path == reference.source_path)
+                .ok_or_else(|| "calculation source is missing".to_owned())?;
+            let document = goodtype_core::calculation::Calculation::parse(&bytes.bytes)
+                .map_err(|error| error.to_string())?;
+            Ok::<_, String>(goodtype_typst::calculation::ExportCalculation {
+                document,
+                part_id: reference.part_id.clone(),
+                german: false,
+                split_a4: false,
+            })
+        })
+        .transpose()?;
     Ok(ExportPage {
+        calculation,
         width_pt: bundle.page.geometry.width_pt,
         height_pt: bundle.page.geometry.height_pt,
         shared_style: bundle
@@ -218,5 +343,59 @@ mod tests {
         let bundle = storage::open_notebook(&root).unwrap();
         let error = export_page_from_bundle(&bundle, true).unwrap_err();
         assert!(error.contains("PDF object pdf-001 cannot be exported yet"));
+    }
+
+    #[test]
+    fn a_page_selection_keeps_manifest_order_and_rejects_unknown_pages() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../fixtures/notebooks/minimal");
+        let mut pages = storage::open_notebook(&root).unwrap().manifest.pages;
+        let mut second = pages[0].clone();
+        second.id = "page-second".to_owned();
+        pages.push(second);
+        let ids = |selected: Vec<&goodtype_core::PageReference>| {
+            selected
+                .iter()
+                .map(|page| page.id.clone())
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(selected_pages(&pages, None).unwrap().len(), 2);
+        let reversed = vec!["page-second".to_owned(), pages[0].id.clone()];
+        assert_eq!(
+            ids(selected_pages(&pages, Some(&reversed)).unwrap()),
+            vec![pages[0].id.clone(), "page-second".to_owned()]
+        );
+        assert!(selected_pages(&pages, Some(&["missing".to_owned()])).is_err());
+    }
+
+    #[test]
+    fn switched_off_content_is_left_out_of_the_export_page() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../fixtures/notebooks/minimal");
+        let mut bundle = storage::open_notebook(&root).unwrap();
+        bundle
+            .page
+            .objects
+            .retain(|object| !matches!(object, PageObject::PdfMaterial { .. }));
+        let full = export_page_from_bundle(&bundle, false).unwrap();
+        let mut page = full.clone();
+        ExportInclude {
+            typst: false,
+            images: false,
+            background: false,
+            ..ExportInclude::default()
+        }
+        .apply(&mut page);
+        assert!(page.blocks.is_empty());
+        assert!(page.images.is_empty());
+        assert!(
+            matches!(page.background, PageBackground::Plain { ref color } if color == "#ffffff")
+        );
+        assert_eq!(page.strokes.len(), full.strokes.len());
+
+        let mut untouched = full.clone();
+        ExportInclude::default().apply(&mut untouched);
+        assert_eq!(untouched, full);
     }
 }

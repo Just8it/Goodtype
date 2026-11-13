@@ -3,12 +3,13 @@ resolver = "3"
 members = [
   "apps/desktop/src-tauri",
   "crates/goodtype-core",
+  "crates/goodtype-mcp",
   "crates/goodtype-typst",
   "xtask",
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.3.1"
 edition = "2024"
 rust-version = "1.97.1"
 license = "Apache-2.0"
@@ -17,3 +18,12 @@ license = "Apache-2.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 tempfile = "3"
+
+# Faster edit-build loop: file/line backtraces for workspace code, no debug data for
+# dependencies. Release builds are unaffected. For a debugger session with variables, set
+# CARGO_PROFILE_DEV_DEBUG=2 (and expect a rebuild).
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = 0

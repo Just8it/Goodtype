@@ -228,14 +228,21 @@ pub fn record_notebook_opened(
 
 /// Store view state beside recents, never in the canonical notebook.
 #[tauri::command]
-pub fn record_notebook_page(
+pub async fn record_notebook_page(
     app: tauri::AppHandle,
     roots: tauri::State<'_, AllowedRoots>,
     root: String,
     page_id: String,
 ) -> Result<(), String> {
-    let canonical = ensure_allowed(&roots, &root)?;
-    record_recent_page(&app, &path_string(canonical)?, &page_id)
+    let roots = AllowedRoots(roots.0.clone());
+    let permit = crate::settings::PAGE_WRITES.lock().await;
+    tauri::async_runtime::spawn_blocking(move || {
+        let _permit = permit;
+        let canonical = ensure_allowed(&roots, &root)?;
+        record_recent_page(&app, &path_string(canonical)?, &page_id)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 /// Mark an explicit return to the library. Application exit deliberately does not call this:
@@ -245,9 +252,11 @@ pub fn close_notebook_session(
     app: tauri::AppHandle,
     roots: tauri::State<'_, AllowedRoots>,
     histories: tauri::State<'_, crate::notebook::NotebookHistories>,
+    computation: tauri::State<'_, crate::computation::RuntimeState>,
     root: String,
 ) -> Result<(), String> {
     let canonical = ensure_allowed(&roots, &root)?;
+    crate::computation::end_root_sessions(&computation, &canonical)?;
     clear_active_recent(&app, &path_string(canonical.clone())?)?;
     histories.forget_root(&canonical)
 }

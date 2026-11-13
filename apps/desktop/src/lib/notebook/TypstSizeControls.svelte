@@ -69,8 +69,8 @@
   .arrows { display: flex; flex-direction: column; }
   button { display: grid; width: var(--control-dense); height: calc(var(--control-dense) / 2); padding: 0; border: 0; border-radius: var(--radius); background: transparent; color: var(--muted); cursor: pointer; place-items: center; }
   button:hover:not(:disabled) { background: var(--wash); color: var(--text); }
-  button:disabled { opacity: 0.35; cursor: default; }
-  button:focus-visible { outline: 2px solid var(--blueprint); outline-offset: -1px; }
+  button:disabled { opacity: var(--disabled); cursor: default; }
+  button:focus-visible { outline: 2px solid var(--blueprint-light); outline-offset: -1px; }
   svg { width: var(--icon-dense); height: var(--icon-dense); fill: none; stroke: currentColor; stroke-width: var(--stroke-dense); stroke-linecap: round; stroke-linejoin: round; }
   @media (pointer: coarse) { input { min-height: var(--control-touch); } button { width: var(--control-touch); height: calc(var(--control-touch) / 2); } }
 </style>

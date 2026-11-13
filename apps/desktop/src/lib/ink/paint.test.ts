@@ -53,6 +53,46 @@ describe("paintOrder", () => {
     expect(painted[0].d.match(/M /g)!.length).toBeGreaterThan(3);
   });
 
+  const located = (id: string, x: number, y = 0) => {
+    const value = stroke({ id });
+    return { ...value, transform: { ...value.transform, translateX: x, translateY: y } };
+  };
+
+  it("buckets distant strokes while merging nearby transformed strokes", () => {
+    const a = located("a", 0), b = located("b", 400), c = located("c", 10);
+    const painted = paintOrder([a, b, c]);
+    expect(painted.map(path => path.key)).toEqual(["a", "b"]);
+    expect(painted[0].d).toBe(`${paintOrder([a])[0].d} ${paintOrder([c])[0].d}`);
+    expect(painted[1].d).toBe(paintOrder([b])[0].d);
+  });
+
+  it("preserves colour-run order even when a later run returns to the same cells", () => {
+    const a = located("a", 0), b = located("b", 400);
+    const red = { ...located("red", 0), color: "#ff0000" };
+    const painted = paintOrder([a, b, red, located("c", 400), located("d", 0)]);
+    expect(painted.map(path => path.key)).toEqual(["a", "b", "red", "c", "d"]);
+    expect(new Set(painted.map(path => path.key)).size).toBe(painted.length);
+  });
+
+  it("changes only the appended stroke's bucket string and retains all keys", () => {
+    const strokes = [located("a", 0), located("b", 400), located("c", 0, 500)];
+    const before = paintOrder(strokes);
+    const after = paintOrder([...strokes, located("added", 410)]);
+    expect(after.map(path => path.key)).toEqual(before.map(path => path.key));
+    expect(after[0].d).toBe(before[0].d);
+    expect(after[1].d).not.toBe(before[1].d);
+    expect(after[2].d).toBe(before[2].d);
+  });
+
+  it("isolates page-spanning strokes from the cell containing their centre", () => {
+    const large = stroke({ id: "large", points: stroke().points.map((point, index) =>
+      ({ ...point, x: index * 297, y: index * 421 })) });
+    const nearby = located("nearby", 256, 400);
+    const painted = paintOrder([nearby, large, located("nearby2", 260, 400)]);
+    expect(painted.map(path => path.key)).toEqual(["nearby", "large"]);
+    expect(painted[1].d).toBe(paintOrder([large])[0].d);
+  });
+
   it("keeps colours apart", () => {
     const painted = paintOrder([
       stroke({ id: "a", color: "#111111" }),

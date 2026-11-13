@@ -38,6 +38,7 @@
     compileResult = null,
     cached = null,
     compileContext = "",
+    compileDependency = 0,
     root = null,
     selected = false,
     toPageDelta,
@@ -51,6 +52,7 @@
     onEditingChange,
     inlineEditing = true,
     onRequestEdit,
+    onAskAI,
     zoom = 1,
   }: {
     id: string;
@@ -66,6 +68,8 @@
     cached?: CachedTypst | null;
     /** Shared notebook source whose changes require a fresh preview. */
     compileContext?: string;
+    /** Bumped when a notebook file this block may import changed on disk. */
+    compileDependency?: number;
     /** Notebook root, forwarded so the editor can ask Rust for completions. */
     root?: string | null;
     selected?: boolean;
@@ -87,10 +91,13 @@
     /** False while the side view is open: editing happens there instead of on the page. */
     inlineEditing?: boolean;
     /** Asks the page to edit this block in the side view. */
+    onAskAI?: (focus: import("../helper/editorEntry").EditorFocus | null, restore: () => void) => void;
     onRequestEdit?: () => void;
     zoom?: number;
   } = $props();
 
+  let inlineEditor = $state<TypstEditor>();
+  function askAI() { onAskAI?.(inlineEditor?.getFocus() ?? null, () => inlineEditor?.focus()); }
   let x = $state(0);
   let y = $state(0);
   let layoutWidthPt = $state(240);
@@ -108,6 +115,7 @@
   let compileTimer: ReturnType<typeof setTimeout> | undefined;
   let mounted = $state(false);
   let appliedCompileContext = $state("");
+  let appliedDependency = $state(0);
 
   // What the block actually occupies. Falls back to a line's worth while a first compile is
   // still in flight, so a brand-new block is clamped by something rather than by zero.
@@ -122,6 +130,7 @@
   onMount(() => {
     mounted = true;
     appliedCompileContext = compileContext;
+    appliedDependency = compileDependency;
     x = initialX;
     y = initialY;
     layoutWidthPt = initialLayoutWidthPt;
@@ -159,8 +168,9 @@
   });
 
   $effect(() => {
-    if (!mounted || compileContext === appliedCompileContext) return;
+    if (!mounted || (compileContext === appliedCompileContext && compileDependency === appliedDependency)) return;
     appliedCompileContext = compileContext;
+    appliedDependency = compileDependency;
     requestCompile(0);
   });
 
@@ -370,7 +380,10 @@
     style:width={`${editorWidthPx}px`} style:transform={`scale(${1 / zoom})`}>
     <TypstSizeControls {scale} {layoutWidthPt}
       onChange={change => onTransform({ x, y, layoutWidthPt, scale, rotation, ...change })} />
+    {#if onAskAI}<button type="button" class="ask-ai" aria-label={$t("aiEntry.ask")} title={$t("aiEntry.shortcut")} onclick={askAI}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h14v10H10l-5 4Z" /></svg></button>{/if}
     <TypstEditor
+      bind:this={inlineEditor}
+      onAskAI={onAskAI ? askAI : undefined}
       value={draftSource}
       {root}
       ariaLabel={$t("workspace.sourceForTypstBlock", { "id": id })}
@@ -381,6 +394,9 @@
 {/if}
 
 <style>
+  .ask-ai svg { width: var(--icon-dense); height: var(--icon-dense); fill: none; stroke: currentColor; stroke-width: var(--stroke-dense); }
+  .ask-ai { min-height: var(--control); padding: 0 10px; border: 1px solid var(--edge); border-radius: var(--radius); background: var(--panel); color: var(--text); font: inherit; cursor: pointer; }
+  .ask-ai:focus-visible { outline: 2px solid var(--blueprint-light); outline-offset: 1px; }
   /* The block's box is its Typst layout box, which runs cap height to baseline — that is what the
      export places, so it has to stay exact. It is not what the text looks like: descenders hang
      below it and accents rise above it. So the chrome is drawn on a pseudo-element pushed out by
@@ -412,8 +428,8 @@
   .typst-block.selected::before,
   .typst-block:focus-within::before,
   .typst-block.editing::before {
-    border-color: #2f6fdb;
-    box-shadow: 0 0 0 0.5px #2f6fdb;
+    border-color: var(--paper-select);
+    box-shadow: 0 0 0 0.5px var(--paper-select);
   }
 
   .typst-block.editing {
@@ -430,12 +446,12 @@
     color: var(--text);
     pointer-events: auto;
     transform-origin: top left;
-    box-shadow: 0 18px 44px rgb(0 0 0 / 35%);
+    box-shadow: var(--shadow-panel);
   }
 
   .preview:focus-visible,
   .handle:focus-visible {
-    outline: 2px solid #4c8df0;
+    outline: 2px solid var(--blueprint);
     outline-offset: 2px;
   }
 
@@ -480,7 +496,7 @@
   .handle {
     position: absolute;
     padding: 0;
-    border: 1.5px solid #2f6fdb;
+    border: 1.5px solid var(--paper-select);
     background: white;
     opacity: 0;
   }
@@ -513,7 +529,7 @@
     width: 4px;
     border: 1.5px solid white;
     border-radius: 3px;
-    background: #2f6fdb;
+    background: var(--paper-select);
     content: "";
   }
   .scale-corner {
@@ -529,7 +545,7 @@
   .scale-corner::after {
     position: absolute;
     inset: 16px;
-    border: 2px solid #2f6fdb;
+    border: 2px solid var(--paper-select);
     border-radius: 2px;
     background: white;
     content: "";

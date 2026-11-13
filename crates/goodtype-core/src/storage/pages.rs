@@ -70,6 +70,73 @@ pub fn open_page(selected_root: &Path, page_id: &str) -> Result<NotebookSnapshot
     load_page(&root, manifest, page_id)
 }
 
+/// A calculation owns cell order. Only parts still referenced by the manifest participate.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CalculationStep {
+    pub page_id: String,
+    pub cell_id: String,
+    pub part_id: String,
+}
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CalculationExecutionPlan {
+    pub revision: u64,
+    pub steps: Vec<CalculationStep>,
+}
+
+pub fn calculation_execution_plan(
+    selected_root: &Path,
+    page_id: &str,
+) -> Result<CalculationExecutionPlan, StorageError> {
+    use crate::calculation::Calculation;
+    let snapshot = open_page(selected_root, page_id)?;
+    let reference = snapshot
+        .page
+        .calculation
+        .as_ref()
+        .ok_or_else(|| invalid_error("page is not computational"))?;
+    let root = canonical_root(selected_root)?;
+    let file = snapshot
+        .calculations
+        .iter()
+        .find(|file| file.path == reference.source_path)
+        .ok_or_else(|| invalid_error("calculation source is missing"))?;
+    let document = Calculation::parse(&file.bytes)?;
+    let mut parts = HashMap::new();
+    for entry in &snapshot.manifest.pages {
+        let page: Page = read_json(&root, &entry.path)?;
+        if page.id != entry.id {
+            return Err(invalid_error("manifest and page identities disagree"));
+        }
+        if let Some(part) = page.calculation.filter(|part| part.id == reference.id)
+            && (part.source_path != reference.source_path
+                || parts.insert(part.part_id, page.id).is_some())
+        {
+            return Err(invalid_error(
+                "calculation parts must have one source and one page each",
+            ));
+        }
+    }
+    let steps = document
+        .cells
+        .iter()
+        .filter(|cell| cell.cell_type == "code")
+        .filter_map(|cell| {
+            let part = cell.part_id()?;
+            parts.get(part).map(|page| CalculationStep {
+                page_id: page.clone(),
+                cell_id: cell.id.clone(),
+                part_id: part.to_owned(),
+            })
+        })
+        .collect();
+    Ok(CalculationExecutionPlan {
+        revision: document.revision(),
+        steps,
+    })
+}
+
 fn load_page(
     root: &Path,
     manifest: NotebookManifest,
@@ -87,7 +154,13 @@ fn load_page(
     let asset_paths = referenced_paths(&manifest, &page, SourceRole::Asset);
     let blocks = read_stored_files(root, &block_paths, SourceRole::Block.max_bytes())?;
     let assets = read_stored_files(root, &asset_paths, MAX_IMAGE_BYTES)?;
+    let calculations = read_stored_files(
+        root,
+        &referenced_paths(&manifest, &page, SourceRole::Calculation),
+        SourceRole::Calculation.max_bytes(),
+    )?;
     let snapshot = NotebookSnapshot {
+        calculations,
         manifest,
         page,
         blocks,
@@ -201,6 +274,43 @@ pub fn create_page(
     background: Option<&PageBackground>,
     geometry: Option<&PageGeometry>,
 ) -> Result<NotebookSnapshot, StorageError> {
+    create_page_inner(
+        selected_root,
+        modified_at,
+        position,
+        background,
+        geometry,
+        None,
+    )
+}
+
+/// Publish a fresh page and its initial Page text in the same transaction.
+pub fn create_page_with_text(
+    selected_root: &Path,
+    modified_at: &str,
+    position: &PagePosition,
+    background: Option<&PageBackground>,
+    geometry: Option<&PageGeometry>,
+    source: &str,
+) -> Result<NotebookSnapshot, StorageError> {
+    create_page_inner(
+        selected_root,
+        modified_at,
+        position,
+        background,
+        geometry,
+        Some(source),
+    )
+}
+
+fn create_page_inner(
+    selected_root: &Path,
+    modified_at: &str,
+    position: &PagePosition,
+    background: Option<&PageBackground>,
+    geometry: Option<&PageGeometry>,
+    source: Option<&str>,
+) -> Result<NotebookSnapshot, StorageError> {
     let mut guard = ManifestGuard::open_resolved(selected_root, modified_at)?;
     let root = guard.root().to_path_buf();
     // A page added to a version-1 notebook is a version-1 page. One notebook, one version.
@@ -244,6 +354,7 @@ pub fn create_page(
     );
     manifest.modified_at = modified_at.to_owned();
     let page = Page {
+        calculation: None,
         schema_version,
         id: id.clone(),
         revision: 1,
@@ -256,7 +367,8 @@ pub fn create_page(
             path: ink_path,
         }],
     };
-    let snapshot = NotebookSnapshot {
+    let mut snapshot = NotebookSnapshot {
+        calculations: Vec::new(),
         manifest: guard.manifest.clone(),
         page,
         blocks: Vec::new(),
@@ -268,14 +380,210 @@ pub fn create_page(
             strokes: Vec::new(),
         }],
     };
+    if let Some(source) = source {
+        let id = format!("text-{}", snapshot.page.id);
+        let path = (0..1000)
+            .map(|n| format!("blocks/{id}-{n}.typ"))
+            .find(|path| root.join(path).symlink_metadata().is_err())
+            .ok_or_else(|| invalid_error("no unused Page text path"))?;
+        snapshot.page.objects.push(crate::PageObject::PageTypst {
+            fields: crate::ObjectFields {
+                id: id.clone(),
+                x: 0.,
+                y: 0.,
+                rotation: 0.,
+                scale: 1.,
+                z_index: 0,
+                reading_order: 0,
+                group_id: None,
+                created_at: modified_at.into(),
+                modified_at: modified_at.into(),
+            },
+            source_path: path.clone(),
+        });
+        snapshot.page.reading_order.push(id);
+        snapshot.blocks.push(StoredFile {
+            path,
+            bytes: source.as_bytes().to_vec(),
+        });
+    }
     validate_snapshot(&root, &snapshot)?;
     guard.commit_snapshot(&snapshot, "adding a page")?;
     open_page(&root, &snapshot.page.id)
 }
 
-/// Add every source page from one preserved PDF as consecutive notebook pages.
+/// Create an independent calculation, or add an explicit part to an existing calculation.
+pub fn create_calculation_page(
+    selected_root: &Path,
+    modified_at: &str,
+    position: &PagePosition,
+    title: &str,
+    continue_page_id: Option<&str>,
+) -> Result<NotebookSnapshot, StorageError> {
+    create_calculation_page_inner(
+        selected_root,
+        modified_at,
+        position,
+        title,
+        continue_page_id,
+        None,
+    )
+}
+
+pub fn import_calculation_page(
+    selected_root: &Path,
+    modified_at: &str,
+    position: &PagePosition,
+    title: &str,
+    bytes: &[u8],
+) -> Result<NotebookSnapshot, StorageError> {
+    let document = super::calculation_import::prepare(bytes, title)?;
+    create_calculation_page_inner(
+        selected_root,
+        modified_at,
+        position,
+        title,
+        None,
+        Some(document),
+    )
+}
+
+fn create_calculation_page_inner(
+    selected_root: &Path,
+    modified_at: &str,
+    position: &PagePosition,
+    title: &str,
+    continue_page_id: Option<&str>,
+    imported: Option<crate::calculation::Calculation>,
+) -> Result<NotebookSnapshot, StorageError> {
+    use crate::calculation::{
+        A4_WIDTH_PT, Calculation, CalculationPart, CalculationReference, Cell,
+    };
+    let mut guard = ManifestGuard::open_resolved(selected_root, modified_at)?;
+    let root = guard.root().to_path_buf();
+    let fresh = fresh_page_identifiers(&root, &guard.manifest, crate::CALCULATION_SCHEMA_VERSION);
+    let part_id = format!("part-{}", fresh.id);
+    let previous = continue_page_id
+        .map(|page_id| open_page(&root, page_id))
+        .transpose()?;
+    let (source_path, document) = if let Some(previous) = &previous {
+        let reference = previous
+            .page
+            .calculation
+            .as_ref()
+            .ok_or_else(|| invalid_error("continuation requires a computational page"))?;
+        let file = previous
+            .calculations
+            .iter()
+            .find(|file| file.path == reference.source_path)
+            .ok_or_else(|| invalid_error("calculation source is missing"))?;
+        let mut document = Calculation::parse(&file.bytes)?;
+        let mut parts = document.parts()?;
+        parts.push(CalculationPart {
+            id: part_id.clone(),
+            title: title.to_owned(),
+        });
+        document
+            .goodtype_mut()
+            .insert("parts".into(), serde_json::to_value(parts)?);
+        document
+            .cells
+            .push(Cell::new(format!("cell-{part_id}"), &part_id, "code"));
+        document.advance_revision()?;
+        (reference.source_path.clone(), document)
+    } else {
+        let id = (0..1000)
+            .map(|suffix| format!("calc-{}-{suffix}", fresh.id))
+            .find(|id| !root.join(format!("calculations/{id}.ipynb")).exists())
+            .ok_or_else(|| invalid_error("no unused calculation path is available"))?;
+        let document = if let Some(mut imported) = imported {
+            imported
+                .goodtype_mut()
+                .insert("id".into(), serde_json::json!(id));
+            imported.goodtype_mut().insert(
+                "parts".into(),
+                serde_json::json!([{"id":part_id,"title":title}]),
+            );
+            for (index, cell) in imported.cells.iter_mut().enumerate() {
+                cell.id = format!("cell-{}-{index}", fresh.id);
+                cell.metadata["goodtype"]["partId"] = serde_json::json!(part_id);
+            }
+            imported
+        } else {
+            Calculation::new(&id, &part_id, title)
+        };
+        (format!("calculations/{id}.ipynb"), document)
+    };
+    let insert_at = match position {
+        PagePosition::Last => guard.manifest.pages.len(),
+        PagePosition::Before { page_id } => neighbour_index(&guard.manifest, page_id)?,
+        PagePosition::After { page_id } => neighbour_index(&guard.manifest, page_id)? + 1,
+    };
+    let geometry = PageGeometry {
+        width_pt: A4_WIDTH_PT,
+        height_pt: 84.0,
+    };
+    guard.manifest.schema_version = crate::CALCULATION_SCHEMA_VERSION;
+    guard.manifest.modified_at = modified_at.to_owned();
+    guard.manifest.pages.insert(
+        insert_at,
+        PageReference {
+            id: fresh.id.clone(),
+            path: fresh.page_path.clone(),
+            geometry: geometry.clone(),
+        },
+    );
+    let snapshot = NotebookSnapshot {
+        manifest: guard.manifest.clone(),
+        page: Page {
+            calculation: Some(CalculationReference {
+                id: document.id().to_owned(),
+                source_path: source_path.clone(),
+                part_id,
+            }),
+            schema_version: crate::CALCULATION_SCHEMA_VERSION,
+            id: fresh.id.clone(),
+            revision: 1,
+            geometry,
+            background: PageBackground::Plain {
+                color: "#ffffff".into(),
+            },
+            objects: Vec::new(),
+            reading_order: Vec::new(),
+            ink_layers: Vec::new(),
+        },
+        calculations: vec![StoredFile {
+            path: source_path,
+            bytes: document.bytes()?,
+        }],
+        blocks: Vec::new(),
+        assets: Vec::new(),
+        ink_layers: Vec::new(),
+    };
+    validate_snapshot(&root, &snapshot)?;
+    guard.ensure_unchanged("adding a computational page")?;
+    if let Some(previous) = previous {
+        // The new view is unreferenced until the existing recovery transaction publishes the manifest.
+        write_json(&root, &fresh.page_path, &snapshot.page)?;
+        let mut candidate = previous.clone();
+        candidate.manifest = snapshot.manifest.clone();
+        candidate.calculations = snapshot.calculations.clone();
+        candidate.page.revision = candidate
+            .page
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| invalid_error("page revision overflow"))?;
+        super::write::save_transactional(&root, &previous, &candidate)?;
+    } else {
+        guard.commit_snapshot(&snapshot, "adding a computational page")?;
+    }
+    open_page(&root, &fresh.id)
+}
+
+/// Add source pages from one preserved PDF as consecutive notebook pages.
 ///
-/// Page and ink files land first and the manifest lands last. A failed import can therefore
+/// `pdf_pages` names the one-based PDF page each entry of `geometries` shows; without it the
+/// geometries are the PDF's pages from the first on. Page and ink files land first and the manifest lands last. A failed import can therefore
 /// leave recoverable orphan files, but it cannot make the notebook reference half an import.
 pub fn import_pdf_pages(
     selected_root: &Path,
@@ -283,9 +591,23 @@ pub fn import_pdf_pages(
     position: &PagePosition,
     source_path: &str,
     geometries: &[PageGeometry],
+    pdf_pages: Option<&[u32]>,
+    replacing: Option<&str>,
 ) -> Result<NotebookSnapshot, StorageError> {
     if geometries.is_empty() || geometries.len() > 1_000 {
         return invalid("a PDF import must contain between 1 and 1000 pages");
+    }
+    if let Some(numbers) = pdf_pages {
+        if numbers.len() != geometries.len() {
+            return invalid("a PDF import must name one source page per imported page");
+        }
+        let mut seen = HashSet::with_capacity(numbers.len());
+        if numbers
+            .iter()
+            .any(|&number| number == 0 || !seen.insert(number))
+        {
+            return invalid("PDF page numbers must start at 1 and must not repeat");
+        }
     }
 
     let mut guard = ManifestGuard::open_resolved(selected_root, modified_at)?;
@@ -314,13 +636,17 @@ pub fn import_pdf_pages(
             },
         );
         let page = Page {
+            calculation: None,
             schema_version,
             id: id.clone(),
             revision: 1,
             geometry: geometry.clone(),
             background: PageBackground::Pdf {
                 source_path: source_path.to_owned(),
-                page: u32::try_from(index + 1).expect("PDF import capped at 1000 pages"),
+                page: match pdf_pages {
+                    Some(numbers) => numbers[index],
+                    None => u32::try_from(index + 1).expect("PDF import capped at 1000 pages"),
+                },
             },
             objects: Vec::new(),
             reading_order: Vec::new(),
@@ -341,12 +667,24 @@ pub fn import_pdf_pages(
             ink_path,
         ));
     }
+    // A notebook started from a PDF swaps its blank starter page for the document in the same
+    // manifest write, so it is one step to undo. As with deletion, only the reference goes.
+    if let Some(page_id) = replacing {
+        let index = guard
+            .manifest
+            .pages
+            .iter()
+            .position(|page| page.id == page_id)
+            .ok_or_else(|| invalid_error("the page to replace is not in this notebook"))?;
+        guard.manifest.pages.remove(index);
+    }
     guard.manifest.modified_at = modified_at.to_owned();
 
     for (page, _, ink, _) in &pages {
         validate_snapshot(
             &root,
             &NotebookSnapshot {
+                calculations: Vec::new(),
                 manifest: guard.manifest.clone(),
                 page: page.clone(),
                 blocks: Vec::new(),
@@ -492,7 +830,47 @@ pub fn duplicate_page(
         .collect::<Result<Vec<_>, &'static str>>()
         .map_err(invalid_error)?;
 
+    // A copied part is independent. Preserve its saved results with explicit provenance.
+    let (calculation, calculations) = if let Some(reference) = &source.page.calculation {
+        use crate::calculation::{Calculation, CalculationReference};
+        let original = Calculation::parse(&source.calculations[0].bytes)?;
+        let id = format!("calc-{new_id}");
+        let part = format!("part-{new_id}");
+        let path = format!("calculations/{id}.ipynb");
+        if root.join(&path).exists() {
+            return Err(invalid_error("copied calculation path already exists"));
+        }
+        let title = original.metadata["goodtype"]["title"]
+            .as_str()
+            .unwrap_or("");
+        let mut copy = Calculation::new(&id, &part, title);
+        copy.cells = original
+            .cells
+            .into_iter()
+            .filter(|cell| cell.part_id() == Some(&reference.part_id))
+            .collect();
+        for (index, cell) in copy.cells.iter_mut().enumerate() {
+            cell.id = format!("cell-{new_id}-{index}");
+            cell.metadata["goodtype"]["partId"] = serde_json::json!(part);
+            cell.metadata["goodtype"]["copiedFrom"] =
+                serde_json::json!({"calculationId":reference.id,"partId":reference.part_id});
+        }
+        (
+            Some(CalculationReference {
+                id,
+                part_id: part,
+                source_path: path.clone(),
+            }),
+            vec![StoredFile {
+                path,
+                bytes: copy.bytes()?,
+            }],
+        )
+    } else {
+        (None, Vec::new())
+    };
     let page = Page {
+        calculation,
         schema_version: source.page.schema_version,
         id: new_id.clone(),
         revision: 1,
@@ -551,6 +929,7 @@ pub fn duplicate_page(
         .collect();
 
     let snapshot = NotebookSnapshot {
+        calculations,
         manifest: guard.manifest.clone(),
         page,
         blocks,
@@ -589,6 +968,54 @@ pub fn delete_page(
         .id
         .clone();
     open_page(&root, &neighbor)
+}
+
+/// Remove several page references in one manifest write, so they are one step to undo. As with
+/// [`delete_page`], only the references go; the page and ink files stay on disk.
+///
+/// The returned snapshot opens `active_page_id` when it survives, and otherwise the page that now
+/// stands where the first removed page was.
+pub fn delete_pages(
+    selected_root: &Path,
+    page_ids: &[String],
+    modified_at: &str,
+    active_page_id: &str,
+) -> Result<NotebookSnapshot, StorageError> {
+    if page_ids.is_empty() {
+        return invalid("a page deletion must name at least one page");
+    }
+    let mut guard = ManifestGuard::open(selected_root, modified_at)?;
+    let root = guard.root().to_path_buf();
+    let manifest = &mut guard.manifest;
+    let doomed: HashSet<&str> = page_ids.iter().map(String::as_str).collect();
+    if doomed
+        .iter()
+        .any(|id| !manifest.pages.iter().any(|page| page.id == *id))
+    {
+        return invalid("page is not referenced by the notebook manifest");
+    }
+    if doomed.len() >= manifest.pages.len() {
+        return invalid("the final remaining page cannot be deleted");
+    }
+    let first = manifest
+        .pages
+        .iter()
+        .position(|page| doomed.contains(page.id.as_str()))
+        .expect("validated page ids");
+    manifest
+        .pages
+        .retain(|page| !doomed.contains(page.id.as_str()));
+    manifest.modified_at = modified_at.to_owned();
+
+    let manifest = guard.commit("deleting pages")?;
+    let open = if manifest.pages.iter().any(|page| page.id == active_page_id) {
+        active_page_id.to_owned()
+    } else {
+        manifest.pages[first.min(manifest.pages.len() - 1)]
+            .id
+            .clone()
+    };
+    open_page(&root, &open)
 }
 
 /// Reorder the manifest page list. `ordered_ids` must be a permutation of the current page IDs;
@@ -789,8 +1216,8 @@ fn structure_result(
 #[cfg(test)]
 mod tests {
     use crate::{
-        MIN_SUPPORTED_SCHEMA_VERSION, PageBackground, PageGeometry, PageObject, SCHEMA_VERSION,
-        ShapeGeometry, ShapePoint, ShapeStyle, StrokePattern,
+        BINARY_INK_SCHEMA_VERSION as SCHEMA_VERSION, MIN_SUPPORTED_SCHEMA_VERSION, PageBackground,
+        PageGeometry, PageObject, ShapeGeometry, ShapePoint, ShapeStyle, StrokePattern,
         storage::{fixtures::*, *},
     };
     use std::path::Path;
@@ -1385,6 +1812,8 @@ mod tests {
                     height_pt: 595.0,
                 },
             ],
+            None,
+            None,
         )
         .unwrap();
 
@@ -1408,6 +1837,130 @@ mod tests {
             second.page.background,
             PageBackground::Pdf { page: 2, .. }
         ));
+    }
+
+    #[test]
+    fn a_pdf_import_can_replace_the_starter_page() {
+        let temporary = tempfile::tempdir().unwrap();
+        let notebook_root = temporary.path().join("notebook");
+        create_notebook(&notebook_root, &snapshot()).unwrap();
+        let source = store_pdf_reference(
+            &notebook_root,
+            "lecture.pdf",
+            b"%PDF-1.7
+fixture",
+        )
+        .unwrap();
+        let geometry = PageGeometry {
+            width_pt: 595.0,
+            height_pt: 842.0,
+        };
+        let starter = PagePosition::Before {
+            page_id: "page-001".into(),
+        };
+
+        let imported = import_pdf_pages(
+            &notebook_root,
+            "2026-11-08T12:00:00Z",
+            &starter,
+            &source,
+            &[geometry.clone(), geometry.clone()],
+            None,
+            Some("page-001"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            imported
+                .manifest
+                .pages
+                .iter()
+                .map(|page| page.id.as_str())
+                .collect::<Vec<_>>(),
+            ["page-002", "page-003"]
+        );
+        assert!(matches!(
+            imported.page.background,
+            PageBackground::Pdf { page: 1, .. }
+        ));
+        // Naming a page the notebook does not have changes nothing.
+        assert!(
+            import_pdf_pages(
+                &notebook_root,
+                "2026-11-08T12:01:00Z",
+                &PagePosition::Last,
+                &source,
+                &[geometry],
+                None,
+                Some("page-404"),
+            )
+            .is_err()
+        );
+        assert_eq!(
+            open_notebook(&notebook_root).unwrap().manifest.pages.len(),
+            2
+        );
+    }
+
+    #[test]
+    fn a_pdf_import_can_take_chosen_pages() {
+        let temporary = tempfile::tempdir().unwrap();
+        let notebook_root = temporary.path().join("notebook");
+        create_notebook(&notebook_root, &snapshot()).unwrap();
+        let source = store_pdf_reference(
+            &notebook_root,
+            "lecture.pdf",
+            b"%PDF-1.7
+fixture",
+        )
+        .unwrap();
+        let geometry = PageGeometry {
+            width_pt: 595.0,
+            height_pt: 842.0,
+        };
+        let two = [geometry.clone(), geometry.clone()];
+
+        let imported = import_pdf_pages(
+            &notebook_root,
+            "2026-11-09T12:00:00Z",
+            &PagePosition::Last,
+            &source,
+            &two,
+            Some(&[2, 4]),
+            None,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            imported.page.background,
+            PageBackground::Pdf { page: 2, .. }
+        ));
+        assert!(matches!(
+            open_page(&notebook_root, "page-003")
+                .unwrap()
+                .page
+                .background,
+            PageBackground::Pdf { page: 4, .. }
+        ));
+        // A list that does not match the geometries, a zero or a repeat imports nothing.
+        for numbers in [&[2][..], &[0, 1], &[3, 3]] {
+            assert!(
+                import_pdf_pages(
+                    &notebook_root,
+                    "2026-11-09T12:01:00Z",
+                    &PagePosition::Last,
+                    &source,
+                    &two,
+                    Some(numbers),
+                    None,
+                )
+                .is_err()
+            );
+        }
+        assert_eq!(
+            open_notebook(&notebook_root).unwrap().manifest.pages.len(),
+            3
+        );
     }
 
     #[test]
@@ -1470,6 +2023,72 @@ mod tests {
     }
 
     #[test]
+    fn deletes_several_pages_in_one_write_with_guards() {
+        let temporary = tempfile::tempdir().unwrap();
+        let notebook_root = temporary.path().join("notebook");
+        create_notebook(&notebook_root, &snapshot()).unwrap();
+        for minute in 0..3 {
+            create_page(
+                &notebook_root,
+                &format!("2026-11-09T10:0{minute}:00Z"),
+                &PagePosition::Last,
+                None,
+                None,
+            )
+            .unwrap();
+        }
+        let ids = |names: &[&str]| {
+            names
+                .iter()
+                .map(|name| name.to_string())
+                .collect::<Vec<_>>()
+        };
+
+        // Nothing, an unknown page, or every page is refused and changes nothing.
+        for refused in [
+            ids(&[]),
+            ids(&["page-002", "page-404"]),
+            ids(&["page-001", "page-002", "page-003", "page-004"]),
+        ] {
+            let error = delete_pages(&notebook_root, &refused, "2026-11-09T10:05:00Z", "page-001")
+                .unwrap_err();
+            assert!(matches!(error, StorageError::InvalidNotebook(_)));
+        }
+        assert_eq!(
+            open_notebook(&notebook_root).unwrap().manifest.pages.len(),
+            4
+        );
+
+        let kept = delete_pages(
+            &notebook_root,
+            &ids(&["page-002", "page-004"]),
+            "2026-11-09T10:06:00Z",
+            "page-001",
+        )
+        .unwrap();
+        assert_eq!(kept.page.id, "page-001");
+        assert_eq!(
+            kept.manifest
+                .pages
+                .iter()
+                .map(|page| page.id.as_str())
+                .collect::<Vec<_>>(),
+            ["page-001", "page-003"]
+        );
+        assert!(notebook_root.join("pages/page-002.json").is_file());
+
+        // Removing the open page opens the one now standing in its place.
+        let moved = delete_pages(
+            &notebook_root,
+            &ids(&["page-001"]),
+            "2026-11-09T10:07:00Z",
+            "page-001",
+        )
+        .unwrap();
+        assert_eq!(moved.page.id, "page-003");
+    }
+
+    #[test]
     fn page_structure_changes_undo_and_redo_without_deleting_page_files() {
         let temporary = tempfile::tempdir().unwrap();
         let notebook_root = temporary.path().join("notebook");
@@ -1499,5 +2118,45 @@ mod tests {
         assert_eq!(redone.snapshot.page.id, "page-002");
         assert_eq!(redone.snapshot.manifest.pages.len(), 2);
         assert!(redone.can_undo && !redone.can_redo);
+    }
+    #[test]
+    fn calculation_plan_keeps_cell_order_and_excludes_detached_parts() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        create_notebook(root, &snapshot()).unwrap();
+        let first = create_calculation_page(
+            root,
+            "2026-11-02T12:00:00Z",
+            &PagePosition::Last,
+            "Task A",
+            None,
+        )
+        .unwrap();
+        let second = create_calculation_page(
+            root,
+            "2026-11-02T12:00:01Z",
+            &PagePosition::Last,
+            "Part 2",
+            Some(&first.page.id),
+        )
+        .unwrap();
+        let order = vec![
+            "page-001".to_owned(),
+            second.page.id.clone(),
+            first.page.id.clone(),
+        ];
+        reorder_pages(root, &order, "2026-11-02T12:00:02Z", &second.page.id).unwrap();
+        let plan = calculation_execution_plan(root, &second.page.id).unwrap();
+        assert_eq!(
+            plan.steps
+                .iter()
+                .map(|step| &step.page_id)
+                .collect::<Vec<_>>(),
+            vec![&first.page.id, &second.page.id]
+        );
+        delete_page(root, &first.page.id, "2026-11-02T12:00:03Z").unwrap();
+        let plan = calculation_execution_plan(root, &second.page.id).unwrap();
+        assert_eq!(plan.steps.len(), 1);
+        assert_eq!(plan.steps[0].page_id, second.page.id);
     }
 }

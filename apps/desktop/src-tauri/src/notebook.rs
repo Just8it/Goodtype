@@ -24,6 +24,9 @@ impl NotebookHistories {
         let mut store = self.0.lock().map_err(|error| error.to_string())?;
         store.pages.retain(|(known_root, _), _| known_root != root);
         store.structure.remove(root);
+        store
+            .calculations
+            .retain(|(known_root, _), _| known_root != root);
         Ok(())
     }
 
@@ -31,17 +34,67 @@ impl NotebookHistories {
         let mut store = self.0.lock().map_err(|error| error.to_string())?;
         store.pages.retain(|(root, _), _| roots.contains(root));
         store.structure.retain(|root, _| roots.contains(root));
+        store
+            .calculations
+            .retain(|(root, _), _| roots.contains(root));
         Ok(())
     }
 }
 
 #[derive(Default)]
 pub(crate) struct HistoryStore {
+    calculations: HashMap<(PathBuf, String), storage::CalculationHistory>,
     pages: HashMap<(PathBuf, String), NotebookHistory>,
     structure: HashMap<PathBuf, NotebookStructureHistory>,
 }
 
 impl HistoryStore {
+    pub(crate) fn append_helper_cells(
+        &mut self,
+        root: &Path,
+        page: &str,
+        base: (&str, &str, u64, &str),
+        cells: Vec<goodtype_core::calculation::Cell>,
+        modified_at: &str,
+    ) -> Result<storage::CalculationResult, NotebookError> {
+        Ok(self
+            .calculations
+            .entry((root.to_path_buf(), base.0.into()))
+            .or_default()
+            .append_reviewed_cells(root, page, base, cells, modified_at)?)
+    }
+
+    #[allow(clippy::too_many_arguments)] // Forward the validated execution record under the notebook lock.
+    pub(crate) fn commit_calculation_outputs(
+        &mut self,
+        root: &Path,
+        page: &str,
+        calculation_id: &str,
+        cell: &str,
+        source: &str,
+        outputs: Vec<serde_json::Value>,
+        sequence: u64,
+        provenance: serde_json::Value,
+        modified_at: &str,
+    ) -> Result<storage::CalculationResult, NotebookError> {
+        let history = self
+            .calculations
+            .entry((root.to_path_buf(), calculation_id.to_owned()))
+            .or_default();
+        storage::commit_calculation_outputs(
+            root,
+            page,
+            history,
+            cell,
+            source,
+            outputs,
+            sequence,
+            provenance,
+            modified_at,
+        )
+        .map_err(NotebookError::from)
+    }
+
     pub(crate) fn relocate_roots(&mut self, moves: &[(PathBuf, PathBuf)]) {
         let relocate = |root: PathBuf| {
             moves
@@ -55,6 +108,13 @@ impl HistoryStore {
             .collect::<Vec<_>>();
         for ((root, page), history) in pages {
             self.pages.insert((relocate(root), page), history);
+        }
+        let calculations = self
+            .calculations
+            .extract_if(|(root, _), _| moves.iter().any(|(from, _)| root.starts_with(from)))
+            .collect::<Vec<_>>();
+        for ((root, id), history) in calculations {
+            self.calculations.insert((relocate(root), id), history);
         }
         let structure = self
             .structure
@@ -75,7 +135,7 @@ pub struct NotebookError {
 }
 
 impl NotebookError {
-    fn other(error: impl std::fmt::Display) -> Self {
+    pub(crate) fn other(error: impl std::fmt::Display) -> Self {
         Self {
             code: "operation_failed",
             details: error.to_string(),
@@ -113,6 +173,8 @@ impl From<storage::StorageError> for NotebookError {
             storage::StorageError::ExternalChange(_) => "external_change",
             storage::StorageError::RevisionConflict { .. } => "revision_conflict",
             storage::StorageError::RecoveryLimit { .. } => "recovery_limit",
+            storage::StorageError::ProposalStale(_) => "proposal_stale",
+            storage::StorageError::HistoryNotRetained => "history_not_retained",
             _ => "operation_failed",
         };
         Self {
@@ -221,7 +283,7 @@ fn reobserve_after_structure(
 }
 
 /// Record the structure action, then re-observe the page it produced.
-fn advance_structure_result(
+pub(crate) fn advance_structure_result(
     histories: &mut HistoryStore,
     root: &Path,
     snapshot: NotebookSnapshot,
@@ -235,7 +297,7 @@ fn advance_structure_result(
     reobserve_after_structure(histories, root, result)
 }
 
-fn observe_structure(
+pub(crate) fn observe_structure(
     histories: &mut HistoryStore,
     root: &Path,
     active_page_id: &str,
@@ -248,7 +310,7 @@ fn observe_structure(
     .map_err(NotebookError::from)
 }
 
-fn restore_structure_result(
+pub(crate) fn restore_structure_result(
     histories: &mut HistoryStore,
     root: &Path,
     modified_at: &str,
@@ -452,7 +514,13 @@ pub struct ImportPdfPagesRequest {
     position: PagePosition,
     source_path: String,
     geometries: Vec<PageGeometry>,
+    /// The one-based PDF page each geometry shows; absent means the PDF's pages from the first.
+    #[serde(default)]
+    pdf_pages: Option<Vec<u32>>,
     active_page_id: String,
+    /// A page the import takes the place of: the blank starter page of a notebook made from a PDF.
+    #[serde(default)]
+    replacing: Option<String>,
 }
 
 #[tauri::command]
@@ -470,6 +538,8 @@ pub async fn import_pdf_pages(
             &request.position,
             &request.source_path,
             &request.geometries,
+            request.pdf_pages.as_deref(),
+            request.replacing.as_deref(),
         )
         .map_err(NotebookError::from)?;
         advance_structure_result(store, root, snapshot)
@@ -521,6 +591,47 @@ pub async fn commit_notebook(
             Ok(CommitResult {
                 result,
                 asset_paths,
+            })
+        },
+    )
+    .await
+}
+
+/// Insert a reviewed AI helper proposal (ADR 0041) as one ordinary page commit.
+///
+/// The frontend flushes its own pending edits first and names only the reviewed proposal version.
+/// Rust builds the candidate from the committed page under this lock, re-checks the proposal's
+/// dependencies inside the saving call and refuses an insert whose undo or redo history would not
+/// be retained.
+#[tauri::command]
+pub async fn insert_helper_proposal(
+    roots: tauri::State<'_, AllowedRoots>,
+    histories: tauri::State<'_, NotebookHistories>,
+    app: tauri::AppHandle,
+    root: String,
+    page_id: String,
+    proposal: crate::helper::proposals::ProposalInsert,
+) -> Result<CommitResult, NotebookError> {
+    let helper = tauri::Manager::state::<crate::helper::Helper>(&app)
+        .inner()
+        .clone();
+    on_page(
+        &roots,
+        &histories,
+        root,
+        page_id,
+        move |root, page_id, history| {
+            let result = crate::helper::proposals::insert(
+                &helper,
+                Some(&app),
+                root,
+                page_id,
+                history,
+                proposal,
+            )?;
+            Ok(CommitResult {
+                result,
+                asset_paths: None,
             })
         },
     )
@@ -598,6 +709,24 @@ pub async fn delete_page(
         observe_structure(store, root, &page_id)?;
         let snapshot =
             storage::delete_page(root, &page_id, &modified_at).map_err(NotebookError::from)?;
+        advance_structure_result(store, root, snapshot)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn delete_pages(
+    roots: tauri::State<'_, AllowedRoots>,
+    histories: tauri::State<'_, NotebookHistories>,
+    root: String,
+    page_ids: Vec<String>,
+    modified_at: String,
+    active_page_id: String,
+) -> Result<StructureHistoryResult, NotebookError> {
+    on_notebook(&roots, &histories, root, move |root, store| {
+        observe_structure(store, root, &active_page_id)?;
+        let snapshot = storage::delete_pages(root, &page_ids, &modified_at, &active_page_id)
+            .map_err(NotebookError::from)?;
         advance_structure_result(store, root, snapshot)
     })
     .await
@@ -684,11 +813,36 @@ pub async fn restore_recovery_candidate(
             .find(|candidate| candidate.file_name == file_name)
             .and_then(|candidate| candidate.page_id.clone())
             .ok_or_else(|| "recovery candidate is unknown or unreadable".to_owned())?;
+        let previous = storage::open_page(root, &page_id)?;
         let history = store
             .pages
-            .entry((root.to_path_buf(), page_id))
+            .entry((root.to_path_buf(), page_id.clone()))
             .or_default();
-        storage::restore_recovery_candidate(root, history, &file_name).map_err(NotebookError::from)
+        let result = storage::restore_recovery_candidate(root, history, &file_name)?;
+        if let Some(reference) = &result.snapshot.page.calculation {
+            let before = previous
+                .calculations
+                .iter()
+                .find(|file| file.path == reference.source_path)
+                .ok_or("confirmed calculation source is missing")?;
+            let after = result
+                .snapshot
+                .calculations
+                .iter()
+                .find(|file| file.path == reference.source_path)
+                .ok_or("restored calculation source is missing")?;
+            store
+                .calculations
+                .entry((root.to_path_buf(), reference.id.clone()))
+                .or_default()
+                .record_restore(
+                    before.bytes.clone(),
+                    after.bytes.clone(),
+                    reference.part_id.clone(),
+                );
+            store.pages.remove(&(root.to_path_buf(), page_id));
+        }
+        Ok(result)
     })
     .await
 }
@@ -885,6 +1039,7 @@ mod tests {
         page.reading_order.clear();
         page.ink_layers.clear();
         let mut snapshot = NotebookSnapshot {
+            calculations: Vec::new(),
             manifest,
             page,
             blocks: vec![],
@@ -921,4 +1076,303 @@ mod tests {
         );
         assert!(!from.exists());
     }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateCalculationRequest {
+    modified_at: String,
+    position: PagePosition,
+    title: String,
+    continue_page_id: Option<String>,
+    active_page_id: String,
+}
+
+#[tauri::command]
+pub async fn create_calculation_page(
+    roots: tauri::State<'_, AllowedRoots>,
+    histories: tauri::State<'_, NotebookHistories>,
+    root: String,
+    request: CreateCalculationRequest,
+) -> Result<StructureHistoryResult, NotebookError> {
+    on_notebook(&roots, &histories, root, move |root, store| {
+        observe_structure(store, root, &request.active_page_id)?;
+        let snapshot = storage::create_calculation_page(
+            root,
+            &request.modified_at,
+            &request.position,
+            &request.title,
+            request.continue_page_id.as_deref(),
+        )?;
+        // Adding a part changes this shared document. Reordering, duplicating and deleting
+        // pages leave calculation bytes unchanged and must keep their document history.
+        if request.continue_page_id.is_some()
+            && let Some(reference) = &snapshot.page.calculation
+        {
+            store
+                .calculations
+                .remove(&(root.to_path_buf(), reference.id.clone()));
+        }
+        advance_structure_result(store, root, snapshot)
+    })
+    .await
+}
+
+async fn on_calculation<T: Send + 'static>(
+    roots: &tauri::State<'_, AllowedRoots>,
+    histories: &tauri::State<'_, NotebookHistories>,
+    root: String,
+    page_id: String,
+    operation: impl FnOnce(
+        &Path,
+        &str,
+        &mut storage::CalculationHistory,
+    ) -> Result<T, storage::StorageError>
+    + Send
+    + 'static,
+) -> Result<T, NotebookError> {
+    on_notebook(roots, histories, root, move |root, store| {
+        let snapshot = storage::open_page(root, &page_id)?;
+        let reference = snapshot
+            .page
+            .calculation
+            .ok_or("page is not computational")?;
+        let history = store
+            .calculations
+            .entry((root.to_path_buf(), reference.id))
+            .or_default();
+        operation(root, &page_id, history).map_err(NotebookError::from)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn read_calculation(
+    roots: tauri::State<'_, AllowedRoots>,
+    histories: tauri::State<'_, NotebookHistories>,
+    root: String,
+    page_id: String,
+) -> Result<storage::CalculationResult, NotebookError> {
+    on_calculation(&roots, &histories, root, page_id, storage::read_calculation).await
+}
+
+#[tauri::command]
+pub async fn edit_calculation(
+    roots: tauri::State<'_, AllowedRoots>,
+    histories: tauri::State<'_, NotebookHistories>,
+    root: String,
+    page_id: String,
+    operation: storage::CellOperation,
+    modified_at: String,
+) -> Result<storage::CalculationResult, NotebookError> {
+    on_calculation(
+        &roots,
+        &histories,
+        root,
+        page_id,
+        move |root, page, history| {
+            storage::edit_calculation(root, page, history, operation, &modified_at)
+        },
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn calculation_history(
+    roots: tauri::State<'_, AllowedRoots>,
+    histories: tauri::State<'_, NotebookHistories>,
+    root: String,
+    page_id: String,
+    undo: bool,
+    page_scope: bool,
+    modified_at: String,
+) -> Result<storage::CalculationResult, NotebookError> {
+    on_calculation(
+        &roots,
+        &histories,
+        root,
+        page_id,
+        move |root, page, history| {
+            storage::calculation_history(root, page, history, undo, page_scope, &modified_at)
+        },
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn layout_calculation(
+    roots: tauri::State<'_, AllowedRoots>,
+    histories: tauri::State<'_, NotebookHistories>,
+    root: String,
+    page_id: String,
+    ui_language: Option<String>,
+) -> Result<goodtype_typst::calculation::CalculationLayout, NotebookError> {
+    let (path, document, part) = on_notebook(&roots, &histories, root, move |root, _| {
+        let snapshot = storage::open_page(root, &page_id)?;
+        let reference = snapshot
+            .page
+            .calculation
+            .ok_or("page is not computational")?;
+        let source = snapshot
+            .calculations
+            .iter()
+            .find(|file| file.path == reference.source_path)
+            .ok_or("calculation source is missing")?;
+        let document = goodtype_core::calculation::Calculation::parse(&source.bytes)?;
+        Ok((root.to_path_buf(), document, reference.part_id))
+    })
+    .await?;
+    tauri::async_runtime::spawn_blocking(move || {
+        goodtype_typst::calculation::layout(
+            &path,
+            &document,
+            &part,
+            ui_language.as_deref() == Some("de"),
+        )
+        .map_err(NotebookError::other)
+    })
+    .await
+    .map_err(NotebookError::other)?
+}
+
+#[tauri::command]
+pub async fn calculation_execution_plan(
+    roots: tauri::State<'_, AllowedRoots>,
+    histories: tauri::State<'_, NotebookHistories>,
+    root: String,
+    page_id: String,
+) -> Result<storage::CalculationExecutionPlan, NotebookError> {
+    on_notebook(&roots, &histories, root, move |root, _| {
+        storage::calculation_execution_plan(root, &page_id).map_err(NotebookError::from)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn import_calculation_notebook(
+    app: tauri::AppHandle,
+    roots: tauri::State<'_, AllowedRoots>,
+    histories: tauri::State<'_, NotebookHistories>,
+    root: String,
+    request: CreateCalculationRequest,
+    ui_language: Option<String>,
+) -> Result<Option<StructureHistoryResult>, NotebookError> {
+    ensure_allowed(&roots, &root)?;
+    let picked = app
+        .dialog()
+        .file()
+        .set_title(crate::settings::dialog_label(
+            ui_language.as_deref(),
+            "Import Jupyter notebook",
+            "Jupyter-Notizbuch importieren",
+        ))
+        .add_filter("Jupyter", &["ipynb"])
+        .blocking_pick_file();
+    let Some(picked) = picked else {
+        return Ok(None);
+    };
+    let path = picked.into_path().map_err(NotebookError::other)?;
+    let bytes =
+        storage::files::read_bounded(&path, goodtype_core::calculation::MAX_CALCULATION_BYTES)?;
+    let title = path
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().chars().take(256).collect::<String>())
+        .filter(|title| !title.trim().is_empty())
+        .unwrap_or(request.title);
+    on_notebook(&roots, &histories, root, move |root, store| {
+        observe_structure(store, root, &request.active_page_id)?;
+        let snapshot = storage::import_calculation_page(
+            root,
+            &request.modified_at,
+            &request.position,
+            &title,
+            &bytes,
+        )?;
+        advance_structure_result(store, root, snapshot).map(Some)
+    })
+    .await
+}
+
+#[cfg(test)]
+mod proposal_error_tests {
+    use super::*;
+    #[test]
+    fn maps_proposal_errors() {
+        assert_eq!(
+            NotebookError::from(storage::StorageError::HistoryNotRetained).code,
+            "history_not_retained"
+        );
+        assert_eq!(
+            NotebookError::from(storage::StorageError::ProposalStale(vec![])).code,
+            "proposal_stale"
+        );
+    }
+}
+
+/// UI-only reviewed apply. Notebook lock precedes helper lock and remains held through persistence.
+#[tauri::command]
+pub async fn apply_helper_cell_proposal(
+    roots: tauri::State<'_, AllowedRoots>,
+    histories: tauri::State<'_, NotebookHistories>,
+    app: tauri::AppHandle,
+    input: crate::helper::cells::ApplyCellInput,
+) -> Result<crate::helper::cells::ApplyCellResult, crate::helper::UiProblem> {
+    let helper = tauri::Manager::state::<crate::helper::Helper>(&app)
+        .inner()
+        .clone();
+    let (root, page) = {
+        let state = helper.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let p = state
+            .sessions
+            .values()
+            .find_map(|s| s.proposals.get(&input.proposal_id))
+            .ok_or_else(|| crate::helper::UiProblem {
+                code: "cell_proposal_revoked".into(),
+                params: Default::default(),
+            })?;
+        (p.root.clone(), p.page_id.clone())
+    };
+    on_notebook(&roots, &histories, root, move |root, store| {
+        let snapshot = storage::open_page(root, &page)?;
+        let reference = snapshot
+            .page
+            .calculation
+            .ok_or("cell_proposal_destination")?;
+        let history = store
+            .calculations
+            .entry((root.to_path_buf(), reference.id))
+            .or_default();
+        // Preserve the structured UI problem through the existing notebook error boundary.
+        Ok(crate::helper::cells::apply(
+            &helper,
+            Some(&app),
+            root,
+            &page,
+            history,
+            input,
+        ))
+    })
+    .await
+    .map_err(|_| crate::helper::UiProblem {
+        code: "cell_proposal_persist_failed".into(),
+        params: Default::default(),
+    })?
+}
+
+/// User confirmation is the only path that publishes a page-creation proposal.
+#[tauri::command]
+pub async fn apply_helper_page_proposal(
+    roots: tauri::State<'_, AllowedRoots>,
+    histories: tauri::State<'_, NotebookHistories>,
+    app: tauri::AppHandle,
+    root: String,
+    input: crate::helper::new_page::ApplyInput,
+) -> Result<crate::helper::new_page::ApplyResult, NotebookError> {
+    let helper = tauri::Manager::state::<crate::helper::Helper>(&app)
+        .inner()
+        .clone();
+    on_notebook(&roots, &histories, root, move |root, store| {
+        crate::helper::new_page::apply(&helper, Some(&app), root, store, input)
+    })
+    .await
 }

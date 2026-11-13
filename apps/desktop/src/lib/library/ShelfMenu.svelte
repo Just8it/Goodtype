@@ -128,10 +128,10 @@
     width: max-content;
     min-width: 190px;
     padding: 7px;
-    border: 1px solid var(--edge, rgb(255 255 255 / 12%));
-    border-radius: var(--radius-lg, 10px);
-    background: var(--panel, #23272f);
-    box-shadow: 0 18px 44px rgb(0 0 0 / 55%);
+    border: 1px solid var(--edge);
+    border-radius: var(--radius-lg);
+    background: var(--panel);
+    box-shadow: var(--shadow-menu);
     transform-origin: top right;
     animation: menu-in 120ms cubic-bezier(0.16, 1, 0.3, 1);
   }
@@ -145,10 +145,10 @@
   .subject {
     overflow: hidden;
     padding: 8px 10px 10px;
-    border-bottom: 1px solid rgb(255 255 255 / 8%);
+    border-bottom: 1px solid var(--wash);
     margin-bottom: 5px;
-    color: var(--text, #e9ebee);
-    font-size: var(--text-md, 13px);
+    color: var(--text);
+    font-size: var(--text-md);
     font-weight: 600;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -159,35 +159,35 @@
     gap: 12px;
     align-items: center;
     width: 100%;
-    min-height: var(--control, 36px);
+    min-height: var(--control);
     padding: 7px 11px;
     border: 0;
-    border-radius: var(--radius, 6px);
+    border-radius: var(--radius);
     background: transparent;
-    color: var(--text, #e9ebee);
+    color: var(--text);
     font: inherit;
-    font-size: var(--text-md, 13px);
+    font-size: var(--text-md);
     text-align: left;
     touch-action: manipulation;
     cursor: pointer;
   }
 
   button:hover:enabled {
-    background: rgb(255 255 255 / 6%);
+    background: var(--wash);
   }
 
   button:focus-visible {
-    outline: 2px solid var(--blueprint-light, #7fb0f7);
-    outline-offset: 1px;
+    outline: 2px solid var(--blueprint-light);
+    outline-offset: 2px;
   }
 
   button:disabled {
-    color: var(--quiet, #6a727c);
+    color: var(--quiet);
     cursor: default;
   }
 
   .destructive {
-    color: var(--oxide, #e5645e);
+    color: var(--oxide);
   }
 
   .grow {
@@ -195,14 +195,14 @@
   }
 
   .marker {
-    width: var(--icon-dense, 16px);
-    height: var(--icon-dense, 16px);
-    color: var(--blueprint, #4c8df0);
+    width: var(--icon-dense);
+    height: var(--icon-dense);
+    color: var(--blueprint);
     fill: none;
     stroke: currentColor;
     stroke-linecap: round;
     stroke-linejoin: round;
-    stroke-width: var(--stroke-dense, 2);
+    stroke-width: var(--stroke-dense);
   }
 
   @keyframes menu-in {
@@ -214,7 +214,7 @@
 
   @media (pointer: coarse) {
     button {
-      min-height: var(--control-touch, 44px);
+      min-height: var(--control-touch);
     }
   }
 

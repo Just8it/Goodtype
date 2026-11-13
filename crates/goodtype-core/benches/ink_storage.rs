@@ -5,13 +5,13 @@ use std::{
 };
 
 use goodtype_core::{
-    DEFAULT_INK_Z_INDEX, InkLayer, InkLayerReference, NotebookManifest, Page, PageBackground,
-    PageDefaults, PageGeometry, PageReference, SCHEMA_VERSION, Stroke, StrokePattern, StrokePoint,
-    StrokeTool, Transform, ink_codec, layout,
+    DEFAULT_INK_Z_INDEX, InkLayer, InkLayerReference, NotebookManifest, ObjectFields, Page,
+    PageBackground, PageDefaults, PageGeometry, PageObject, PageReference, SCHEMA_VERSION, Stroke,
+    StrokePattern, StrokePoint, StrokeTool, Transform, ink_codec, layout,
     storage::{
-        NotebookHistory, NotebookSnapshot, PagePosition, commit_notebook, create_notebook,
-        create_page, observe_notebook, observe_page, open_notebook, open_page, redo_notebook,
-        undo_notebook,
+        NotebookHistory, NotebookSnapshot, PageDelta, PagePosition, StoredFile, commit_notebook,
+        commit_page_delta, create_notebook, create_page, observe_notebook, observe_page,
+        open_notebook, open_page, redo_notebook, undo_notebook,
     },
 };
 use miniz_oxide::{deflate::compress_to_vec_zlib, inflate::decompress_to_vec_zlib};
@@ -266,6 +266,8 @@ fn storage_benchmarks(layer: &InkLayer, config: Config) -> Result<(), String> {
         "    note: undo samples are half of an undo+redo pair; redo uses the same current save path"
     );
 
+    delta_benchmarks(layer, config)?;
+
     let recovery_roots = prepare_recovery_notebooks(layer, config.warmup + config.repeats, false)?;
     let mut recovery_index = 0;
     let recovery_samples = sample_result(
@@ -314,6 +316,130 @@ fn storage_benchmarks(layer: &InkLayer, config: Config) -> Result<(), String> {
     );
     println!();
     Ok(())
+}
+
+/// The frontend's compact commit: one dense ink layer plus one Typst block, changing one thing at
+/// a time. Building the delta is untimed; each sample is one real `commit_page_delta`.
+fn delta_benchmarks(layer: &InkLayer, config: Config) -> Result<(), String> {
+    #[derive(Clone, Copy)]
+    enum Change {
+        AppendStroke,
+        TransformOnly,
+        TypstOnly,
+    }
+    for (name, change) in [
+        ("delta: append one stroke", Change::AppendStroke),
+        ("delta: transform one stroke", Change::TransformOnly),
+        ("delta: edit Typst only", Change::TypstOnly),
+    ] {
+        let temporary = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let root = temporary.path().join("notebook");
+        create_notebook(&root, &snapshot_with_block(layer.clone()))
+            .map_err(|error| error.to_string())?;
+        let mut history = NotebookHistory::default();
+        let mut current =
+            observe_notebook(&root, &mut history).map_err(|error| error.to_string())?;
+        let mut step = 0usize;
+        let mut samples = Vec::with_capacity(config.repeats);
+        for iteration in 0..config.warmup + config.repeats {
+            step += 1;
+            let delta = page_delta(&current, change_strokes(&current, change as u8, step), {
+                if matches!(change, Change::TypstOnly) {
+                    vec![StoredFile {
+                        path: BENCH_BLOCK.into(),
+                        bytes: format!("$ x = {step} $").into_bytes(),
+                    }]
+                } else {
+                    Vec::new()
+                }
+            })?;
+            let start = Instant::now();
+            let result =
+                commit_page_delta(&root, &mut history, delta).map_err(|error| error.to_string())?;
+            let elapsed = start.elapsed();
+            current = black_box(result.snapshot);
+            if iteration >= config.warmup {
+                samples.push(elapsed);
+            }
+        }
+        report(name, samples);
+    }
+    Ok(())
+}
+
+const BENCH_BLOCK: &str = "blocks/benchmark.typ";
+
+fn change_strokes(current: &NotebookSnapshot, change: u8, step: usize) -> serde_json::Value {
+    let strokes = &current.ink_layers[0].strokes;
+    let mut entries: Vec<serde_json::Value> = strokes
+        .iter()
+        .enumerate()
+        .map(|(index, stroke)| {
+            if change == 1 && index == 0 {
+                let mut transform = stroke.transform.clone();
+                transform.translate_x = if step.is_multiple_of(2) { 0.0 } else { 12.5 };
+                serde_json::json!({ "kind": "reuse", "id": stroke.id, "transform": transform })
+            } else {
+                serde_json::json!({ "kind": "reuse", "id": stroke.id })
+            }
+        })
+        .collect();
+    if change == 0 {
+        let mut stroke = strokes[0].clone();
+        stroke.id = format!("appended-{step:06}");
+        entries.push(serde_json::json!({ "kind": "put", "stroke": stroke }));
+    }
+    serde_json::Value::Array(entries)
+}
+
+fn page_delta(
+    current: &NotebookSnapshot,
+    strokes: serde_json::Value,
+    blocks: Vec<StoredFile>,
+) -> Result<PageDelta, String> {
+    let layer = &current.ink_layers[0];
+    serde_json::from_value(serde_json::json!({
+        "page": current.page,
+        "modifiedAt": current.manifest.modified_at,
+        "blocks": blocks,
+        "assets": [],
+        "knownAssets": {},
+        "inkLayers": [{
+            "schemaVersion": layer.schema_version,
+            "id": layer.id,
+            "pageId": layer.page_id,
+            "strokes": strokes,
+        }],
+    }))
+    .map_err(|error| error.to_string())
+}
+
+fn snapshot_with_block(layer: InkLayer) -> NotebookSnapshot {
+    let mut snapshot = snapshot(layer);
+    snapshot.page.objects.push(PageObject::Typst {
+        fields: ObjectFields {
+            id: "typst-001".into(),
+            x: 72.0,
+            y: 96.0,
+            rotation: 0.0,
+            scale: 1.0,
+            z_index: 0,
+            reading_order: 0,
+            group_id: None,
+            created_at: "2026-09-07T00:00:00Z".into(),
+            modified_at: "2026-09-07T00:00:00Z".into(),
+        },
+        source_path: BENCH_BLOCK.into(),
+        layout_width_pt: 220.0,
+        measured_width_pt: 180.0,
+        measured_height_pt: 32.0,
+    });
+    snapshot.page.reading_order.push("typst-001".into());
+    snapshot.blocks.push(StoredFile {
+        path: BENCH_BLOCK.into(),
+        bytes: b"$ x = 0 $".to_vec(),
+    });
+    snapshot
 }
 
 trait FirstPoint {
@@ -384,6 +510,7 @@ fn encode_recovery_intent(
             .collect::<Result<Vec<_>, _>>()?;
         Ok(BinaryRecoverySnapshot {
             snapshot: NotebookSnapshot {
+                calculations: snapshot.calculations.clone(),
                 manifest: snapshot.manifest.clone(),
                 page: snapshot.page.clone(),
                 blocks: snapshot.blocks.clone(),
@@ -571,6 +698,7 @@ fn print_help() {
 
 fn snapshot(layer: InkLayer) -> NotebookSnapshot {
     NotebookSnapshot {
+        calculations: Vec::new(),
         manifest: NotebookManifest {
             schema_version: SCHEMA_VERSION,
             id: "benchmark-notebook".into(),
@@ -591,6 +719,7 @@ fn snapshot(layer: InkLayer) -> NotebookSnapshot {
             modified_at: "2026-09-07T00:00:00Z".into(),
         },
         page: Page {
+            calculation: None,
             schema_version: SCHEMA_VERSION,
             id: "page-001".into(),
             revision: 1,

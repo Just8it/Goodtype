@@ -141,18 +141,37 @@ pub fn commit_notebook(
     history: &mut NotebookHistory,
     snapshot: NotebookSnapshot,
 ) -> Result<HistoryResult, StorageError> {
-    let root = canonical_root(selected_root)?;
-    let current = open_page(selected_root, &snapshot.page.id)?;
-    ensure_current(&root, history, &current, snapshot.page.revision)?;
-    commit_current(&root, history, current, snapshot)
+    commit_notebook_with_precondition(selected_root, history, snapshot, None)
 }
 
-pub(super) fn commit_current(
+/// Caller must hold the notebook lock throughout this operation.
+pub fn commit_notebook_with_precondition(
+    selected_root: &Path,
+    history: &mut NotebookHistory,
+    snapshot: NotebookSnapshot,
+    precondition: Option<super::ProposalPrecondition>,
+) -> Result<HistoryResult, StorageError> {
+    let root = canonical_root(selected_root)?;
+    let current = open_page(selected_root, &snapshot.page.id)?;
+    if current.page.calculation.is_some() {
+        return Err(invalid_error(
+            "computational pages use calculation transactions",
+        ));
+    }
+    ensure_current(&root, history, &current, snapshot.page.revision)?;
+    commit_current_with_precondition(&root, history, current, snapshot, precondition)
+}
+
+pub(super) fn commit_current_with_precondition(
     root: &Path,
     history: &mut NotebookHistory,
     current: NotebookSnapshot,
     mut snapshot: NotebookSnapshot,
+    precondition: Option<super::ProposalPrecondition>,
 ) -> Result<HistoryResult, StorageError> {
+    if let Some(condition) = &precondition {
+        super::check_proposal_base(root, &current, &condition.base)?;
+    }
     validate_page_bundle_versions(&snapshot)?;
     // A preloaded neighbouring page may carry a timestamp from before another page saved.
     // Keep the current manifest and only advance its bookkeeping time.
@@ -166,7 +185,14 @@ pub(super) fn commit_current(
     // and the page about to be written. The manifest states the version and the page and its ink
     // layers move with it, so a partially upgraded notebook is not representable.
     raise_schema_version(&mut snapshot);
-    snapshot.page.revision = current.page.revision + 1;
+    snapshot.page.revision = next_revision(&current)?;
+    if precondition
+        .as_ref()
+        .is_some_and(|condition| condition.require_retained_history)
+        && !history_preflight(history, &current, &snapshot)
+    {
+        return Err(StorageError::HistoryNotRetained);
+    }
     let (saved, fingerprint) = save_and_return(root, &current, snapshot)?;
     history.advance(current, &saved, fingerprint);
     Ok(history_result(saved, history))
@@ -197,6 +223,9 @@ fn restore_notebook(
         .clone()
         .ok_or_else(|| invalid_error("page must be observed before undo or redo"))?;
     let current = open_page(&root, &page_id)?;
+    if current.page.calculation.is_some() {
+        return Err(invalid_error("computational pages use calculation history"));
+    }
     ensure_current(
         &root,
         history,
@@ -213,7 +242,7 @@ fn restore_notebook(
     // Undo restores this page's content. Page ordering and the notebook-wide schema maximum may
     // have advanced since the entry was retained and must never be resurrected from old history.
     target.manifest = current.manifest.clone();
-    target.page.revision = current.page.revision + 1;
+    target.page.revision = next_revision(&current)?;
     let (restored, fingerprint) = save_and_return(&root, &current, target)?;
 
     if undo {
@@ -233,6 +262,16 @@ fn restore_notebook(
     }
     history.record(&restored, fingerprint);
     Ok(history_result(restored, history))
+}
+
+/// The revision a write over `current` lands at. A stored page can carry any `u64`, so the
+/// increment is checked and refuses before anything is staged instead of wrapping or panicking.
+fn next_revision(current: &NotebookSnapshot) -> Result<u64, StorageError> {
+    current
+        .page
+        .revision
+        .checked_add(1)
+        .ok_or_else(|| invalid_error("page revision overflow"))
 }
 
 pub(super) fn ensure_current(
@@ -282,12 +321,9 @@ fn push_history_bounded(
 ) {
     // This is a bounded payload proxy, not a claim about allocator or `String` capacity. Counting
     // encoded ink avoids turning every retained sample into JSON merely to enforce the budget.
-    let Ok(bytes) = retained_payload_bytes(&snapshot) else {
+    let Some(bytes) = retainable_bytes(&snapshot, byte_limit) else {
         return;
     };
-    if bytes > byte_limit {
-        return;
-    }
     while stack.len() == HISTORY_LIMIT || *total + bytes > byte_limit {
         *total -= stack.remove(0).bytes;
     }
@@ -295,12 +331,44 @@ fn push_history_bounded(
     stack.push(HistoryEntry { snapshot, bytes });
 }
 
+fn retained_size_fits(bytes: Result<usize, StorageError>, limit: usize) -> Option<usize> {
+    bytes.ok().filter(|bytes| *bytes <= limit)
+}
+
+// Every accepted push evicts older entries until the new entry fits. A commit clears redo,
+// so the candidate will be its first entry after undo. Assets are never retained.
+fn retainable_bytes(snapshot: &NotebookSnapshot, limit: usize) -> Option<usize> {
+    retained_size_fits(retained_payload_bytes(snapshot), limit)
+}
+
+/// Whether the next commit can retain both its undo state and its redo state after undo.
+/// Pass the normalized candidate (including its saved revision) for exact accounting.
+pub fn history_preflight(
+    _history: &NotebookHistory,
+    current: &NotebookSnapshot,
+    candidate: &NotebookSnapshot,
+) -> bool {
+    let retained = |snapshot: &NotebookSnapshot| {
+        retained_size_fits(payload_bytes(snapshot, false), HISTORY_BYTES_LIMIT).is_some()
+    };
+    retained(current) && retained(candidate)
+}
+
 fn retained_payload_bytes(snapshot: &NotebookSnapshot) -> Result<usize, StorageError> {
+    payload_bytes(snapshot, true)
+}
+
+fn payload_bytes(snapshot: &NotebookSnapshot, include_assets: bool) -> Result<usize, StorageError> {
     let mut bytes = serde_json::to_vec(&snapshot.manifest)?.len();
     bytes = bytes
         .checked_add(serde_json::to_vec(&snapshot.page)?.len())
         .ok_or_else(|| invalid_error("history payload size overflow"))?;
-    for file in snapshot.blocks.iter().chain(&snapshot.assets) {
+    for file in snapshot
+        .blocks
+        .iter()
+        .chain(snapshot.assets.iter().filter(|_| include_assets))
+        .chain(&snapshot.calculations)
+    {
         bytes = bytes
             .checked_add(file.path.len())
             .and_then(|value| value.checked_add(file.bytes.len()))
@@ -333,6 +401,198 @@ mod tests {
         storage::{fixtures::*, *},
     };
     use std::fs;
+
+    #[test]
+    fn computational_page_history_cannot_replace_a_shared_document() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path();
+        create_notebook(root, &snapshot()).unwrap();
+        let calculation = create_calculation_page(
+            root,
+            "2026-11-02T12:00:00Z",
+            &PagePosition::Last,
+            "Task",
+            None,
+        )
+        .unwrap();
+        let mut history = NotebookHistory::default();
+        let observed = observe_page(root, &calculation.page.id, &mut history).unwrap();
+        assert!(
+            commit_notebook(root, &mut history, observed.clone())
+                .unwrap_err()
+                .to_string()
+                .contains("calculation transactions")
+        );
+        push_history_bounded(
+            &mut history.undo,
+            &mut history.undo_bytes,
+            observed.clone(),
+            usize::MAX,
+        );
+        let before = fs::read(root.join(&observed.calculations[0].path)).unwrap();
+        assert!(
+            undo_notebook(root, &mut history)
+                .unwrap_err()
+                .to_string()
+                .contains("calculation history")
+        );
+        assert_eq!(
+            fs::read(root.join(&observed.calculations[0].path)).unwrap(),
+            before
+        );
+    }
+
+    /// A stored page at `u64::MAX` cannot advance. Commit, undo and redo must refuse with an
+    /// error before staging anything, and must not panic, so the caller's history lock stays
+    /// usable for the next command.
+    #[test]
+    fn maximum_revision_is_refused_on_commit_undo_and_redo_without_changing_bytes() {
+        let overflow = |result: Result<HistoryResult, StorageError>| {
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("page revision overflow")
+            );
+        };
+        let at = |revision: u64| {
+            let temporary = tempfile::tempdir().unwrap();
+            let root = temporary.path().join("notebook");
+            let mut seeded = snapshot();
+            seeded.page.revision = revision;
+            create_notebook(&root, &seeded).unwrap();
+            (temporary, root)
+        };
+        let history = std::sync::Mutex::new(NotebookHistory::default());
+
+        // Commit and undo from the maximum.
+        let (_commit_dir, root) = at(u64::MAX - 1);
+        let working = observe_notebook(&root, &mut history.lock().unwrap()).unwrap();
+        let landed = commit_notebook(&root, &mut history.lock().unwrap(), working).unwrap();
+        assert_eq!(landed.snapshot.page.revision, u64::MAX);
+        let before = tree_bytes(&root);
+        overflow(commit_notebook(
+            &root,
+            &mut history.lock().unwrap(),
+            landed.snapshot.clone(),
+        ));
+        assert_eq!(tree_bytes(&root), before);
+        overflow(undo_notebook(&root, &mut history.lock().unwrap()));
+        assert_eq!(tree_bytes(&root), before);
+
+        // Redo from the maximum: undo itself lands on the next revision.
+        let (_redo_dir, root) = at(u64::MAX - 2);
+        let mut guard = history.lock().unwrap();
+        let working = observe_notebook(&root, &mut guard).unwrap();
+        commit_notebook(&root, &mut guard, working).unwrap();
+        assert_eq!(
+            undo_notebook(&root, &mut guard)
+                .unwrap()
+                .snapshot
+                .page
+                .revision,
+            u64::MAX
+        );
+        let before = tree_bytes(&root);
+        overflow(redo_notebook(&root, &mut guard));
+        assert_eq!(tree_bytes(&root), before);
+        drop(guard);
+
+        // The history lock is not poisoned and the next command on a valid notebook succeeds.
+        assert!(!history.is_poisoned());
+        let (_valid_dir, root) = at(1);
+        let mut guard = history.lock().unwrap();
+        let working = observe_notebook(&root, &mut guard).unwrap();
+        assert_eq!(
+            commit_notebook(&root, &mut guard, working)
+                .unwrap()
+                .snapshot
+                .page
+                .revision,
+            2
+        );
+    }
+
+    #[test]
+    fn valid_oversized_candidate_succeeds_without_history_requirement() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("notebook");
+        create_notebook(&root, &snapshot()).unwrap();
+        let mut history = NotebookHistory::default();
+        let mut candidate = observe_notebook(&root, &mut history).unwrap();
+        let base = proposal_base(&root, &candidate, &[]).unwrap();
+        let template = candidate.ink_layers[0].clone();
+        candidate.ink_layers.clear();
+        candidate.page.ink_layers.clear();
+        for index in 0..4 {
+            let mut layer = template.clone();
+            layer.id = format!("large-layer-{index}");
+            layer.strokes[0].id = format!("large-stroke-{index}");
+            layer.strokes[0].points =
+                vec![layer.strokes[0].points[0].clone(); super::super::MAX_INK_POINTS_PER_LAYER];
+            candidate.page.ink_layers.push(crate::InkLayerReference {
+                id: layer.id.clone(),
+                path: format!("ink/large-{index}.ink"),
+            });
+            candidate.ink_layers.push(layer);
+        }
+        assert!(!super::history_preflight(&history, &snapshot(), &candidate));
+        let result = commit_notebook_with_precondition(
+            &root,
+            &mut history,
+            candidate,
+            Some(ProposalPrecondition {
+                base,
+                require_retained_history: false,
+            }),
+        )
+        .unwrap();
+        assert!(result.can_undo);
+        assert_eq!(result.snapshot.page.revision, 2);
+    }
+
+    #[test]
+    fn oversized_candidate_requires_retained_history_and_preflight_matches_push() {
+        let mut candidate = snapshot().without_assets();
+        // Exercise the real 128 MiB accounting, without needing an invalid on-disk source.
+        candidate.blocks[0].bytes = vec![b' '; super::HISTORY_BYTES_LIMIT];
+        let history = NotebookHistory::default();
+        assert!(!super::history_preflight(&history, &snapshot(), &candidate));
+        let mut stack = Vec::new();
+        let mut bytes = 0;
+        super::push_history(&mut stack, &mut bytes, candidate.clone());
+        assert!(stack.is_empty());
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("notebook");
+        create_notebook(&root, &snapshot()).unwrap();
+        let mut history = NotebookHistory::default();
+        let current = observe_notebook(&root, &mut history).unwrap();
+        let base = proposal_base(&root, &current, &[]).unwrap();
+        let root = super::canonical_root(&root).unwrap();
+        let before = super::canonical_fingerprint(&root, &current).unwrap();
+        assert!(matches!(
+            commit_notebook_with_precondition(
+                &root,
+                &mut history,
+                candidate,
+                Some(ProposalPrecondition {
+                    base,
+                    require_retained_history: true
+                })
+            ),
+            Err(StorageError::HistoryNotRetained)
+        ));
+        assert_eq!(
+            before,
+            super::canonical_fingerprint(&root, &open_notebook(&root).unwrap()).unwrap()
+        );
+        // Without the requirement, an oversized snapshot is skipped by history, as before.
+        // A small synthetic budget exercises this without violating canonical source limits.
+        let mut stack = Vec::new();
+        let mut bytes = 0;
+        push_history_bounded(&mut stack, &mut bytes, current, 1);
+        assert!(stack.is_empty());
+    }
 
     #[test]
     fn history_evicts_old_snapshots_at_its_byte_budget() {
@@ -490,8 +750,11 @@ mod tests {
             .unwrap()
             .snapshot;
 
-        assert_eq!(second.manifest.schema_version, crate::SCHEMA_VERSION);
-        assert_eq!(second.page.schema_version, crate::SCHEMA_VERSION);
+        assert_eq!(
+            second.manifest.schema_version,
+            crate::BINARY_INK_SCHEMA_VERSION
+        );
+        assert_eq!(second.page.schema_version, crate::BINARY_INK_SCHEMA_VERSION);
         assert!(second.page.ink_layers[0].path.ends_with(".ink"));
     }
 
@@ -506,8 +769,11 @@ mod tests {
         commit_notebook(&root, &mut history, candidate).unwrap();
 
         let undone = undo_notebook(&root, &mut history).unwrap().snapshot;
-        assert_eq!(undone.manifest.schema_version, crate::SCHEMA_VERSION);
-        assert_eq!(undone.page.schema_version, crate::SCHEMA_VERSION);
+        assert_eq!(
+            undone.manifest.schema_version,
+            crate::BINARY_INK_SCHEMA_VERSION
+        );
+        assert_eq!(undone.page.schema_version, crate::BINARY_INK_SCHEMA_VERSION);
         assert!(undone.page.ink_layers[0].path.ends_with(".ink"));
         assert_eq!(undone.ink_layers[0].strokes[0].points[0].x, 80.0);
         assert!(root.join("ink/page-001-layer-001.json").is_file());

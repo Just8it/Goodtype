@@ -713,7 +713,7 @@ mod tests {
             .windows(b"\"schemaVersion\":3".len())
             .position(|window| window == b"\"schemaVersion\":3")
             .expect("fixture metadata contains its schema version");
-        metadata[schema + b"\"schemaVersion\":".len()] = b'4';
+        metadata[schema + b"\"schemaVersion\":".len()] = b'0' + (SCHEMA_VERSION + 1) as u8;
         assert!(decode(&future).is_err());
     }
 

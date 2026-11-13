@@ -4,9 +4,9 @@
 //! one concern still fails if another regresses underneath it.
 
 use crate::{
-    InkLayer, InkLayerReference, NotebookManifest, ObjectFields, Page, PageBackground,
-    PageDefaults, PageGeometry, PageObject, PageReference, SCHEMA_VERSION, Stroke, StrokePattern,
-    StrokePoint, StrokeTool, Transform,
+    BINARY_INK_SCHEMA_VERSION as SCHEMA_VERSION, InkLayer, InkLayerReference, NotebookManifest,
+    ObjectFields, Page, PageBackground, PageDefaults, PageGeometry, PageObject, PageReference,
+    Stroke, StrokePattern, StrokePoint, StrokeTool, Transform,
 };
 
 use super::{NotebookSnapshot, StoredFile};
@@ -31,6 +31,7 @@ pub(super) fn fields(id: &str, reading_order: u32) -> ObjectFields {
 
 pub(super) fn snapshot() -> NotebookSnapshot {
     NotebookSnapshot {
+        calculations: Vec::new(),
         manifest: NotebookManifest {
             schema_version: SCHEMA_VERSION,
             id: "notebook-phase0b".into(),
@@ -57,6 +58,7 @@ pub(super) fn snapshot() -> NotebookSnapshot {
             modified_at: "2026-07-23T00:00:00Z".into(),
         },
         page: Page {
+            calculation: None,
             schema_version: SCHEMA_VERSION,
             id: "page-001".into(),
             revision: 1,
@@ -190,4 +192,30 @@ pub(super) fn handwriting_layer(strokes: usize, points_per_stroke: usize) -> Ink
             })
             .collect(),
     }
+}
+
+/// Every file below `root` with its bytes, so a test can prove a refused operation changed nothing.
+pub(super) fn tree_bytes(root: &std::path::Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+    fn walk(
+        base: &std::path::Path,
+        directory: &std::path::Path,
+        files: &mut std::collections::BTreeMap<String, Vec<u8>>,
+    ) {
+        for entry in std::fs::read_dir(directory).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                walk(base, &path, files);
+            } else {
+                let relative = path
+                    .strip_prefix(base)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned();
+                files.insert(relative, std::fs::read(&path).unwrap());
+            }
+        }
+    }
+    let mut files = std::collections::BTreeMap::new();
+    walk(root, root, &mut files);
+    files
 }

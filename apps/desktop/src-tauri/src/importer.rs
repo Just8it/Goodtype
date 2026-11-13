@@ -58,17 +58,23 @@ pub struct Tool {
     /// The GitHub repository path, `/owner/name`, exactly as its release URLs spell it.
     pub repository: &'static str,
     /// Verifies signed update metadata. Private halves live only in each repository's publisher.
-    pub public_key: [u8; 32],
+    pub public_key: Option<[u8; 32]>,
     /// The release this build downloads. `None` means no release is published and tested; the
     /// Library then says the importer is not available yet and nothing is ever requested.
     pub pinned: Option<PinnedRelease<'static>>,
     /// The native file dialog's filter.
-    pub source_filter: (&'static str, &'static [&'static str]),
+    pub source_filter: Option<(&'static str, &'static [&'static str])>,
     /// `<batch> 2026-10-22` is the Library folder an import goes into.
-    pub batch: &'static str,
+    pub batch: Option<&'static str>,
 }
 
 impl Tool {
+    /// Importers carry a notebook-schema and decoder contract and their own package manifest.
+    /// The math recognizer add-on has neither; Goodtype records its file manifest at install.
+    fn imports_notebooks(&self) -> bool {
+        self.batch.is_some()
+    }
+
     fn executable(&self) -> String {
         format!("{}.exe", self.name)
     }
@@ -105,11 +111,11 @@ pub static GOODNOTES: Tool = Tool {
     package: "goodtype-goodnotes-importer",
     repository: "/Just8it/Goodtype-Goodnodes-importer",
     // Matches that repository's release-public-key.pem.
-    public_key: [
+    public_key: Some([
         0x42, 0x8c, 0xc6, 0x8f, 0x6d, 0x0b, 0x38, 0xea, 0xe7, 0x4d, 0xcb, 0x21, 0x1e, 0x48, 0x77,
         0xc6, 0xeb, 0x51, 0x54, 0x8d, 0xaa, 0xbf, 0x24, 0xde, 0x64, 0xa1, 0x85, 0x88, 0x5c, 0x82,
         0x5b, 0x3c,
-    ],
+    ]),
     pinned: Some(PinnedRelease {
         version: "0.1.1",
         url: "https://github.com/Just8it/Goodtype-Goodnodes-importer/releases/download/v0.1.1/goodtype-goodnotes-importer-0.1.1-windows-x64.zip",
@@ -117,8 +123,8 @@ pub static GOODNOTES: Tool = Tool {
         sha256: "ef8bfd150626eab885cf1479131e5945fcfd2a9da4152aab3a03311507db5742",
         decoder_commit: "66028455fd7fc61b7931679915d811a25485e3ad",
     }),
-    source_filter: ("Goodnotes", &["goodnotes", "zip"]),
-    batch: "Goodnotes Import",
+    source_filter: Some(("Goodnotes", &["goodnotes", "zip"])),
+    batch: Some("Goodnotes Import"),
 };
 
 /// v0.1.0, published 2026-10-22 from commit 9806bbd2 (clean tree). The hash was computed from an
@@ -131,11 +137,11 @@ pub static ONENOTE: Tool = Tool {
     package: "goodtype-onenote-importer",
     repository: "/Just8it/Goodtype-OneNote-Importer",
     // Matches that repository's release-public-key.pem; distinct from the Goodnotes key.
-    public_key: [
+    public_key: Some([
         0x73, 0xbc, 0xe6, 0x98, 0x80, 0x1a, 0x59, 0xfe, 0x2d, 0x42, 0x3f, 0xd9, 0xc6, 0xdb, 0xa8,
         0x68, 0x7f, 0xe3, 0xb9, 0x2f, 0x60, 0xbb, 0x9f, 0x27, 0x49, 0x9e, 0x72, 0x42, 0xc2, 0x33,
         0x6c, 0x3b,
-    ],
+    ]),
     pinned: Some(PinnedRelease {
         version: "0.1.0",
         url: "https://github.com/Just8it/Goodtype-OneNote-Importer/releases/download/v0.1.0/goodtype-onenote-importer-0.1.0-windows-x64.zip",
@@ -143,8 +149,19 @@ pub static ONENOTE: Tool = Tool {
         sha256: "a09f7899eef1280819a7da0b12e1355a76e2a71c774e738b0945e07bac9a63dc",
         decoder_commit: "727389a674665dc07e0c31818cd4b54b64b9c684",
     }),
-    source_filter: ("OneNote", &["one", "onetoc2", "onepkg", "zip"]),
-    batch: "OneNote Import",
+    source_filter: Some(("OneNote", &["one", "onetoc2", "onepkg", "zip"])),
+    batch: Some("OneNote Import"),
+};
+
+pub static MATH: Tool = Tool {
+    id: "math",
+    name: "goodtype-math-recognize",
+    package: "goodtype-math-recognizer",
+    repository: "/Just8it/Goodtype-ink-recognition",
+    public_key: None,
+    pinned: None,
+    source_filter: None,
+    batch: None,
 };
 
 const PROTOCOL_VERSION: u64 = 1;
@@ -159,7 +176,7 @@ const ASSET_HOSTS: [&str; 3] = [
 
 const MIB: u64 = 1024 * 1024;
 /// Absolute ceilings, whatever a pin says.
-const MAX_PACKAGE_BYTES: u64 = 256 * MIB;
+const MAX_PACKAGE_BYTES: u64 = 512 * MIB;
 const MAX_ARCHIVE_ENTRIES: usize = 20_000;
 const MAX_UNPACKED_BYTES: u64 = 512 * MIB;
 const MAX_PATH_DEPTH: usize = 24;
@@ -416,7 +433,7 @@ pub fn extract_package(archive: &Path, top: &str, into: &Path) -> Result<(), Str
     Ok(())
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PackageManifest {
     pub version: String,
@@ -427,7 +444,7 @@ pub struct PackageManifest {
     pub files: Vec<PackageFile>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PackageFile {
     pub path: String,
@@ -534,7 +551,9 @@ pub struct ToolVersion {
     pub name: String,
     pub version: String,
     pub protocol_version: u64,
+    #[serde(default)]
     pub notebook_schema_version: u32,
+    #[serde(default)]
     pub decoder_commit: String,
 }
 
@@ -547,7 +566,7 @@ pub fn check_contract(
     pin: Option<&PinnedRelease>,
 ) -> Result<(), String> {
     if manifest.protocol_version != PROTOCOL_VERSION
-        || manifest.notebook_schema_version != SCHEMA_VERSION
+        || (expected.imports_notebooks() && manifest.notebook_schema_version != SCHEMA_VERSION)
         || manifest.target != TARGET
     {
         return Err(format!(
@@ -563,13 +582,15 @@ pub fn check_contract(
         && (tool.name != expected.name
             || tool.version != manifest.version
             || tool.protocol_version != manifest.protocol_version
-            || tool.notebook_schema_version != manifest.notebook_schema_version
-            || tool.decoder_commit != manifest.decoder_commit)
+            || (expected.imports_notebooks()
+                && tool.notebook_schema_version != manifest.notebook_schema_version)
+            || (expected.imports_notebooks() && tool.decoder_commit != manifest.decoder_commit))
     {
         return Err("the importer reports a different version than its package".into());
     }
     if let Some(pin) = pin
-        && (manifest.version != pin.version || manifest.decoder_commit != pin.decoder_commit)
+        && (manifest.version != pin.version
+            || (expected.imports_notebooks() && manifest.decoder_commit != pin.decoder_commit))
     {
         return Err(format!(
             "importer {} is not the tested version {}",
@@ -645,6 +666,9 @@ pub fn install_archive(
     release: &PinnedRelease,
     probe: &dyn Fn(&Path) -> Result<ToolVersion, String>,
 ) -> Result<String, String> {
+    if fs::metadata(archive).map_err(|e| e.to_string())?.len() != release.size {
+        return Err("the package size differs from the pinned release".into());
+    }
     let hash = sha256_file(archive)?;
     if !hash.eq_ignore_ascii_case(release.sha256) {
         return Err("the downloaded package does not match the tested release".into());
@@ -655,6 +679,33 @@ pub fn install_archive(
     let mut installed_target = None;
     let result = (|| {
         extract_package(archive, &package_folder(dir.1, release.version), &staging)?;
+        // Math ships no importer manifest. Record every file from the pinned, verified ZIP locally.
+        if !dir.1.imports_notebooks() {
+            let files = package_files(&staging)?
+                .into_iter()
+                .map(|path| {
+                    let file = staging.join(&path);
+                    Ok(PackageFile {
+                        path,
+                        size_bytes: fs::metadata(&file).map_err(|e| e.to_string())?.len(),
+                        sha256: sha256_file(&file)?,
+                    })
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            let manifest = PackageManifest {
+                version: release.version.into(),
+                protocol_version: 1,
+                notebook_schema_version: 0,
+                target: TARGET.into(),
+                decoder_commit: String::new(),
+                files,
+            };
+            fs::write(
+                staging.join(PACKAGE_MANIFEST),
+                serde_json::to_vec(&manifest).map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| e.to_string())?;
+        }
         let manifest = verify_package(dir.1, &staging)?;
         let tool = probe(&staging)?;
         check_contract(dir.1, &manifest, Some(&tool), Some(release))?;
@@ -732,7 +783,7 @@ fn probe_tool(tool: &Tool, dir: &Path) -> Result<ToolVersion, String> {
             output.stderr.trim()
         ));
     }
-    let tool: ToolVersion = serde_json::from_str(output.stdout.trim())
+    let reported: ToolVersion = serde_json::from_str(output.stdout.trim())
         .map_err(|error| format!("the importer's version report is malformed ({error})"))?;
     let check = run_contained(
         Command::new(&executable).arg("--check").current_dir(dir),
@@ -746,7 +797,14 @@ fn probe_tool(tool: &Tool, dir: &Path) -> Result<ToolVersion, String> {
             check.stderr.trim()
         ));
     }
-    Ok(tool)
+    if !tool.imports_notebooks() {
+        let report: serde_json::Value =
+            serde_json::from_str(check.stdout.trim()).map_err(|e| e.to_string())?;
+        if report.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+            return Err("math recognizer self-check failed".into());
+        }
+    }
+    Ok(reported)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -839,7 +897,7 @@ fn run_contained(
 }
 
 #[cfg(windows)]
-mod job {
+pub(crate) mod job {
     //! A Job Object with kill-on-close and a memory ceiling. Closing the handle (cancel, or this
     //! process exiting) ends every process in it. Lifetime and resource containment only — the
     //! tool still runs with the user's file-system rights.
@@ -1114,7 +1172,10 @@ pub fn publish(
 
 /// `Goodnotes Import 2026-10-21`, or the first free ` (2)`, ` (3)`… beside it.
 fn batch_name(tool: &Tool, parent: &Path, today: &str) -> Result<String, String> {
-    let base = format!("{} {today}", tool.batch);
+    let base = format!(
+        "{} {today}",
+        tool.batch.ok_or("this tool does not import notebooks")?
+    );
     (1..1000)
         .map(|number| {
             if number == 1 {
@@ -1248,6 +1309,7 @@ impl Importer {
 pub struct Importers {
     goodnotes: Importer,
     onenote: Importer,
+    math: Importer,
 }
 
 impl Importers {
@@ -1256,6 +1318,7 @@ impl Importers {
         match id {
             "goodnotes" => Ok((&self.goodnotes, &GOODNOTES)),
             "onenote" => Ok((&self.onenote, &ONENOTE)),
+            "math" => Ok((&self.math, &MATH)),
             _ => Err("unknown importer".into()),
         }
     }
@@ -1286,7 +1349,10 @@ pub struct ImporterStatus {
     pub update_problem: Option<String>,
 }
 
-fn install_dir(app: &tauri::AppHandle, tool: &'static Tool) -> Result<InstallDir, String> {
+pub(crate) fn install_dir(
+    app: &tauri::AppHandle,
+    tool: &'static Tool,
+) -> Result<InstallDir, String> {
     let base = app
         .path()
         .app_local_data_dir()
@@ -1309,7 +1375,7 @@ fn usable_installation(dir: &InstallDir) -> Result<Option<(String, PathBuf)>, St
 }
 
 /// The cheap half of [`usable_installation`] for status: the manifest's contract, no hashing.
-fn installed_contract(dir: &InstallDir) -> Result<Option<(String, PathBuf)>, String> {
+pub(crate) fn installed_contract(dir: &InstallDir) -> Result<Option<(String, PathBuf)>, String> {
     let Some((version, path)) = dir.active() else {
         return Ok(None);
     };
@@ -1368,6 +1434,46 @@ pub async fn importer_status(
     })
 }
 
+/// Remove only this fixed app-owned add-on directory; never a frontend path.
+#[tauri::command]
+pub async fn remove_math_recognizer(app: tauri::AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let importers = app.state::<Importers>();
+        let math = app.state::<crate::recognition::math_process::MathProcess>();
+        let (importer, tool) = importers.get("math")?;
+        importer.begin(Activity::Installing)?;
+        let result = (|| {
+            math.shutdown();
+            let dir = install_dir(&app, tool)?;
+            let root =
+                fs::canonicalize(app.path().app_local_data_dir().map_err(|e| e.to_string())?)
+                    .map_err(|e| e.to_string())?;
+            let target = fs::canonicalize(&dir.0).map_err(|e| e.to_string())?;
+            if target.parent() != Some(root.as_path()) {
+                return Err("invalid add-on directory".into());
+            }
+            fs::remove_dir_all(target).map_err(|e| e.to_string())
+        })();
+        importer.set(Activity::Idle);
+        result
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+pub(crate) fn math_executable(app: &tauri::AppHandle) -> Result<Option<PathBuf>, String> {
+    if app.state::<Importers>().math.busy() {
+        return Err("math recognizer installation is busy".into());
+    }
+    let dir = install_dir(app, &MATH)?;
+    let Some((_, path)) = installed_contract(&dir)? else {
+        return Ok(None);
+    };
+    let manifest = verify_package(&MATH, &path)?;
+    check_contract(&MATH, &manifest, None, MATH.pinned.as_ref())?;
+    Ok(Some(path.join(MATH.executable())))
+}
+
 /// Downloads and installs the pinned release. Only ever called from the user's explicit action.
 #[tauri::command]
 pub fn importer_install(
@@ -1418,6 +1524,9 @@ pub fn importer_check_update(
     tool: String,
 ) -> Result<(), String> {
     let (importer, tool) = importers.get(&tool)?;
+    if tool.public_key.is_none() {
+        return Err("no signed update key is available".into());
+    }
     if !platform_supported() || importer.busy() {
         return Err("the importer cannot check for updates right now".into());
     }
@@ -1447,6 +1556,9 @@ pub fn importer_update(
     tool: String,
 ) -> Result<(), String> {
     let (importer, tool) = importers.get(&tool)?;
+    if tool.public_key.is_none() {
+        return Err("no signed update key is available".into());
+    }
     if !platform_supported() || importer.busy() {
         return Err("the importer cannot update right now".into());
     }
@@ -1525,7 +1637,9 @@ pub async fn import_pick_source(
     ui_language: Option<String>,
 ) -> Result<Option<SourceView>, String> {
     let (importer, tool) = importers.get(&tool)?;
-    let (filter, extensions) = tool.source_filter;
+    let (filter, extensions) = tool
+        .source_filter
+        .ok_or("this tool does not import notebooks")?;
     let Some(picked) = app
         .dialog()
         .file()
@@ -2295,6 +2409,87 @@ mod tests {
         )
         .unwrap();
         assert_eq!(read_report(&path).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn math_archive_uses_shared_install_and_detects_tampering() {
+        let home = tempfile::tempdir().unwrap();
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        writer
+            .start_file(
+                format!("{}/{}", package_folder(&MATH, VERSION), MATH.executable()),
+                zip::write::SimpleFileOptions::default(),
+            )
+            .unwrap();
+        writer.write_all(b"test helper").unwrap();
+        let bytes = writer.finish().unwrap().into_inner();
+        let archive = home.path().join("math.zip");
+        fs::write(&archive, &bytes).unwrap();
+        let release = pin(&MATH, &bytes);
+        let dir = InstallDir(home.path().join("installed"), &MATH);
+        fs::create_dir_all(&dir.0).unwrap();
+        install_archive(&dir, &archive, &release, &|_| good_probe(&MATH)).unwrap();
+        let (_, installed) = usable_installation(&dir).unwrap().unwrap();
+        fs::write(installed.join(MATH.executable()), b"tampered").unwrap();
+        assert!(usable_installation(&dir).is_err());
+        // A failed replacement does not erase the installed version.
+        assert!(
+            install_archive(&dir, &archive, &release, &|_| Err("probe failed".into())).is_err()
+        );
+        assert!(dir.active().is_some());
+    }
+
+    #[test]
+    fn math_manifest_requires_name_version_and_protocol() {
+        let manifest = PackageManifest {
+            version: "0.1.0".into(),
+            protocol_version: 1,
+            notebook_schema_version: 0,
+            target: TARGET.into(),
+            decoder_commit: String::new(),
+            files: vec![],
+        };
+        let mut report: ToolVersion = serde_json::from_str(r#"{"name":"goodtype-math-recognize","version":"0.1.0","protocolVersion":1,"model":{"id":"texteller-int8"}}"#).unwrap();
+        assert!(check_contract(&MATH, &manifest, Some(&report), None).is_ok());
+        report.protocol_version = 2;
+        assert!(check_contract(&MATH, &manifest, Some(&report), None).is_err());
+        report.protocol_version = 1;
+        report.name = "other".into();
+        assert!(check_contract(&MATH, &manifest, Some(&report), None).is_err());
+        assert!(MATH.pinned.is_none());
+        assert!(MATH.public_key.is_none());
+        assert!(!download_url_allowed(
+            &MATH,
+            "https://example.com/math.zip",
+            false
+        ));
+    }
+
+    #[test]
+    #[ignore = "needs MATH_RECOGNIZER_RELEASE_ZIP and MATH_RECOGNIZER_RELEASE_SHA256"]
+    fn real_math_release_installs_and_checks() {
+        let archive = PathBuf::from(
+            std::env::var("MATH_RECOGNIZER_RELEASE_ZIP").expect("set MATH_RECOGNIZER_RELEASE_ZIP"),
+        );
+        let sha256 = std::env::var("MATH_RECOGNIZER_RELEASE_SHA256")
+            .expect("set MATH_RECOGNIZER_RELEASE_SHA256");
+        let release = PinnedRelease {
+            version: "0.1.0",
+            url: "",
+            size: fs::metadata(&archive).unwrap().len(),
+            sha256: &sha256,
+            decoder_commit: "",
+        };
+        let home = tempfile::tempdir().unwrap();
+        // Set MATH_RECOGNIZER_INSTALL_INTO to the app's own `math-importer` folder to try an
+        // unpublished build in the app; the same verified install path is used either way.
+        let target = std::env::var("MATH_RECOGNIZER_INSTALL_INTO")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| home.path().join("installed"));
+        let dir = InstallDir(target, &MATH);
+        fs::create_dir_all(&dir.0).unwrap();
+        install_archive(&dir, &archive, &release, &|path| probe_tool(&MATH, path)).unwrap();
+        assert_eq!(usable_installation(&dir).unwrap().unwrap().0, "0.1.0");
     }
 
     /// Opt-in check against a real release package and real Goodnotes exports, which never belong

@@ -8,10 +8,10 @@
 import { DEFAULT_INK_Z_INDEX, type Stroke } from "../model";
 import { outlinePath, type OutlineTrim } from "./outline";
 import { patternedOutlinePoints } from "./pattern";
-import { transformedPoint } from "./selection";
+import { strokeBounds, transformedPoint } from "./selection";
 
 export type PaintedPath = {
-  /** The id of the first stroke in the run, so the keyed each block stays stable. */
+  /** The id of the first stroke in the bucket, so the keyed each block stays stable. */
   key: string;
   d: string;
   color: string;
@@ -43,8 +43,11 @@ const strataCache = new WeakMap<Stroke[], {
   strata: PaintedStratum[];
 }>();
 
+// A4 is 595 x 842 pt; 128 pt cells keep merged bounds near raster tiles of a few hundred px.
+const INK_CELL_SIZE_PT = 128;
+
 /**
- * The last merged path built for a run, keyed by the run's first stroke. A run made of the very
+ * The last merged path built for a bucket, keyed by the bucket's first stroke. A bucket made of the very
  * same silhouette strings reuses the very same path string, so the DOM sees an unchanged `d` and
  * re-parses nothing. That is what keeps an erase gesture from re-parsing the page's ink each frame.
  */
@@ -107,7 +110,7 @@ export function placedTrim(stroke: Stroke): OutlineTrim | undefined {
 /**
  * The committed strokes as painted paths, in paint order.
  *
- * Consecutive opaque strokes of one colour collapse into subpaths of a single path. Only
+ * Consecutive opaque strokes of one colour merge within spatial buckets of a run. Only
  * *consecutive* ones, and never translucent ones: merging changes paint order, and paint order is
  * visible. Reordering across an intervening colour would change what covers what, and collapsing
  * two overlapping highlighter sweeps into one fill would stop them darkening where they cross —
@@ -126,30 +129,42 @@ export function paintOrder(
   selectionScale = 1,
   liveIds?: ReadonlySet<string>,
 ): PaintedPath[] {
-  const runs: { first: Stroke; parts: string[]; color: string; opacity: number; selected?: boolean; live?: boolean }[] = [];
+  type Bucket = { first: Stroke; parts: string[] };
+  const paths: PaintedPath[] = [];
+  let run: { color: string; opacity: number; selected?: boolean; live?: boolean; buckets: Map<string, Bucket> } | undefined;
+  const flush = () => {
+    if (!run) return;
+    for (const { first, parts } of run.buckets.values()) {
+      paths.push({ key: first.id, d: joinedRun(first, parts), color: run.color, opacity: run.opacity,
+        ...(selectedIds ? { selected: run.selected } : {}) });
+    }
+  };
   for (const stroke of strokes) {
     const selected = selectedIds?.has(stroke.id);
     const live = liveIds?.has(stroke.id);
-    const d = silhouette(stroke, selected ? minimumWidthPt / selectionScale : minimumWidthPt);
+    const floor = selected ? minimumWidthPt / selectionScale : minimumWidthPt;
+    const d = silhouette(stroke, floor);
     if (!d) continue;
 
-    const previous = runs[runs.length - 1];
-    if (
-      previous &&
-      previous.opacity === 1 &&
-      stroke.opacity === 1 &&
-      previous.color === stroke.color
-      && previous.selected === selected
-      && previous.live === live
-    ) {
-      previous.parts.push(d);
-      continue;
+    if (!run || run.opacity !== 1 || stroke.opacity !== 1 || run.color !== stroke.color ||
+      run.selected !== selected || run.live !== live) {
+      flush();
+      run = { color: stroke.color, opacity: stroke.opacity, selected, live, buckets: new Map() };
     }
-    runs.push({ first: stroke, parts: [d], color: stroke.color, opacity: stroke.opacity, selected, live });
+    // Bounds already cache transformed page-space points by immutable stroke identity.
+    // Include the rendered width when deciding whether a stroke would inflate a cell.
+    const bounds = strokeBounds(stroke)!;
+    const width = silhouetteWidth(stroke, floor);
+    const cell = bounds.right - bounds.left + width > 2 * INK_CELL_SIZE_PT ||
+      bounds.bottom - bounds.top + width > 2 * INK_CELL_SIZE_PT
+      ? "large"
+      : `${Math.floor((bounds.left + bounds.right) / (2 * INK_CELL_SIZE_PT))},${Math.floor((bounds.top + bounds.bottom) / (2 * INK_CELL_SIZE_PT))}`;
+    const bucket = run.buckets.get(cell);
+    if (bucket) bucket.parts.push(d);
+    else run.buckets.set(cell, { first: stroke, parts: [d] });
   }
-  return runs.map(({ first, parts, color, opacity, selected }) => ({
-    key: first.id, d: joinedRun(first, parts), color, opacity, ...(selectedIds ? { selected } : {}),
-  }));
+  flush();
+  return paths;
 }
 
 /** Collapse ink into at most one SVG stratum between each pair of movable objects. */
@@ -175,9 +190,9 @@ export function paintStrata(
     cached.selectionScale === cachedScale && cached.live === live) return cached.strata;
   const selected = selectedIds?.length ? new Set(selectedIds) : undefined;
   const groups = new Map<number, Stroke[]>();
+  let band = 0;
   for (const stroke of orderedStrokes(strokes)) {
     const zIndex = stroke.zIndex ?? DEFAULT_INK_Z_INDEX;
-    let band = 0;
     while (band < boundaries.length && boundaries[band] <= zIndex) band += 1;
     const group = groups.get(band);
     if (group) group.push(stroke);

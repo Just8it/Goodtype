@@ -4,6 +4,7 @@
 //! `World`: embedded fonts, notebook-root-scoped file access, and a fixed clock. Remote
 //! packages are gated separately (see the `World` implementation).
 
+pub mod calculation;
 pub mod export;
 pub mod page_source;
 
@@ -152,9 +153,41 @@ fn checked_root_and_source(notebook_root: &Path, source: &str) -> Result<PathBuf
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Diagnostic {
     pub severity: DiagnosticSeverity,
     pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub column: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_line: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_column: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snippet: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    #[serde(skip)]
+    pub(crate) range: Option<std::ops::Range<usize>>,
+}
+
+impl Diagnostic {
+    /// An error with no source location, for failures outside any Typst file.
+    pub fn error(message: impl Into<String>) -> Self {
+        Self {
+            severity: DiagnosticSeverity::Error,
+            message: message.into(),
+            line: None,
+            column: None,
+            end_line: None,
+            end_column: None,
+            snippet: None,
+            file: None,
+            range: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -200,6 +233,39 @@ pub fn compile_block(
     notebook_root: &Path,
     request: &CompileRequest,
 ) -> Result<CompileResult, CompileError> {
+    compile_block_inner(notebook_root, request, None)
+}
+
+/// Project dependencies resolve exclusively from granted virtual paths; packages retain their policy.
+pub type GrantedFiles = std::collections::BTreeMap<String, Vec<u8>>;
+
+pub fn compile_block_granted(
+    notebook_root: &Path,
+    request: &CompileRequest,
+    files: &GrantedFiles,
+) -> Result<CompileResult, CompileError> {
+    compile_block_inner(notebook_root, request, Some(files))
+}
+
+fn compile_block_inner(
+    notebook_root: &Path,
+    request: &CompileRequest,
+    files: Option<&GrantedFiles>,
+) -> Result<CompileResult, CompileError> {
+    compile_block_with(
+        notebook_root,
+        request,
+        files,
+        embedded::package_loader(request.allow_remote_packages),
+    )
+}
+
+fn compile_block_with(
+    notebook_root: &Path,
+    request: &CompileRequest,
+    files: Option<&GrantedFiles>,
+    packages: &'static typst_kit::packages::SystemPackages,
+) -> Result<CompileResult, CompileError> {
     let root = checked_root_and_source(notebook_root, &request.source)?;
     if !request.width_pt.is_finite() || request.width_pt <= 0.0 || request.width_pt > MAX_WIDTH_PT {
         return Err(CompileError::InvalidWidth(request.width_pt));
@@ -218,44 +284,367 @@ pub fn compile_block(
         request.source
     );
 
-    Ok(embedded::compile_block(
+    let prefix = wrapper.len() - request.source.len();
+    let mut result = embedded::compile_block(
         &root,
         request.generation,
         wrapper,
         PREVIEW_PAD_PT,
-        request.allow_remote_packages,
-    ))
+        packages,
+        files,
+    );
+    remap_diagnostics(
+        &mut result,
+        &request.source,
+        prefix,
+        0,
+        request.source.len(),
+    );
+    Ok(result)
 }
 
-/// Validate the single-file preset contract without writing the candidate into a notebook.
-pub fn validate_preset_source(source: &str) -> Result<(), String> {
+/// Map a copied source segment back to caller coordinates. Generated spans are deliberately omitted.
+pub fn remap_diagnostics(
+    result: &mut CompileResult,
+    original: &str,
+    generated_start: usize,
+    original_start: usize,
+    length: usize,
+) {
+    for d in &mut result.diagnostics {
+        if d.file.is_some() {
+            continue;
+        }
+        let range = d.range.take().and_then(|r| {
+            (r.start >= generated_start && r.end <= generated_start + length).then(|| {
+                r.start - generated_start + original_start..r.end - generated_start + original_start
+            })
+        });
+        d.line = None;
+        d.column = None;
+        d.end_line = None;
+        d.end_column = None;
+        d.snippet = None;
+        if let Some(r) = range.filter(|r| original.get(r.clone()).is_some()) {
+            locate(d, original, r.clone());
+            d.range = Some(r);
+        }
+    }
+}
+
+/// Fill a diagnostic's 1-based line/column span and bounded snippet from `text[range]`.
+fn locate(d: &mut Diagnostic, text: &str, range: std::ops::Range<usize>) {
+    let position = |offset: usize| {
+        let before = &text[..offset];
+        (
+            Some(before.chars().filter(|&c| c == '\n').count() + 1),
+            Some(before.rsplit('\n').next().unwrap_or("").chars().count() + 1),
+        )
+    };
+    (d.line, d.column) = position(range.start);
+    (d.end_line, d.end_column) = position(range.end);
+    d.snippet = Some(text[range].chars().take(200).collect());
+}
+
+/// Point diagnostics raised inside an inlined preamble at the preset file itself, so a broken
+/// template names its own file and line instead of an unplaceable generated span.
+fn map_preamble_diagnostics(
+    result: &mut CompileResult,
+    preamble: &page_source::Preamble,
+    start: usize,
+) {
+    for d in &mut result.diagnostics {
+        if d.file.is_some() {
+            continue;
+        }
+        let Some(range) = d.range.clone() else {
+            continue;
+        };
+        if range.start < start || range.end > start + preamble.text.len() {
+            continue;
+        }
+        let (Some(from), Some(to)) = (
+            preamble.original_offset(range.start - start),
+            preamble.original_offset(range.end - start),
+        ) else {
+            continue;
+        };
+        if from > to
+            || !preamble.original.is_char_boundary(from)
+            || !preamble.original.is_char_boundary(to)
+        {
+            continue;
+        }
+        locate(d, &preamble.original, from..to);
+        d.file = Some(preamble.path.clone());
+        d.range = None;
+    }
+}
+
+/// Compile Page text as preview, export and the helper all see it: the shared composition,
+/// diagnostics mapped to the editable source or, inside a preamble preset, to that preset file.
+pub fn compile_page_text(
+    root: &Path,
+    page: &export::ExportPage,
+    request: &CompileRequest,
+) -> Result<CompileResult, String> {
+    compile_page_text_with(
+        root,
+        page,
+        request,
+        None,
+        embedded::package_loader(request.allow_remote_packages),
+    )
+    .map(|(result, _)| result)
+}
+
+fn compile_page_text_with(
+    root: &Path,
+    page: &export::ExportPage,
+    request: &CompileRequest,
+    files: Option<&GrantedFiles>,
+    packages: &'static typst_kit::packages::SystemPackages,
+) -> Result<(CompileResult, Option<page_source::PresetForm>), String> {
+    let composed = export::compose_page_text(
+        root,
+        page,
+        &request.source,
+        files,
+        request.allow_remote_packages,
+    )?;
+    let original_start = if composed.prepared.preamble.is_some() {
+        composed.prepared.header_bytes
+    } else {
+        0
+    };
+    let body = &request.source[original_start..];
+    let start = export::page_text_body_offset(page, &composed.source, body);
+    let mut result = compile_block_with(
+        root,
+        &CompileRequest {
+            source: composed.source.clone(),
+            ..request.clone()
+        },
+        files,
+        packages,
+    )
+    .map_err(|e| e.to_string())?;
+    if let (Some(preamble), Some(preamble_start)) =
+        (&composed.prepared.preamble, composed.preamble_start)
+    {
+        map_preamble_diagnostics(&mut result, preamble, preamble_start);
+    }
+    match start {
+        Some(start) => remap_diagnostics(
+            &mut result,
+            &request.source,
+            start,
+            original_start,
+            body.len(),
+        ),
+        None => remap_diagnostics(&mut result, &request.source, usize::MAX / 2, 0, 0),
+    }
+    Ok((result, composed.prepared.form))
+}
+
+/// Revision of [`PRESET_SAMPLE`]. Change both together: previews and candidate hashes that were
+/// computed against the old sample must not be mistaken for current ones.
+pub const PRESET_SAMPLE_REVISION: &str = "goodtype-preset-sample-1";
+
+/// The one representative page every preset is checked against — ordinary validation now, the
+/// helper's preset preview later. Standard library only, so it compiles offline anywhere:
+/// headings, prose, inline and display math, units, a list, a table and a small plot.
+pub const PRESET_SAMPLE: &str = r##"= Damped oscillator
+== Model
+
+A mass $m$ on a spring of stiffness $k$ oscillates with angular frequency
+$omega_0 = sqrt(k slash m)$. Light damping, ratio $zeta$, lets it ring down slowly.
+
+$ x(t) = A e^(-zeta omega_0 t) cos(omega_d t + phi), quad omega_d = omega_0 sqrt(1 - zeta^2) $
+
+- Mass: $m = 0.50 thin "kg"$
+- Stiffness: $k = 200 thin "N/m"$
+- Damping ratio: $zeta = 0.05$
+
+#table(
+  columns: 3,
+  [*Quantity*], [*Symbol*], [*Value*],
+  [Natural frequency], [$f_0$], [$3.18 thin "Hz"$],
+  [Period], [$T_0$], [$0.314 thin "s"$],
+)
+
+#figure(
+  box(width: 160pt, height: 60pt, {
+    let points = range(0, 41).map(i => {
+      let t = i / 40
+      (t * 160pt, 30pt - 26pt * calc.exp(-2.5 * t) * calc.cos(6 * calc.pi * t))
+    })
+    place(line(start: (0pt, 30pt), end: (160pt, 30pt), stroke: 0.4pt + gray))
+    place(curve(stroke: 0.8pt, curve.move(points.first()), ..points.slice(1).map(p => curve.line(p))))
+  }),
+  caption: [Displacement over two periods],
+)
+"##;
+
+/// The page the sample is laid out on: A4, plain white, ordinary Page text margins.
+pub fn preset_sample_page() -> export::ExportPage {
+    export::ExportPage {
+        calculation: None,
+        width_pt: 595.28,
+        height_pt: 841.89,
+        background: goodtype_core::PageBackground::Plain {
+            color: "#ffffff".into(),
+        },
+        page_text_baseline_grid: false,
+        shared_style: None,
+        page_typst: None,
+        blocks: vec![],
+        strokes: vec![],
+        shapes: vec![],
+        images: vec![],
+    }
+}
+
+/// What checking a preset against the representative sample found. Warnings — a missing font,
+/// say — are kept even when the sample renders.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PresetCheck {
+    pub form: Option<page_source::PresetForm>,
+    pub sample_revision: &'static str,
+    /// The sample rendered without errors.
+    pub rendered: bool,
+    pub width_pt: Option<f64>,
+    pub height_pt: Option<f64>,
+    pub diagnostics: Vec<Diagnostic>,
+    #[serde(skip)]
+    pub svg: Option<String>,
+}
+
+impl PresetCheck {
+    /// The first error message, for callers that must refuse an invalid preset.
+    pub fn error(&self) -> Option<String> {
+        if self.rendered {
+            return None;
+        }
+        Some(
+            self.diagnostics
+                .iter()
+                .find(|d| d.severity == DiagnosticSeverity::Error)
+                .map(|d| d.message.clone())
+                .unwrap_or_else(|| "Preset did not produce valid Typst output".into()),
+        )
+    }
+}
+
+/// Check a preset file already in the notebook's `styles/`, read from disk exactly as a page
+/// using it would: its relative imports resolve beside it. Packages follow the caller's policy.
+pub fn check_notebook_preset(
+    root: &Path,
+    filename: &str,
+    allow_remote_packages: bool,
+) -> Result<PresetCheck, String> {
+    check_preset(
+        root,
+        filename,
+        None,
+        allow_remote_packages,
+        embedded::package_loader(allow_remote_packages),
+    )
+}
+
+/// Check a candidate preset that is not in any notebook yet (an import), as a single file.
+pub fn check_preset_candidate(
+    source: &str,
+    allow_remote_packages: bool,
+) -> Result<PresetCheck, String> {
+    check_candidate_with(
+        source,
+        allow_remote_packages,
+        embedded::package_loader(allow_remote_packages),
+    )
+}
+
+fn check_candidate_with(
+    source: &str,
+    allow_remote_packages: bool,
+    packages: &'static typst_kit::packages::SystemPackages,
+) -> Result<PresetCheck, String> {
     if source.len() > MAX_SOURCE_BYTES {
         return Err(CompileError::SourceTooLarge(source.len()).to_string());
     }
     let root = tempfile::tempdir().map_err(|error| error.to_string())?;
-    let result = compile_block(
+    std::fs::create_dir(root.path().join("styles")).map_err(|error| error.to_string())?;
+    std::fs::write(root.path().join("styles/preset.typ"), source)
+        .map_err(|error| error.to_string())?;
+    check_preset(
         root.path(),
-        &CompileRequest {
-            source: format!(
-                "{source}\n#show: preset.with(rhythm: 16pt)\nGoodtype preset validation"
-            ),
-            width_pt: 360.0,
-            generation: 0,
-            allow_remote_packages: false,
-        },
+        "preset.typ",
+        None,
+        allow_remote_packages,
+        packages,
     )
-    .map_err(|error| error.to_string())?;
-    if result.svg.is_some() {
-        return Ok(());
-    }
-    Err(result
-        .diagnostics
-        .into_iter()
-        .filter(|diagnostic| diagnostic.severity == DiagnosticSeverity::Error)
-        .map(|diagnostic| diagnostic.message)
-        .next()
-        .unwrap_or_else(|| "Preset did not produce valid Typst output".into()))
 }
+
+/// Check a preset from granted bytes only (`/styles/<filename>` and its dependencies in
+/// `files`). Notebook reads never fall back to disk. Package imports follow the caller's
+/// policy, independently of the project-file grant.
+pub fn check_preset_granted(
+    root: &Path,
+    filename: &str,
+    files: &GrantedFiles,
+    allow_remote_packages: bool,
+) -> Result<PresetCheck, String> {
+    check_preset(
+        root,
+        filename,
+        Some(files),
+        allow_remote_packages,
+        embedded::package_loader(allow_remote_packages),
+    )
+}
+
+fn check_preset(
+    root: &Path,
+    filename: &str,
+    files: Option<&GrantedFiles>,
+    allow_remote_packages: bool,
+    packages: &'static typst_kit::packages::SystemPackages,
+) -> Result<PresetCheck, String> {
+    let page = preset_sample_page();
+    let width_pt = export::page_text_width(&page);
+    let source = format!(
+        "#import \"/styles/{filename}\": preset\n#show: preset.with(rhythm: goodtype_rhythm)\n\n{PRESET_SAMPLE}"
+    );
+    let (result, form) = compile_page_text_with(
+        root,
+        &page,
+        &CompileRequest {
+            source,
+            width_pt,
+            generation: 0,
+            allow_remote_packages,
+        },
+        files,
+        packages,
+    )?;
+    let rendered = result.svg.is_some()
+        && result
+            .diagnostics
+            .iter()
+            .all(|d| d.severity != DiagnosticSeverity::Error);
+    Ok(PresetCheck {
+        form,
+        sample_revision: PRESET_SAMPLE_REVISION,
+        rendered,
+        width_pt: result.width_pt,
+        height_pt: result.height_pt,
+        diagnostics: result.diagnostics,
+        svg: result.svg,
+    })
+}
+
+pub use embedded::{PresetPackageBytes, with_preset_packages};
 
 #[cfg(test)]
 mod tests {
@@ -627,10 +1016,133 @@ mod tests {
             Err(CompileError::InvalidWidth(_))
         ));
     }
+}
+
+#[cfg(test)]
+#[path = "preset_tests.rs"]
+mod preset_tests;
+
+/// Compile Page text against a granted snapshot, retaining caller-relative diagnostics.
+/// Project reads are grant-only; packages follow the request's download policy.
+pub fn compile_page_text_granted(
+    root: &Path,
+    page: &export::ExportPage,
+    request: &CompileRequest,
+    files: &GrantedFiles,
+) -> Result<CompileResult, String> {
+    compile_page_text_with(
+        root,
+        page,
+        request,
+        Some(files),
+        embedded::package_loader(request.allow_remote_packages),
+    )
+    .map(|(result, _)| result)
+}
+#[cfg(test)]
+mod helper_tests {
+    use super::*;
+    fn request(source: &str) -> CompileRequest {
+        CompileRequest {
+            source: source.into(),
+            width_pt: 300.0,
+            generation: 7,
+            allow_remote_packages: false,
+        }
+    }
+    #[test]
+    fn diagnostic_snippets_are_bounded_in_characters() {
+        let root = tempfile::tempdir().unwrap();
+        let name = "x".repeat(300);
+        let r = compile_block(root.path(), &request(&format!("#{name}"))).unwrap();
+        assert_eq!(
+            r.diagnostics[0].snippet.as_ref().unwrap().chars().count(),
+            200
+        );
+        assert_eq!(r.diagnostics[0].end_column, Some(302));
+    }
 
     #[test]
-    fn validates_the_preset_contract() {
-        assert!(validate_preset_source("#let preset(body, rhythm: 16pt) = body").is_ok());
-        assert!(validate_preset_source("#let something_else = 1").is_err());
+    fn granted_world_denies_all_file_routes_and_transitive_reads_without_leaks() {
+        let root = tempfile::tempdir().unwrap();
+        let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="10" height="10" fill="red"/></svg>"#;
+        for (source, path, bytes) in [
+            (
+                "#read(\"/secret.typ\")",
+                "/secret.typ",
+                b"SECRET_UNSHARED".as_slice(),
+            ),
+            (
+                "#include \"/secret.typ\"",
+                "/secret.typ",
+                b"SECRET_UNSHARED".as_slice(),
+            ),
+            (
+                "#import \"/secret.typ\": value\n#value",
+                "/secret.typ",
+                b"#let value = \"SECRET_UNSHARED\"".as_slice(),
+            ),
+            ("#image(\"/secret.svg\")", "/secret.svg", svg.as_slice()),
+            (
+                "#let p = \"/secret\" + \".typ\"\n#read(p)",
+                "/secret.typ",
+                b"SECRET_UNSHARED".as_slice(),
+            ),
+        ] {
+            std::fs::write(root.path().join(&path[1..]), bytes).unwrap();
+            let r =
+                compile_block_granted(root.path(), &request(source), &GrantedFiles::new()).unwrap();
+            assert!(r.svg.is_none(), "{source}");
+            assert!(
+                r.diagnostics
+                    .iter()
+                    .any(|d| d.message.contains(&format!("not shared: {path}"))),
+                "{:?}",
+                r.diagnostics
+            );
+            assert!(!format!("{:?}", r.diagnostics).contains("SECRET_UNSHARED"));
+            let files = GrantedFiles::from([(path.into(), bytes.to_vec())]);
+            assert!(
+                compile_block_granted(root.path(), &request(source), &files)
+                    .unwrap()
+                    .svg
+                    .is_some(),
+                "{source}"
+            );
+            assert!(
+                compile_block(root.path(), &request(source))
+                    .unwrap()
+                    .svg
+                    .is_some()
+            );
+        }
+        let mut files =
+            GrantedFiles::from([("/chain.typ".into(), b"#include \"/secret.typ\"".to_vec())]);
+        let r = compile_block_granted(root.path(), &request("#include \"/chain.typ\""), &files)
+            .unwrap();
+        assert!(r.svg.is_none());
+        assert!(!format!("{:?}", r.diagnostics).contains("SECRET_UNSHARED"));
+        assert_eq!(r.diagnostics[0].file.as_deref(), Some("/chain.typ"));
+        files.insert("/secret.typ".into(), b"Shared now".to_vec());
+        assert!(
+            compile_block_granted(root.path(), &request("#include \"/chain.typ\""), &files)
+                .unwrap()
+                .svg
+                .is_some()
+        );
+    }
+    #[test]
+    fn diagnostic_wrapper_and_unicode_character_positions() {
+        let root = tempfile::tempdir().unwrap();
+        let r = compile_block(root.path(), &request("Hello\nä #unknown_name")).unwrap();
+        let d = &r.diagnostics[0];
+        assert_eq!(
+            (d.line, d.column, d.end_line, d.end_column),
+            (Some(2), Some(4), Some(2), Some(16))
+        );
+        assert_eq!(d.snippet.as_deref(), Some("unknown_name"));
     }
 }
+
+#[cfg(test)]
+mod recipe_tests;

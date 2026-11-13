@@ -6,6 +6,9 @@
  * Grouped here by what the frontend is doing rather than by which Rust file answers, because a
  * caller reaching for "record that this opened" should not have to know which module owns it.
  */
+import { get } from "svelte/store";
+import type { ExportInclude } from "../workspace/exportTarget";
+import { locale } from "../i18n";
 import { invoke } from "@tauri-apps/api/core";
 import type { AppSettings, RecentNotebook } from "../settings";
 
@@ -66,8 +69,13 @@ export function exportNotebookPdf(
   root: string,
   outputName: string,
   pageTextBaselineGrid: boolean,
+  splitCalculationsA4 = false,
+  /** Omitted exports every page; Rust rejects an id the notebook does not have. */
+  pageIds?: string[],
+  /** Which kinds of content to keep. Omitted keeps everything. */
+  include?: ExportInclude,
 ): Promise<string> {
-  return invoke<string>("export_notebook_pdf", { root, outputName, pageTextBaselineGrid });
+  return invoke<string>("export_notebook_pdf", { root, outputName, pageTextBaselineGrid, splitCalculationsA4, uiLanguage: get(locale), pageIds: pageIds ?? null, include: include ?? null });
 }
 
 /** See the note in `storePastedImage` about why the bytes are converted here. */
@@ -75,9 +83,9 @@ export function writeNotebookCover(root: string, png: Uint8Array): Promise<void>
   return invoke("write_notebook_cover", { root, png: Array.from(png) });
 }
 
-/** Rust renders the canonical first page in memory, without creating a user export. */
-export function renderNotebookCover(root: string, pageTextBaselineGrid: boolean): Promise<ArrayBuffer> {
-  return invoke<ArrayBuffer>("render_notebook_cover", { root, pageTextBaselineGrid });
+/** Rust renders the canonical first page, or `pageId`, in memory, without creating a user export. */
+export function renderNotebookCover(root: string, pageTextBaselineGrid: boolean, pageId?: string): Promise<ArrayBuffer> {
+  return invoke<ArrayBuffer>("render_notebook_cover", { root, pageTextBaselineGrid, pageId });
 }
 
 export function writeMetrics(root: string, metrics: unknown): Promise<void> {

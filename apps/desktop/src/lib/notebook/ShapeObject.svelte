@@ -16,6 +16,8 @@
     type ShapeAnchor,
   } from "../shape/edit";
   import { describeShape, shapeBounds, shapeDashArray, shapePath } from "../shape/geometry";
+  import { toLocalPoint, toPagePoint } from "../shape/hit";
+  import { SNAP_RADIUS_SCREEN_PT, snapPoint, snapTargets } from "../shape/snap";
   import type { ShapeEditCommit, ShapeView } from "./pageView";
 
   type Gesture = {
@@ -27,6 +29,8 @@
     anchor?: ShapeAnchor;
     /// Where the rotation handle was grabbed, in the shape's own coordinates.
     grabbed?: { x: number; y: number };
+    /// Ends of other shapes a dragged line end may meet, on the page.
+    targets: Point[];
   };
 
   let {
@@ -37,6 +41,8 @@
     pageWidthPt,
     pageHeightPt,
     zoom = 1,
+    endSnap = false,
+    snapShapes = [],
     toPageDelta,
     onSelect,
     onChange,
@@ -56,6 +62,9 @@
     pageWidthPt: number;
     pageHeightPt: number;
     zoom?: number;
+    /// Whether a dragged line end meets the ends and corners of `snapShapes`; Alt bypasses it.
+    endSnap?: boolean;
+    snapShapes?: readonly ShapeView[];
     toPageDelta: (screenDx: number, screenDy: number) => Point;
     onSelect?: () => void;
     onChange?: (shape: ShapeView, commit?: ShapeEditCommit) => void;
@@ -64,6 +73,8 @@
 
   let preview = $state.raw(untrack(() => shape));
   let gesture = $state<Gesture | null>(null);
+  /// The end a dragged line handle has met, marked until the drag ends.
+  let snapRing = $state<Point | null>(null);
   const path = $derived(shapePath(preview.geometry));
   const bounds = $derived(shapeBounds(preview.geometry));
   const anchors = $derived(anchorPoints(preview.geometry));
@@ -100,6 +111,9 @@
       start: preview,
       anchor,
       grabbed: kind === "rotate" ? rotationHandle : undefined,
+      targets: endSnap && (anchor === "line-start" || anchor === "line-end")
+        ? snapTargets(snapShapes, preview.id)
+        : [],
     };
   }
 
@@ -119,15 +133,38 @@
       return;
     }
     const local = localDelta(page, gesture.start.rotation, gesture.start.scale);
-    preview = gesture.kind === "resize"
-      ? resizeShape(gesture.start, local, event.shiftKey)
+    if (gesture.kind === "resize") {
+      preview = resizeShape(gesture.start, local, event.shiftKey);
+      return;
+    }
+    const snapped = snappedLineEnd(gesture, local, event);
+    snapRing = snapped?.target ?? null;
+    preview = snapped
+      ? moveShapeAnchor(gesture.start, gesture.anchor!, snapped.local)
       : moveShapeAnchor(gesture.start, gesture.anchor!, local, event.shiftKey);
+  }
+
+  /// A dragged line end that has come near another shape's end: the target, and the delta in the
+  /// line's own frame that puts the end exactly on it. The angle snap would pull it off again.
+  function snappedLineEnd(active: Gesture, local: Point, event: PointerEvent): { target: Point; local: Point } | null {
+    const geometry = active.start.geometry;
+    if (event.altKey || active.targets.length === 0 || geometry.kind !== "line") return null;
+    const end = active.anchor === "line-start" ? geometry.start : geometry.end;
+    const target = snapPoint(
+      toPagePoint(active.start, { x: end.x + local.x, y: end.y + local.y }),
+      active.targets,
+      SNAP_RADIUS_SCREEN_PT / zoom,
+    );
+    if (!target) return null;
+    const onTarget = toLocalPoint(active.start, target);
+    return { target, local: { x: onTarget.x - end.x, y: onTarget.y - end.y } };
   }
 
   function finish(event: PointerEvent) {
     if (!gesture || event.pointerId !== gesture.pointerId) return;
     const changed = preview !== gesture.start;
     gesture = null;
+    snapRing = null;
     if (changed) onChange?.(preview);
   }
 
@@ -135,6 +172,7 @@
     if (!gesture || event.pointerId !== gesture.pointerId) return;
     preview = gesture.start;
     gesture = null;
+    snapRing = null;
   }
 
   function objectKeydown(event: KeyboardEvent) {
@@ -371,6 +409,9 @@
         {/each}
       {/if}
   </g>
+  {#if snapRing}
+    <circle class="snap-ring" cx={snapRing.x} cy={snapRing.y} r={4 / zoom} stroke-width={1.5 / zoom}></circle>
+  {/if}
 </svg>
 {/if}
 
@@ -388,8 +429,9 @@
   .control-hit.rotate { cursor: grab; }
   .control-hit.rotate:active { cursor: grabbing; }
   .editing .control-hit { cursor: move; }
-  .control-hit:focus-visible { fill: rgb(76 141 240 / 24%); }
+  .control-hit:focus-visible { fill: var(--accent-fill); }
   .control { fill: var(--paper); stroke: var(--blueprint); stroke-width: 1.5px; pointer-events: none; }
   .control.handle { fill: var(--blueprint); }
   .handle-line { stroke: var(--blueprint); opacity: 0.72; pointer-events: none; }
+  .snap-ring { fill: none; stroke: var(--paper-select); pointer-events: none; }
 </style>

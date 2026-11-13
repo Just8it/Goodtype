@@ -52,25 +52,34 @@ struct RecoveryIntent {
     candidate: NotebookSnapshot,
 }
 
+/// The binary codec bytes of each ink layer exactly as they were placed in the recovery
+/// envelope, in `ink_layers` order. A `.ink` canonical file is the same codec output, so the
+/// transaction writes these bytes instead of encoding every candidate layer a second time.
+pub(crate) struct StagedInk {
+    pub(crate) previous: Vec<Vec<u8>>,
+    pub(crate) candidate: Vec<Vec<u8>>,
+}
+
 /// Record both states before a transactional write touches canonical files.
 pub(crate) fn stage_transaction(
     root: &Path,
     previous: &NotebookSnapshot,
     candidate: &NotebookSnapshot,
-) -> Result<(), StorageError> {
+) -> Result<StagedInk, StorageError> {
     if root.join(layout::PENDING_TRANSACTION).exists()
         || root.join(layout::LEGACY_PENDING_TRANSACTION).exists()
     {
         return invalid("a pending recovery transaction already exists");
     }
-    let bytes = encode_intent(previous, candidate)?;
-    write_atomic(root, layout::PENDING_TRANSACTION, &bytes)
+    let (bytes, staged) = encode_intent(previous, candidate)?;
+    write_atomic(root, layout::PENDING_TRANSACTION, &bytes)?;
+    Ok(staged)
 }
 
 fn encode_intent(
     previous: &NotebookSnapshot,
     candidate: &NotebookSnapshot,
-) -> Result<Vec<u8>, StorageError> {
+) -> Result<(Vec<u8>, StagedInk), StorageError> {
     let mut payload_bytes = 0usize;
     let (previous, previous_layers) = store_snapshot(previous, &mut payload_bytes)?;
     let (candidate, candidate_layers) = store_snapshot(candidate, &mut payload_bytes)?;
@@ -95,11 +104,17 @@ fn encode_intent(
     bytes.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
     bytes.extend_from_slice(&metadata_len.to_le_bytes());
     bytes.extend_from_slice(&metadata);
-    for layer in previous_layers.into_iter().chain(candidate_layers) {
-        bytes.extend_from_slice(&layer);
+    for layer in previous_layers.iter().chain(&candidate_layers) {
+        bytes.extend_from_slice(layer);
     }
     debug_assert_eq!(bytes.len(), total_len);
-    Ok(bytes)
+    Ok((
+        bytes,
+        StagedInk {
+            previous: previous_layers,
+            candidate: candidate_layers,
+        },
+    ))
 }
 
 fn store_snapshot(
@@ -107,6 +122,7 @@ fn store_snapshot(
     payload_bytes: &mut usize,
 ) -> Result<(StoredSnapshot, Vec<Vec<u8>>), StorageError> {
     let metadata_snapshot = NotebookSnapshot {
+        calculations: snapshot.calculations.clone(),
         manifest: snapshot.manifest.clone(),
         page: snapshot.page.clone(),
         blocks: snapshot.blocks.clone(),
@@ -452,6 +468,39 @@ pub fn restore_recovery_candidate(
     let mut candidate = intent.candidate;
     let current = observe_page(&root, &candidate.page.id, history)?;
 
+    if let Some(reference) = &candidate.page.calculation {
+        let current_reference = current
+            .page
+            .calculation
+            .as_ref()
+            .ok_or_else(|| invalid_error("recovery page type changed"))?;
+        if reference != current_reference {
+            return invalid("recovery calculation identity changed");
+        }
+        let original = intent
+            .previous
+            .calculations
+            .iter()
+            .find(|file| file.path == reference.source_path)
+            .ok_or_else(|| invalid_error("recovery calculation has no confirmed source"))?;
+        let current_file = current
+            .calculations
+            .iter()
+            .find(|file| file.path == reference.source_path)
+            .ok_or_else(|| invalid_error("current calculation source is missing"))?;
+        if current_file.bytes != original.bytes {
+            return Err(StorageError::ExternalChange("calculation changed since this recovery candidate; preserve it before replacing shared parts".into()));
+        }
+        let current_document = crate::calculation::Calculation::parse(&current_file.bytes)?;
+        let file = candidate
+            .calculations
+            .iter_mut()
+            .find(|file| file.path == reference.source_path)
+            .ok_or_else(|| invalid_error("recovery calculation source is missing"))?;
+        let mut document = crate::calculation::Calculation::parse(&file.bytes)?;
+        document.set_revision_after(current_document.revision())?;
+        file.bytes = document.bytes()?;
+    }
     let current_reference = page_reference(&current.manifest, &candidate.page.id)?;
     let candidate_reference = page_reference(&candidate.manifest, &candidate.page.id)?;
     if current_reference.path != candidate_reference.path {
@@ -511,7 +560,7 @@ mod tests {
     fn binary_envelope_round_trips_and_rejects_bad_bounds() {
         let previous = snapshot().without_assets();
         let candidate = changed(&previous);
-        let encoded = encode_intent(&previous, &candidate).unwrap();
+        let (encoded, _) = encode_intent(&previous, &candidate).unwrap();
         let decoded = decode_binary(&encoded).unwrap();
         assert_eq!(
             decoded.candidate.ink_layers[0].strokes[0].points[0].x,
@@ -526,6 +575,37 @@ mod tests {
         let mut trailing = encoded;
         trailing.push(0);
         assert!(decode_binary(&trailing).is_err());
+    }
+
+    /// Finding 3: each candidate layer is encoded once. The blob in the recovery envelope, the
+    /// bytes handed to the canonical write, and the `.ink` file on disk are the same bytes.
+    #[test]
+    fn canonical_ink_bytes_are_the_envelope_candidate_bytes() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("notebook");
+        create_notebook(&root, &snapshot()).unwrap();
+        let canonical = canonical_root(&root).unwrap();
+        let previous = open_notebook(&root).unwrap();
+        let candidate = changed(&previous);
+
+        let (envelope, staged) = encode_intent(&previous, &candidate).unwrap();
+        assert_eq!(staged.candidate.len(), candidate.ink_layers.len());
+        assert!(envelope.ends_with(&staged.candidate.concat()));
+        let decoded = decode_binary(&envelope).unwrap();
+        assert_eq!(
+            ink_codec::encode(&decoded.candidate.ink_layers[0]).unwrap(),
+            staged.candidate[0]
+        );
+
+        save_transactional(&canonical, &previous, &candidate).unwrap();
+        assert_eq!(
+            fs::read(root.join(&candidate.page.ink_layers[0].path)).unwrap(),
+            staged.candidate[0]
+        );
+        assert_eq!(
+            open_notebook(&root).unwrap().ink_layers[0].strokes[0].points[0].x,
+            160.0
+        );
     }
 
     #[test]
@@ -788,5 +868,80 @@ mod tests {
         fs::write(recovery.join("notes.txt"), b"keep").unwrap();
         commit_notebook(&root, &mut history, changed).unwrap();
         assert_eq!(fs::read(recovery.join("notes.txt")).unwrap(), b"keep");
+    }
+    #[test]
+    fn interrupted_calculation_writes_roll_back_and_refuse_stale_shared_restore() {
+        use crate::calculation::Calculation;
+        use crate::storage::{
+            CalculationHistory, CellOperation, create_calculation_page, edit_calculation,
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        create_notebook(root, &snapshot()).unwrap();
+        let first = create_calculation_page(
+            root,
+            "2026-11-02T12:00:00Z",
+            &PagePosition::Last,
+            "Task",
+            None,
+        )
+        .unwrap();
+        let second = create_calculation_page(
+            root,
+            "2026-11-02T12:00:01Z",
+            &PagePosition::Last,
+            "Part",
+            Some(&first.page.id),
+        )
+        .unwrap();
+        let previous = open_page(root, &first.page.id).unwrap();
+        let mut candidate = previous.clone();
+        let mut document = Calculation::parse(&candidate.calculations[0].bytes).unwrap();
+        document.cells[0].source = "recovered = 1".into();
+        document.advance_revision().unwrap();
+        candidate.calculations[0].bytes = document.bytes().unwrap();
+        candidate.page.revision += 1;
+        let canonical = canonical_root(root).unwrap();
+        stage_transaction(&canonical, &previous, &candidate).unwrap();
+        fs::write(
+            root.join(&candidate.calculations[0].path),
+            &candidate.calculations[0].bytes,
+        )
+        .unwrap();
+        let reopened = open_page(root, &first.page.id).unwrap();
+        assert_eq!(
+            reopened.calculations[0].bytes,
+            previous.calculations[0].bytes
+        );
+        let recovered = list_recovery_candidates(root).unwrap().remove(0);
+        let document = Calculation::parse(&reopened.calculations[0].bytes).unwrap();
+        let part = second.page.calculation.as_ref().unwrap().part_id.as_str();
+        let cell = document
+            .cells
+            .iter()
+            .find(|cell| cell.part_id() == Some(part))
+            .unwrap();
+        edit_calculation(
+            root,
+            &second.page.id,
+            &mut CalculationHistory::default(),
+            CellOperation::Source {
+                cell_id: cell.id.clone(),
+                expected_source: "".into(),
+                source: "newer = 2".into(),
+            },
+            "2026-11-02T12:01:00Z",
+        )
+        .unwrap();
+        let saved = fs::read(root.join(&candidate.calculations[0].path)).unwrap();
+        assert!(matches!(
+            restore_recovery_candidate(root, &mut NotebookHistory::default(), &recovered.file_name),
+            Err(StorageError::ExternalChange(_))
+        ));
+        assert_eq!(
+            fs::read(root.join(&candidate.calculations[0].path)).unwrap(),
+            saved
+        );
+        assert_eq!(list_recovery_candidates(root).unwrap().len(), 1);
     }
 }

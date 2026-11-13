@@ -20,7 +20,7 @@ use typst::syntax::Side;
 use typst::syntax::{FileId, RootedPath, Source, VirtualPath, VirtualRoot};
 use typst::text::{Font, FontBook};
 use typst::utils::LazyHash;
-use typst::{Library, LibraryExt, World};
+use typst::{Library, LibraryExt, World, WorldExt};
 use typst_ide::{CompletionKind, IdeWorld, Tooltip};
 use typst_kit::downloader::{Downloader, SystemDownloader};
 use typst_kit::fonts::FontStore;
@@ -38,20 +38,18 @@ pub(crate) fn compile_block(
     generation: u64,
     wrapper: String,
     pad_pt: f64,
-    allow_remote_packages: bool,
+    packages: &'static SystemPackages,
+    files: Option<&crate::GrantedFiles>,
 ) -> CompileResult {
-    let world = BlockWorld::for_main(
-        "main.typ",
-        wrapper,
-        root.to_path_buf(),
-        allow_remote_packages,
-    );
+    let mut world = BlockWorld::for_main("main.typ", wrapper, root.to_path_buf(), false)
+        .with_packages(packages);
+    world.grant(files);
     let compiled = typst::compile::<PagedDocument>(&world);
 
     let mut diagnostics: Vec<Diagnostic> = compiled
         .warnings
         .iter()
-        .map(diagnostic_from_source)
+        .map(|d| diagnostic_from_source(&world, d))
         .collect();
 
     match compiled.output {
@@ -82,7 +80,7 @@ pub(crate) fn compile_block(
             },
         },
         Err(errors) => {
-            diagnostics.extend(errors.iter().map(diagnostic_from_source));
+            diagnostics.extend(errors.iter().map(|d| diagnostic_from_source(&world, d)));
             CompileResult {
                 generation,
                 svg: None,
@@ -107,12 +105,33 @@ pub(crate) fn export_pdf(
     overlay: Vec<(String, Vec<u8>)>,
     allow_remote_packages: bool,
 ) -> Result<Vec<u8>, String> {
+    let document = export_document(
+        root,
+        main_name,
+        main_source,
+        overlay,
+        allow_remote_packages,
+        None,
+    )?;
+    typst_pdf::pdf(&document, &typst_pdf::PdfOptions::default())
+        .map_err(|errors| diagnostic_messages(&errors))
+}
+
+pub(crate) fn export_document(
+    root: &Path,
+    main_name: &str,
+    main_source: String,
+    overlay: Vec<(String, Vec<u8>)>,
+    allow_remote_packages: bool,
+    files: Option<&crate::GrantedFiles>,
+) -> Result<PagedDocument, String> {
     let mut world = BlockWorld::for_main(
         main_name,
         main_source,
         root.to_path_buf(),
         allow_remote_packages,
     );
+    world.grant(files);
     for (name, bytes) in overlay {
         world.insert_binary(&name, bytes);
     }
@@ -122,11 +141,10 @@ pub(crate) fn export_pdf(
         .output
         .map_err(|errors| diagnostic_messages(&errors))?;
 
-    typst_pdf::pdf(&document, &typst_pdf::PdfOptions::default())
-        .map_err(|errors| diagnostic_messages(&errors))
+    Ok(document)
 }
 
-fn diagnostic_messages(diagnostics: &[SourceDiagnostic]) -> String {
+pub(crate) fn diagnostic_messages(diagnostics: &[SourceDiagnostic]) -> String {
     diagnostics
         .iter()
         .map(|diagnostic| diagnostic.message.as_str())
@@ -234,14 +252,47 @@ pub(crate) fn hover(
     })
 }
 
-fn diagnostic_from_source(diagnostic: &SourceDiagnostic) -> Diagnostic {
-    Diagnostic {
+fn diagnostic_from_source(world: &BlockWorld, diagnostic: &SourceDiagnostic) -> Diagnostic {
+    let mut d = Diagnostic {
         severity: match diagnostic.severity {
             Severity::Error => DiagnosticSeverity::Error,
             Severity::Warning => DiagnosticSeverity::Warning,
         },
         message: diagnostic.message.as_str().to_owned(),
+        line: None,
+        column: None,
+        end_line: None,
+        end_column: None,
+        snippet: None,
+        file: None,
+        range: None,
+    };
+    if let Some(id) = diagnostic.span.id() {
+        if id != world.main {
+            d.file = Some(match id.root() {
+                VirtualRoot::Package(spec) => format!("{spec}{}", id.vpath().get_with_slash()),
+                VirtualRoot::Project => id.vpath().get_with_slash().into(),
+            });
+        }
+        if let Ok(source) = world.source(id) {
+            d.range = world.range(diagnostic.span);
+            if id != world.main
+                && let Some(r) = &d.range
+            {
+                let pos = |n| {
+                    let b = &source.text()[..n];
+                    (
+                        Some(b.chars().filter(|&c| c == '\n').count() + 1),
+                        Some(b.rsplit('\n').next().unwrap_or("").chars().count() + 1),
+                    )
+                };
+                (d.line, d.column) = pos(r.start);
+                (d.end_line, d.end_column) = pos(r.end);
+                d.snippet = Some(source.text()[r.clone()].chars().take(200).collect());
+            }
+        }
     }
+    d
 }
 
 /// The fonts every compile can use, shared for the life of the process.
@@ -284,6 +335,50 @@ fn standard_library() -> &'static LazyHash<Library> {
 /// Identifies Goodtype to the package registry.
 const PACKAGE_USER_AGENT: &str = concat!("goodtype/", env!("CARGO_PKG_VERSION"));
 
+/// The loader matching Rust's package policy: downloads on a cache miss only when allowed.
+pub(crate) fn package_loader(allow_remote_packages: bool) -> &'static SystemPackages {
+    if allow_remote_packages {
+        downloading_packages()
+    } else {
+        local_packages()
+    }
+}
+
+/// Whether the module at `path` binds `preset` to a function, decided by evaluating it rather
+/// than by reading its text, so aliases (`#let preset = style`) and re-exports
+/// (`#import "base.typ": preset`) count while `#let preset = 1` does not. `None` when the module
+/// does not evaluate. Uses the same root-scoped, optionally granted-only world as compilation.
+pub(crate) fn binds_preset_function(
+    root: &Path,
+    path: &str,
+    packages: &'static SystemPackages,
+    files: Option<&crate::GrantedFiles>,
+) -> Option<bool> {
+    // The probe stops during evaluation, before any layout, and reports through its own marker.
+    // `path` is a managed-header path (`/styles/` plus safe filename characters), so quoting is
+    // exact.
+    let probe = format!(
+        "#import \"{path}\" as goodtype_probe_module\n\
+         #panic(\"{PROBE_MARKER}\" + repr(type(dictionary(goodtype_probe_module).at(\"preset\", default: none)) == function))"
+    );
+    let mut world = BlockWorld::for_main(
+        "goodtype-preset-probe.typ",
+        probe,
+        root.canonicalize().ok()?,
+        false,
+    )
+    .with_packages(packages);
+    world.grant(files);
+    let errors = typst::compile::<PagedDocument>(&world).output.err()?;
+    errors.iter().find_map(|error| {
+        let message = error.message.as_str();
+        let found = &message[message.find(PROBE_MARKER)? + PROBE_MARKER.len()..];
+        Some(found.starts_with("true"))
+    })
+}
+
+const PROBE_MARKER: &str = "goodtype-preset-form:";
+
 /// Package loader that may download from Typst Universe on a cache miss. Built once: it holds
 /// the HTTPS client and the resolved data/cache directories.
 fn downloading_packages() -> &'static SystemPackages {
@@ -323,12 +418,46 @@ impl Downloader for OfflineDownloader {
     }
 }
 
+/// Exact package inputs consumed (and possibly fetched) by a reviewed helper preset.
+#[derive(Clone, Default)]
+pub struct PresetPackageBytes(pub std::collections::BTreeMap<String, (PathBuf, Vec<u8>)>);
+type PresetPackageBinding = std::sync::Arc<Mutex<(bool, PresetPackageBytes)>>;
+thread_local! {
+    static PRESET_PACKAGES: std::cell::RefCell<Option<PresetPackageBinding>> = const { std::cell::RefCell::new(None) };
+}
+/// Capture once, or replay only the captured package bytes. Scoped to this synchronous check.
+pub fn with_preset_packages<T>(
+    replay: Option<&PresetPackageBytes>,
+    run: impl FnOnce() -> Result<T, String>,
+) -> Result<(T, PresetPackageBytes), String> {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            PRESET_PACKAGES.with(|s| *s.borrow_mut() = None);
+        }
+    }
+    PRESET_PACKAGES.with(|s| {
+        assert!(s.borrow().is_none());
+        *s.borrow_mut() = Some(std::sync::Arc::new(Mutex::new((
+            replay.is_some(),
+            replay.cloned().unwrap_or_default(),
+        ))));
+    });
+    let _reset = Reset;
+    let value = run()?;
+    let bytes = PRESET_PACKAGES.with(|s| s.borrow().as_ref().unwrap().lock().unwrap().1.clone());
+    Ok((value, bytes))
+}
+
 /// A Goodtype-owned Typst [`World`] scoped to one notebook root.
-struct BlockWorld {
+pub(crate) struct BlockWorld {
     root: PathBuf,
+    granted_only: bool,
+    preset_packages: Option<PresetPackageBinding>,
     main: FileId,
-    /// Whether a package may be downloaded on a cache miss.
-    allow_remote_packages: bool,
+    /// Resolves packages: local directories, plus a download on a cache miss when the policy
+    /// allows it. Project-file grants do not override this caller-owned package policy.
+    packages: &'static SystemPackages,
     /// Generated, in-memory files (the entry document and its helpers) keyed by file id.
     overlay: HashMap<FileId, Bytes>,
     /// Decoded source cache so repeated `source()` calls during layout stay cheap.
@@ -338,7 +467,7 @@ struct BlockWorld {
 }
 
 impl BlockWorld {
-    fn for_main(
+    pub(crate) fn for_main(
         main_name: &str,
         main_source: String,
         root: PathBuf,
@@ -349,15 +478,33 @@ impl BlockWorld {
         overlay.insert(main, Bytes::from_string(main_source));
         Self {
             root,
+            granted_only: false,
+            preset_packages: PRESET_PACKAGES.with(|s| s.borrow().clone()),
             main,
-            allow_remote_packages,
+            packages: package_loader(allow_remote_packages),
             overlay,
             sources: Mutex::new(HashMap::new()),
             files: Mutex::new(HashMap::new()),
         }
     }
 
-    fn insert_binary(&mut self, name: &str, bytes: Vec<u8>) {
+    pub(crate) fn with_packages(mut self, packages: &'static SystemPackages) -> Self {
+        self.packages = packages;
+        self
+    }
+
+    pub(crate) fn grant(&mut self, files: Option<&crate::GrantedFiles>) {
+        self.granted_only = files.is_some();
+        if let Some(files) = files {
+            for (path, bytes) in files {
+                if VirtualPath::new(path).is_ok() && project_file_id(path) != self.main {
+                    self.insert_binary(path, bytes.clone());
+                }
+            }
+        }
+    }
+
+    pub(crate) fn insert_binary(&mut self, name: &str, bytes: Vec<u8>) {
         self.overlay
             .insert(project_file_id(name), Bytes::new(bytes));
     }
@@ -370,15 +517,15 @@ impl BlockWorld {
             VirtualRoot::Package(spec) => {
                 // Offline-first: the local data and cache directories are consulted first, and a
                 // download happens only on a miss — and only when the user allows it.
-                let packages = if self.allow_remote_packages {
-                    downloading_packages()
-                } else {
-                    local_packages()
-                };
-                let root = packages.obtain(spec).map_err(FileError::Package)?;
+                // Project grants and package-download policy are independent. Offline callers
+                // supply the offline loader; reviewed preset replay never reaches this fallback.
+                let root = self.packages.obtain(spec).map_err(FileError::Package)?;
                 // FsRoot::resolve denies a virtual path that would escape the package root.
                 root.resolve(id.vpath())
             }
+            VirtualRoot::Project if self.granted_only => Err(FileError::Other(Some(
+                format!("not shared: {}", id.vpath().get_with_slash()).into(),
+            ))),
             VirtualRoot::Project => {
                 let path = id
                     .vpath()
@@ -398,6 +545,36 @@ impl BlockWorld {
     }
 
     fn disk_bytes(&self, id: FileId, maximum: usize) -> FileResult<Bytes> {
+        if self.granted_only
+            && matches!(id.root(), VirtualRoot::Package(_))
+            && let Some(binding) = &self.preset_packages
+        {
+            // The World retains the binding, including reads on Typst worker threads.
+            let mut binding = binding.lock().unwrap();
+            let (replay, captured) = &mut *binding;
+            let key = format!("{id:?}");
+            if let Some((_, bytes)) = captured.0.get(&key) {
+                return if bytes.len() <= maximum {
+                    Ok(Bytes::new(bytes.clone()))
+                } else {
+                    Err(FileError::AccessDenied)
+                };
+            }
+            if *replay {
+                return Err(FileError::AccessDenied);
+            }
+            return (|| {
+                let path = self.on_disk(id)?;
+                let bytes = goodtype_core::storage::files::read_bounded(&path, maximum)
+                    .map_err(|e| FileError::from_io(e, &path))?;
+                let total: usize = captured.0.values().map(|(_, b)| b.len()).sum();
+                if captured.0.len() >= 256 || total + bytes.len() > 16 * 1024 * 1024 {
+                    return Err(FileError::AccessDenied);
+                }
+                captured.0.insert(key, (path, bytes.clone()));
+                Ok(Bytes::new(bytes))
+            })();
+        }
         if let Some(bytes) = self.files.lock().unwrap().get(&id).cloned() {
             if bytes.len() <= maximum {
                 return Ok(bytes);
@@ -439,6 +616,9 @@ impl World for BlockWorld {
             return Ok(cached);
         }
         let text = if let Some(bytes) = self.overlay.get(&id) {
+            if bytes.len() > crate::MAX_SOURCE_BYTES {
+                return Err(FileError::Other(Some("Typst source exceeds limit".into())));
+            }
             std::str::from_utf8(bytes)
                 .map_err(|_| FileError::InvalidUtf8)?
                 .to_owned()
@@ -455,6 +635,9 @@ impl World for BlockWorld {
 
     fn file(&self, id: FileId) -> FileResult<Bytes> {
         if let Some(bytes) = self.overlay.get(&id) {
+            if bytes.len() > MAX_WORLD_FILE_BYTES {
+                return Err(FileError::Other(Some("Typst file exceeds limit".into())));
+            }
             return Ok(bytes.clone());
         }
         self.disk_bytes(id, MAX_WORLD_FILE_BYTES)
@@ -484,3 +667,7 @@ fn project_file_id(name: &str) -> FileId {
     let vpath = VirtualPath::new(name).expect("generated Typst file name is a valid virtual path");
     FileId::new(RootedPath::new(VirtualRoot::Project, vpath))
 }
+
+#[cfg(test)]
+#[path = "computation_spike.rs"]
+mod computation_spike;

@@ -76,5 +76,5 @@
   rect { fill: transparent; stroke: var(--blueprint); stroke-width: calc(1.5px / var(--zoom)); stroke-dasharray: calc(4px / var(--zoom)) calc(3px / var(--zoom)); pointer-events: all; cursor: move; touch-action: none; }
   circle { fill: transparent; pointer-events: all; cursor: nwse-resize; touch-action: none; }
   .visible-handle { fill: var(--panel); stroke: var(--blueprint); stroke-width: calc(1.5px / var(--zoom)); pointer-events: none; }
-  [role=button]:focus-visible { outline: 2px solid var(--blueprint); }
+  [role=button]:focus-visible { outline: 2px solid var(--blueprint-light); outline-offset: 2px; }
 </style>

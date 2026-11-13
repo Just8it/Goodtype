@@ -12,12 +12,15 @@ use goodtype_core::{
 /// shadowed the public one at every call site below and agreed with it only by coincidence.
 use crate::MAX_SOURCE_BYTES;
 
+pub(crate) type ExportSource = (String, Vec<(String, Vec<u8>)>);
+
 const MAX_PAGE_ITEMS: usize = 10_000;
 const MAX_STROKE_POINTS: usize = 1_000_000;
 const MAX_DIMENSION_PT: f64 = 100_000.0;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExportPage {
+    pub calculation: Option<crate::calculation::ExportCalculation>,
     pub width_pt: f64,
     pub height_pt: f64,
     pub shared_style: Option<String>,
@@ -122,6 +125,11 @@ pub enum ExportError {
     InvalidPage(String),
     InvalidImagePath(String),
     CompilerFailed(String),
+    /// A computational page cannot export in the selected mode. Never clipped or omitted.
+    Calculation {
+        page_index: usize,
+        reason: crate::calculation::CalculationError,
+    },
     Io(std::io::Error),
 }
 
@@ -139,6 +147,9 @@ impl std::fmt::Display for ExportError {
             Self::InvalidPage(message) => write!(formatter, "invalid page export: {message}"),
             Self::InvalidImagePath(path) => write!(formatter, "unsafe image path: {path}"),
             Self::CompilerFailed(message) => write!(formatter, "Typst export failed: {message}"),
+            Self::Calculation { page_index, reason } => {
+                write!(formatter, "computational page {}: {reason}", page_index + 1)
+            }
             Self::Io(error) => error.fmt(formatter),
         }
     }
@@ -178,7 +189,7 @@ pub fn export_pages(
         )));
     }
     for page in pages {
-        validate_page(&root, page)?;
+        validate_page(&root, page, None)?;
     }
 
     let pdf_bytes = compile_pdf(&root, pages, allow_remote_packages)?;
@@ -203,7 +214,7 @@ pub fn render_page_pdf(notebook_root: &Path, page: &ExportPage) -> Result<Vec<u8
     if !root.is_dir() {
         return Err(ExportError::InvalidRoot(root));
     }
-    validate_page(&root, page)?;
+    validate_page(&root, page, None)?;
     // Optional library previews never trigger background package downloads.
     compile_pdf(&root, std::slice::from_ref(page), false)
 }
@@ -215,11 +226,56 @@ fn compile_pdf(
     pages: &[ExportPage],
     allow_remote_packages: bool,
 ) -> Result<Vec<u8>, ExportError> {
+    let (source, overlay) = compose_with_policy(root, pages, None, allow_remote_packages)?;
+    crate::embedded::export_pdf(root, "page.typ", source, overlay, allow_remote_packages)
+        .map_err(ExportError::CompilerFailed)
+}
+
+type Composition = ExportSource;
+fn compose(
+    root: &Path,
+    pages: &[ExportPage],
+    files: Option<&crate::GrantedFiles>,
+) -> Result<Composition, ExportError> {
+    compose_with_policy(root, pages, files, false)
+}
+
+fn compose_with_policy(
+    root: &Path,
+    pages: &[ExportPage],
+    files: Option<&crate::GrantedFiles>,
+    allow_remote_packages: bool,
+) -> Result<Composition, ExportError> {
     let mut overlay: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut main = String::new();
     for (page_index, page) in pages.iter().enumerate() {
+        if page_index > 0 {
+            // An explicit break keeps consecutive same-geometry pages distinct; the following
+            // `#set page` then applies to the fresh empty page.
+            main.push_str("#pagebreak()\n");
+        }
+        if let Some(calculation) = &page.calculation {
+            if files.is_some() {
+                return Err(ExportError::InvalidPage(
+                    "computational pages are not supported by helper rendering".into(),
+                ));
+            }
+            // Saved results only: export never runs code. Text rules stay scoped to this page.
+            let (source, files) = crate::calculation::export_source(
+                root,
+                calculation,
+                &format!("calculation-{page_index}"),
+            )
+            .map_err(|reason| ExportError::Calculation { page_index, reason })?;
+            main.push_str(&source);
+            overlay.extend(files);
+            continue;
+        }
+        main.push_str(&generated_typst_source(page, page_index));
         if let Some(page_text) = &page.page_typst {
-            let source =
-                prepared_page_text(root, page, page_text).map_err(ExportError::CompilerFailed)?;
+            let source = compose_page_text(root, page, page_text, files, allow_remote_packages)
+                .map_err(ExportError::CompilerFailed)?
+                .source;
             overlay.push((format!("page-text-{page_index}.typ"), source.into_bytes()));
         }
         for (index, block) in page.blocks.iter().enumerate() {
@@ -248,15 +304,7 @@ fn compile_pdf(
             ));
         }
     }
-
-    crate::embedded::export_pdf(
-        root,
-        "page.typ",
-        combined_typst_source(pages),
-        overlay,
-        allow_remote_packages,
-    )
-    .map_err(ExportError::CompilerFailed)
+    Ok((main, overlay))
 }
 
 /// The notebook's filename rule, plus a `.pdf` extension. Shared rather than restated, so an export
@@ -268,9 +316,26 @@ fn validate_output_name(name: &str) -> Result<(), ExportError> {
     Ok(())
 }
 
-fn validate_page(root: &Path, page: &ExportPage) -> Result<(), ExportError> {
+fn validate_page(
+    root: &Path,
+    page: &ExportPage,
+    files: Option<&crate::GrantedFiles>,
+) -> Result<(), ExportError> {
     valid_positive_dimension(page.width_pt, "page width")?;
     valid_positive_dimension(page.height_pt, "page height")?;
+    if page.calculation.is_some()
+        && (page.page_typst.is_some()
+            || !page.blocks.is_empty()
+            || !page.strokes.is_empty()
+            || !page.shapes.is_empty()
+            || !page.images.is_empty()
+            || (page.width_pt - goodtype_core::calculation::A4_WIDTH_PT).abs() > 0.001)
+    {
+        // Computational pages have no free objects in this format. Refuse rather than drop them.
+        return Err(ExportError::InvalidPage(
+            "computational page has free objects or a non-A4 width".to_owned(),
+        ));
+    }
     if page.blocks.len()
         + page.strokes.len()
         + page.shapes.len()
@@ -326,7 +391,7 @@ fn validate_page(root: &Path, page: &ExportPage) -> Result<(), ExportError> {
             {
                 return Err(ExportError::InvalidImagePath(source_path.clone()));
             }
-            validate_relative_image(root, source_path)?;
+            validate_relative_image(root, source_path, files)?;
         }
     }
 
@@ -389,7 +454,7 @@ fn validate_page(root: &Path, page: &ExportPage) -> Result<(), ExportError> {
     }
 
     for image in &page.images {
-        validate_relative_image(root, &image.relative_path)?;
+        validate_relative_image(root, &image.relative_path, files)?;
         valid_position(image.x, image.y)?;
         valid_positive_dimension(image.width_pt, "image width")?;
         valid_positive_dimension(image.height_pt, "image height")?;
@@ -443,12 +508,26 @@ use goodtype_core::valid_hex_color as valid_color;
 /// An image path out of the notebook, checked by the same rule the store applied when it wrote
 /// one. These names come from canonical JSON, so the strict notebook rule is the right one — and
 /// sharing it means export cannot end up accepting a name the store would have refused.
-fn validate_relative_image(root: &Path, relative: &str) -> Result<(), ExportError> {
+fn validate_relative_image(
+    root: &Path,
+    relative: &str,
+    files: Option<&crate::GrantedFiles>,
+) -> Result<(), ExportError> {
+    if let Some(files) = files {
+        goodtype_core::paths::validate_relative(relative)
+            .map_err(|_| ExportError::InvalidImagePath(relative.into()))?;
+        return files
+            .contains_key(&format!("/{relative}"))
+            .then_some(())
+            .ok_or_else(|| ExportError::CompilerFailed(format!("not shared: /{relative}")));
+    }
+
     goodtype_core::paths::resolve_file(root, relative)
         .map(|_| ())
         .map_err(|_| ExportError::InvalidImagePath(relative.to_owned()))
 }
 
+#[cfg(test)]
 fn combined_typst_source(pages: &[ExportPage]) -> String {
     let mut source = String::new();
     for (page_index, page) in pages.iter().enumerate() {
@@ -478,7 +557,8 @@ fn generated_typst_source(page: &ExportPage, page_index: usize) -> String {
             typst_string(&color),
         ),
         None => format!(
-            "#set page(width: {}pt, height: {}pt, margin: 0pt)\n",
+            // Explicit, so a preceding computational page's white fill does not carry over.
+            "#set page(width: {}pt, height: {}pt, margin: 0pt, fill: none)\n",
             page.width_pt, page.height_pt
         ),
     };
@@ -622,7 +702,7 @@ fn ink_strata(page: &ExportPage) -> Vec<InkStratum<'_>> {
 /// here can currently contain one — colours are hex-validated and paths went through
 /// `validate_relative`, which refuses `\` — but this is the one function standing between
 /// canonical content and generated code, and it should not depend on its callers to be safe.
-fn typst_string(value: &str) -> String {
+pub(crate) fn typst_string(value: &str) -> String {
     value
         .replace('\\', "\\\\")
         .replace('"', "\\\"")
@@ -645,6 +725,16 @@ struct PageTextBounds {
     top: f64,
     right: f64,
     bottom: f64,
+}
+
+/// Shared Page text placement for full-page review previews.
+pub fn page_text_preview_geometry(page: &ExportPage) -> (f64, f64, f64) {
+    let layout = page_text_layout(page);
+    (layout.x, layout.y, layout.width)
+}
+/// The Page text measure for this page, the width previews and preset checks compile at.
+pub fn page_text_width(page: &ExportPage) -> f64 {
+    page_text_layout(page).width
 }
 
 fn page_text_layout(page: &ExportPage) -> PageTextLayout {
@@ -735,20 +825,81 @@ fn page_text_layout(page: &ExportPage) -> PageTextLayout {
 }
 
 pub fn prepared_page_text(root: &Path, page: &ExportPage, source: &str) -> Result<String, String> {
-    validate_page(root, page).map_err(|error| error.to_string())?;
-    let prepared = crate::page_source::prepare(root, source)?;
-    let body = page_text_source(page, &prepared.body);
-    Ok(match prepared.preamble {
-        Some(template) => format!("{template}\n{body}"),
-        None if !prepared.managed => match page.shared_style.as_deref() {
-            Some(style) if !style.is_empty() => format!("{style}\n{body}"),
-            _ => body,
+    Ok(compose_page_text(root, page, source, None, false)?.source)
+}
+
+/// The generated Page text document, plus what is needed to map its diagnostics back.
+pub struct PageTextComposition {
+    pub source: String,
+    pub prepared: crate::page_source::PageSource,
+    /// Byte offset of the inlined preamble in [`Self::source`], for a preamble-form preset.
+    pub preamble_start: Option<usize>,
+}
+
+/// Compose Page text exactly as preview, export, editor checks and preset validation see it.
+/// `files` restricts project reads to granted bytes; the package policy is the caller's.
+pub fn compose_page_text(
+    root: &Path,
+    page: &ExportPage,
+    source: &str,
+    files: Option<&crate::GrantedFiles>,
+    allow_remote_packages: bool,
+) -> Result<PageTextComposition, String> {
+    validate_page(root, page, files).map_err(|error| error.to_string())?;
+    let prepared = match files {
+        Some(f) => crate::page_source::prepare_granted(root, source, f, allow_remote_packages)?,
+        None => crate::page_source::prepare(root, source, allow_remote_packages)?,
+    };
+    let (body, preamble_start) = page_text_source_with(
+        page,
+        prepared
+            .preamble
+            .as_ref()
+            .map(|preamble| preamble.text.as_str()),
+        &prepared.body,
+    );
+    let style = match page.shared_style.as_deref() {
+        Some(style) if !style.is_empty() && !prepared.managed => Some(style),
+        _ => None,
+    };
+    Ok(match style {
+        Some(style) => PageTextComposition {
+            source: format!("{style}\n{body}"),
+            preamble_start: preamble_start.map(|start| start + style.len() + 1),
+            prepared,
         },
-        _ => body,
+        None => PageTextComposition {
+            source: body,
+            preamble_start,
+            prepared,
+        },
     })
 }
 
+/// Locate the copied body using the composition's explicit suffix, never a text search.
+pub fn page_text_body_offset(page: &ExportPage, generated: &str, body: &str) -> Option<usize> {
+    let suffix = if page_text_layout(page).columns == 2 {
+        2
+    } else {
+        0
+    };
+    let end = generated.len().checked_sub(suffix)?;
+    let start = end.checked_sub(body.len())?;
+    (generated.get(start..end)? == body).then_some(start)
+}
+
+#[cfg(test)]
 fn page_text_source(page: &ExportPage, source: &str) -> String {
+    page_text_source_with(page, None, source).0
+}
+
+/// Goodtype's text prelude, then a preamble preset — so its own `#set text` and other rules win
+/// over Goodtype's defaults, as a function preset's `#show` already does — then the body.
+fn page_text_source_with(
+    page: &ExportPage,
+    preamble: Option<&str>,
+    source: &str,
+) -> (String, Option<usize>) {
     let layout = page_text_layout(page);
     let color = match &page.background {
         PageBackground::Plain { color } => color,
@@ -771,14 +922,23 @@ fn page_text_source(page: &ExportPage, source: &str) -> String {
             "\n#let goodtype_gap = {leading}pt\n#let goodtype_snap_block(it) = block(\n  above: goodtype_gap,\n  below: goodtype_gap,\n  layout(size => {{\n    let measured = measure(width: size.width, it)\n    let rows = calc.max(1, calc.ceil((measured.height + goodtype_gap) / goodtype_rhythm))\n    block(width: size.width, height: rows * goodtype_rhythm - goodtype_gap, align(bottom, it))\n  }}),\n)\n#show heading: set block(above: 0pt, below: 0pt)\n#show math.equation.where(block: true): set block(above: 0pt, below: 0pt)\n#show heading: goodtype_snap_block\n#show math.equation.where(block: true): goodtype_snap_block",
         ));
     }
+    let mut generated = prelude;
+    generated.push('\n');
+    let preamble_start = preamble.map(|preamble| {
+        let start = generated.len();
+        generated.push_str(preamble);
+        generated.push('\n');
+        start
+    });
     if layout.columns == 2 {
-        format!(
-            "{prelude}\n#columns(2, gutter: {}pt)[\n{source}\n]",
+        generated.push_str(&format!(
+            "#columns(2, gutter: {}pt)[\n{source}\n]",
             layout.line_spacing_pt
-        )
+        ));
     } else {
-        format!("{prelude}\n{source}")
+        generated.push_str(source);
     }
+    (generated, preamble_start)
 }
 
 fn page_text_bounds(area: &Area, width_pt: f64, height_pt: f64) -> Option<PageTextBounds> {
@@ -1119,6 +1279,7 @@ mod tests {
 
     fn page() -> ExportPage {
         ExportPage {
+            calculation: None,
             width_pt: 595.0,
             height_pt: 842.0,
             shared_style: None,
@@ -1170,6 +1331,346 @@ mod tests {
             }],
             shapes: vec![],
             images: vec![],
+        }
+    }
+
+    #[test]
+    fn helper_png_limits_clamp_and_crop_before_allocation() {
+        let root = tempfile::tempdir().unwrap();
+        let mut p = page();
+        let files = crate::GrantedFiles::new();
+        for scale in [f64::NAN, f64::INFINITY, 0.0, -1.0, 4.1] {
+            assert!(render_bounds(&p, None, Some(scale)).is_err());
+        }
+        assert!(render_bounds(&p, None, Some(4.0)).is_err());
+        assert!(
+            render_bounds(
+                &p,
+                Some(RenderCrop {
+                    x: 0.0,
+                    y: 0.0,
+                    width: f64::NAN,
+                    height: 1.0
+                }),
+                None
+            )
+            .is_err()
+        );
+        p.width_pt = 2001.0;
+        p.height_pt = 2000.0;
+        assert!(render_bounds(&p, None, Some(1.0)).is_err());
+        p.width_pt = 100_000.0;
+        p.height_pt = 100_000.0;
+        let r = render_page_png_granted(
+            root.path(),
+            &p,
+            &files,
+            Some(RenderCrop {
+                x: -5.0,
+                y: -5.0,
+                width: 15.0,
+                height: 15.0,
+            }),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            (r.width_px, r.height_px, r.origin_pt, r.scale),
+            (20, 20, (0.0, 0.0), 2.0)
+        );
+    }
+
+    #[test]
+    fn helper_page_text_grants_and_removed_header_spans() {
+        let root = tempfile::tempdir().unwrap();
+        let p = page();
+        let source = "#import \"/styles/a.typ\": preset\n#show: preset.with(rhythm: goodtype_rhythm)\n\n\u{e4} #unknown_name";
+        let request = crate::CompileRequest {
+            source: source.into(),
+            width_pt: 300.0,
+            generation: 1,
+            allow_remote_packages: false,
+        };
+        let mut files = crate::GrantedFiles::new();
+        assert!(
+            crate::compile_page_text_granted(root.path(), &p, &request, &files)
+                .unwrap_err()
+                .contains("not shared: /styles/a.typ")
+        );
+        for template in [
+            "#set text(fill: blue)",
+            "#let preset(body, rhythm: 16pt) = body",
+        ] {
+            files.insert("/styles/a.typ".into(), template.as_bytes().to_vec());
+            let r = crate::compile_page_text_granted(root.path(), &p, &request, &files).unwrap();
+            let d = r
+                .diagnostics
+                .iter()
+                .find(|d| d.message.contains("unknown_name"))
+                .unwrap();
+            assert_eq!((d.line, d.column), (Some(4), Some(4)));
+            assert_eq!(d.snippet.as_deref(), Some("unknown_name"));
+        }
+    }
+
+    #[test]
+    fn helper_pdf_with_unpainted_paper_keeps_black_text_visible() {
+        let root = tempfile::tempdir().unwrap();
+        let document = crate::embedded::export_document(
+            root.path(), "source.typ",
+            "#set page(width: 200pt, height: 150pt, margin: 10pt, fill: none)\n#set text(fill: black)\nAircraft task: V = 250 kts\n$ S = 596 m^2 $".into(),
+            vec![], false, Some(&crate::GrantedFiles::new()),
+        ).unwrap();
+        let pdf = typst_pdf::pdf(&document, &Default::default()).unwrap();
+        let mut p = page();
+        p.width_pt = 200.;
+        p.height_pt = 150.;
+        p.blocks.clear();
+        p.strokes.clear();
+        p.background = PageBackground::Pdf {
+            source_path: "references/task.pdf".into(),
+            page: 1,
+        };
+        let files = crate::GrantedFiles::from([("/references/task.pdf".into(), pdf)]);
+        for crop in [
+            None,
+            Some(RenderCrop {
+                x: 5.,
+                y: 5.,
+                width: 180.,
+                height: 70.,
+            }),
+        ] {
+            let rendered =
+                render_page_png_granted(root.path(), &p, &files, crop, Some(1.)).unwrap();
+            let pix = resvg::tiny_skia::Pixmap::decode_png(&rendered.png).unwrap();
+            assert_eq!(&pix.data()[0..4], &[255, 255, 255, 255]);
+            assert!(pix.data().chunks_exact(4).all(|p| p[3] == 255));
+            assert!(
+                pix.data()
+                    .chunks_exact(4)
+                    .any(|p| p[0] < 80 && p[1] < 80 && p[2] < 80)
+            );
+        }
+    }
+
+    #[test]
+    fn helper_png_pdf_background_is_rasterized() {
+        let root = tempfile::tempdir().unwrap();
+        let mut p = page();
+        p.blocks.clear();
+        p.strokes.clear();
+        p.background = PageBackground::Plain {
+            color: "#ff0000".into(),
+        };
+        let pdf = render_page_pdf(root.path(), &p).unwrap();
+        p.background = PageBackground::Pdf {
+            source_path: "references/bg.pdf".into(),
+            page: 1,
+        };
+        let mut files = crate::GrantedFiles::new();
+        assert!(
+            render_page_png_granted(root.path(), &p, &files, None, None)
+                .unwrap_err()
+                .to_string()
+                .contains("not shared: /references/bg.pdf")
+        );
+        files.insert("/references/bg.pdf".into(), pdf);
+        let (source, overlay) =
+            compose(root.path(), std::slice::from_ref(&p), Some(&files)).unwrap();
+        let document = crate::embedded::export_document(
+            root.path(),
+            "page.typ",
+            source,
+            overlay,
+            false,
+            Some(&files),
+        )
+        .unwrap();
+        let direct = typst_render::render(&document.pages()[0], &Default::default());
+        assert_eq!(&direct.data()[0..4], &[255, 0, 0, 255]);
+        let r = render_page_png_granted(root.path(), &p, &files, None, None).unwrap();
+        let pix = resvg::tiny_skia::Pixmap::decode_png(&r.png).unwrap();
+        assert_eq!(&pix.data()[0..4], &[255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn helper_pdf_material_transform_crop_evidence() {
+        let root = tempfile::tempdir().unwrap();
+        let mut p = page();
+        p.blocks.clear();
+        p.strokes.clear();
+        p.width_pt = 200.;
+        p.height_pt = 100.;
+        p.background = PageBackground::Plain {
+            color: "#ff0000".into(),
+        };
+        let pdf = render_page_pdf(root.path(), &p).unwrap();
+        p.width_pt = 400.;
+        p.height_pt = 300.;
+        p.background = PageBackground::Pdf {
+            source_path: "references/bg.pdf".into(),
+            page: 1,
+        };
+        p.blocks.push(ExportTypstBlock {
+            x: 130.,
+            y: 80.,
+            layout_width_pt: 200.,
+            scale: 0.6,
+            rotation_degrees: 30.,
+            z_index: 1,
+            order: 0,
+            source: "#image(\"/references/material.pdf\", page: 1, width: 200pt, height: 100pt)"
+                .into(),
+        });
+        let mut material = p.clone();
+        material.background = PageBackground::Plain {
+            color: "#0000ff".into(),
+        };
+        material.blocks.clear();
+        let blue = render_page_pdf(root.path(), &material).unwrap();
+        let files = crate::GrantedFiles::from([
+            ("/references/bg.pdf".into(), pdf),
+            ("/references/material.pdf".into(), blue),
+        ]);
+        let image = render_page_png_granted(
+            root.path(),
+            &p,
+            &files,
+            Some(RenderCrop {
+                x: 60.,
+                y: 40.,
+                width: 280.,
+                height: 200.,
+            }),
+            Some(2.),
+        )
+        .unwrap();
+        let pix = resvg::tiny_skia::Pixmap::decode_png(&image.png).unwrap();
+        assert_eq!((pix.width(), pix.height()), (560, 400));
+        assert_eq!(&pix.data()[0..4], &[255, 0, 0, 255]);
+        assert!(pix.data().chunks_exact(4).any(|p| p == [0, 0, 255, 255]));
+        let evidence = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/step5/w1-r");
+        fs::create_dir_all(&evidence).unwrap();
+        fs::write(evidence.join("rotated-material-crop.png"), image.png).unwrap();
+    }
+
+    #[test]
+    fn helper_png_matches_svg_mixed_fixture() {
+        let root = tempfile::tempdir().unwrap();
+        let mut p = page();
+        p.page_typst = Some("= Page text\nHello".into());
+        p.shapes.push(ExportShape {
+            x: 360.0,
+            y: 310.0,
+            scale: 1.0,
+            rotation_degrees: 0.0,
+            z_index: 5,
+            order: 2,
+            geometry: ShapeGeometry::Rectangle {
+                width_pt: 60.0,
+                height_pt: 40.0,
+                corner_radius_pt: 4.0,
+            },
+            style: ShapeStyle {
+                stroke_color: "#16212b".into(),
+                stroke_width_pt: 2.0,
+                fill_color: Some("#4c8df0".into()),
+                opacity: 1.0,
+                pattern: StrokePattern::Solid,
+                pattern_spacing: 1.0,
+                pattern_offset_pt: 0.0,
+            },
+        });
+        p.images.push(ExportImage {
+            relative_path: "assets/a.svg".into(),
+            x: 350.0,
+            y: 200.0,
+            width_pt: 80.0,
+            height_pt: 80.0,
+            scale: 1.0,
+            rotation_degrees: 0.0,
+            z_index: 4,
+            order: 1,
+        });
+        let files=crate::GrantedFiles::from([("/assets/a.svg".into(),br#"<svg xmlns="http://www.w3.org/2000/svg" width="80" height="80"><rect width="80" height="80" fill="red"/></svg>"#.to_vec())]);
+        let start = std::time::Instant::now();
+        let r = render_page_png_granted(root.path(), &p, &files, None, None).unwrap();
+        eprintln!(
+            "A4 scale 2: {:?}, {} PNG bytes, {} RGBA bytes",
+            start.elapsed(),
+            r.png.len(),
+            r.width_px as usize * r.height_px as usize * 4
+        );
+        let (source, overlay) =
+            compose(root.path(), std::slice::from_ref(&p), Some(&files)).unwrap();
+        let doc = crate::embedded::export_document(
+            root.path(),
+            "page.typ",
+            source,
+            overlay,
+            false,
+            Some(&files),
+        )
+        .unwrap();
+        let direct = typst_render::render(&doc.pages()[0], &Default::default());
+        let svg = typst_svg::svg(&doc.pages()[0], &typst_svg::SvgOptions::default());
+        let tree = resvg::usvg::Tree::from_str(&svg, &resvg::usvg::Options::default()).unwrap();
+        let mut reference = resvg::tiny_skia::Pixmap::new(r.width_px, r.height_px).unwrap();
+        resvg::render(
+            &tree,
+            resvg::tiny_skia::Transform::from_scale(
+                r.width_px as f32 / tree.size().width(),
+                r.height_px as f32 / tree.size().height(),
+            ),
+            &mut reference.as_mut(),
+        );
+        let png = resvg::tiny_skia::Pixmap::decode_png(&r.png).unwrap();
+        let differing = png
+            .data()
+            .chunks_exact(4)
+            .zip(reference.data().chunks_exact(4))
+            .filter(|(a, b)| a.iter().zip(*b).any(|(a, b)| a.abs_diff(*b) > 2))
+            .count();
+        let fraction = differing as f64 / (r.width_px as f64 * r.height_px as f64);
+        assert!(fraction <= 0.005, "{differing} pixels differ: {fraction}");
+        let direct_diff = direct
+            .data()
+            .chunks_exact(4)
+            .zip(reference.data().chunks_exact(4))
+            .filter(|(a, b)| a.iter().zip(*b).any(|(a, b)| a.abs_diff(*b) > 2))
+            .count();
+        assert!(
+            direct_diff as f64 / (r.width_px as f64 * r.height_px as f64) <= 0.005,
+            "direct renderer differs at {direct_diff} pixels"
+        );
+        let crop_start = std::time::Instant::now();
+        let crop = render_page_png_granted(
+            root.path(),
+            &p,
+            &files,
+            Some(RenderCrop {
+                x: 340.0,
+                y: 190.0,
+                width: 100.0,
+                height: 100.0,
+            }),
+            None,
+        )
+        .unwrap();
+        eprintln!(
+            "A4 100pt crop scale 2: {:?}, {} PNG bytes, {} RGBA bytes",
+            crop_start.elapsed(),
+            crop.png.len(),
+            crop.width_px as usize * crop.height_px as usize * 4
+        );
+        let cropped = resvg::tiny_skia::Pixmap::decode_png(&crop.png).unwrap();
+        for y in 0..crop.height_px as usize {
+            let start = ((y + 380) * r.width_px as usize + 680) * 4;
+            assert_eq!(
+                &cropped.data()[y * 800..(y + 1) * 800],
+                &png.data()[start..start + 800]
+            );
         }
     }
 
@@ -1731,7 +2232,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         for path in ["../image.png", "/image.png", r"assets\image.png"] {
             assert!(matches!(
-                validate_relative_image(root.path(), path),
+                validate_relative_image(root.path(), path, None),
                 Err(ExportError::InvalidImagePath(_))
             ));
         }
@@ -1739,7 +2240,7 @@ mod tests {
         let mut invalid = page();
         invalid.width_pt = f64::NAN;
         assert!(matches!(
-            validate_page(root.path(), &invalid),
+            validate_page(root.path(), &invalid, None),
             Err(ExportError::InvalidPage(_))
         ));
     }
@@ -1805,6 +2306,7 @@ mod tests {
         second.width_pt = 400.0;
         second.height_pt = 300.0;
         let third = ExportPage {
+            calculation: None,
             width_pt: 595.0,
             height_pt: 842.0,
             shared_style: None,
@@ -1874,4 +2376,300 @@ mod tests {
         .unwrap_err();
         assert!(matches!(error, ExportError::CompilerFailed(_)));
     }
+
+    fn calculation_page(source: &str, split_a4: bool) -> ExportPage {
+        let mut document = goodtype_core::calculation::Calculation::new("calc", "part", "Task A");
+        document.cells[0].source = source.to_owned();
+        ExportPage {
+            calculation: Some(crate::calculation::ExportCalculation {
+                document,
+                part_id: "part".to_owned(),
+                german: false,
+                split_a4,
+            }),
+            width_pt: goodtype_core::calculation::A4_WIDTH_PT,
+            height_pt: 84.0,
+            shared_style: None,
+            background: PageBackground::Plain {
+                color: "#ffffff".to_owned(),
+            },
+            page_text_baseline_grid: false,
+            page_typst: None,
+            blocks: vec![],
+            strokes: vec![],
+            shapes: vec![],
+            images: vec![],
+        }
+    }
+
+    #[test]
+    fn helper_render_does_not_enter_calculation_export() {
+        let root = tempfile::tempdir().unwrap();
+        let page = calculation_page("print('not executed')", false);
+        let error = render_page_png_granted(
+            root.path(),
+            &page,
+            &crate::GrantedFiles::new(),
+            None,
+            Some(1.0),
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("not supported by helper rendering")
+        );
+    }
+
+    fn page_text(frame: &typst::layout::Frame, into: &mut String) {
+        for (_, item) in frame.items() {
+            match item {
+                typst::layout::FrameItem::Group(group) => page_text(&group.frame, into),
+                typst::layout::FrameItem::Text(text) => into.push_str(text.text.as_str()),
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
+    fn mixed_normal_and_computational_pages_keep_order_geometry_and_selectable_text() {
+        use crate::calculation::{A4_HEIGHT_PT, layout};
+        let root = tempfile::tempdir().unwrap();
+        let mut before = page();
+        before.strokes.clear();
+        before.blocks[0].source = "Normal before".to_owned();
+        before.background = PageBackground::Plain {
+            color: "#fdf6e3".to_owned(),
+        };
+        let short = calculation_page("short_value = 21 * 2", false);
+        let long_source = (0..90)
+            .map(|line| format!("split_{line} = {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let split = calculation_page(&long_source, true);
+        let mut after = page();
+        after.strokes.clear();
+        after.blocks[0].source = "Normal after".to_owned();
+        let pages = [before, short.clone(), split, after];
+
+        let (source, files) = compose(root.path(), &pages, None).unwrap();
+        let mut world = crate::embedded::BlockWorld::for_main(
+            "page.typ",
+            source,
+            root.path().canonicalize().unwrap(),
+            false,
+        );
+        for (name, bytes) in files {
+            world.insert_binary(&name, bytes);
+        }
+        let document = typst::compile::<typst_layout::PagedDocument>(&world)
+            .output
+            .unwrap_or_else(|errors| panic!("{}", crate::embedded::diagnostic_messages(&errors)));
+        let pages_out = document.pages();
+        assert!(pages_out.len() >= 5, "{} pages", pages_out.len());
+        let texts = pages_out
+            .iter()
+            .map(|page| {
+                let mut text = String::new();
+                page_text(&page.frame, &mut text);
+                text
+            })
+            .collect::<Vec<_>>();
+        let size = |index: usize| {
+            let size = pages_out[index].frame.size();
+            (size.x.to_pt(), size.y.to_pt())
+        };
+        assert_eq!(size(0), (595.0, 842.0));
+        assert!(texts[0].contains("Normal before"));
+        let calculation = short.calculation.as_ref().unwrap();
+        let expected = layout(root.path(), &calculation.document, "part", false).unwrap();
+        assert!((size(1).0 - goodtype_core::calculation::A4_WIDTH_PT).abs() < 1e-6);
+        assert!((size(1).1 - expected.height_pt).abs() < 1e-6);
+        assert!(size(1).1 < 100.0, "a one-cell page stays short");
+        assert!(texts[1].contains("short_value"));
+        // The computational page does not inherit the preceding page's paper colour.
+        assert_ne!(
+            format!("{:?}", pages_out[1].fill),
+            format!("{:?}", pages_out[0].fill)
+        );
+        let last = pages_out.len() - 1;
+        for index in 2..last {
+            assert!((size(index).1 - A4_HEIGHT_PT).abs() < 1e-6);
+        }
+        let split_text = texts[2..last].concat();
+        assert!((0..90).all(|line| split_text.contains(&format!("split_{line} = {line}"))));
+        assert_eq!(size(last), (595.0, 842.0));
+        assert!(texts[last].contains("Normal after"));
+
+        let result = export_pages(root.path(), "mixed.pdf", &pages, false).unwrap();
+        assert!(fs::read(result.output_path).unwrap().starts_with(b"%PDF-"));
+    }
+
+    #[test]
+    fn computational_export_refuses_instead_of_omitting_or_clipping() {
+        let root = tempfile::tempdir().unwrap();
+        let mut with_objects = calculation_page("x = 1", false);
+        with_objects.blocks = page().blocks;
+        assert!(matches!(
+            export_pages(root.path(), "objects.pdf", &[with_objects], false),
+            Err(ExportError::InvalidPage(_))
+        ));
+        let tall = (0..2000)
+            .map(|line| format!("v{line} = {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let error = export_pages(
+            root.path(),
+            "tall.pdf",
+            &[page(), calculation_page(&tall, false)],
+            false,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            ExportError::Calculation {
+                page_index: 1,
+                reason: crate::calculation::CalculationError::TooTall { .. }
+            }
+        ));
+        assert!(!root.path().join("exports/tall.pdf").exists());
+        export_pages(
+            root.path(),
+            "tall.pdf",
+            &[calculation_page(&tall, true)],
+            false,
+        )
+        .unwrap();
+    }
+}
+
+/// A crop in canonical page points.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RenderCrop {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+#[derive(Debug)]
+pub struct RenderedPng {
+    pub png: Vec<u8>,
+    pub width_px: u32,
+    pub height_px: u32,
+    pub origin_pt: (f64, f64),
+    pub scale: f64,
+}
+
+fn render_bounds(
+    page: &ExportPage,
+    crop: Option<RenderCrop>,
+    scale: Option<f64>,
+) -> Result<(RenderCrop, f64), ExportError> {
+    let fail = || ExportError::InvalidPage("invalid or oversized PNG crop/scale".into());
+    let scale = scale.unwrap_or(2.0);
+    if !scale.is_finite() || scale <= 0.0 || scale > 4.0 {
+        return Err(fail());
+    }
+    valid_positive_dimension(page.width_pt, "page width")?;
+    valid_positive_dimension(page.height_pt, "page height")?;
+    let c = crop.unwrap_or(RenderCrop {
+        x: 0.0,
+        y: 0.0,
+        width: page.width_pt,
+        height: page.height_pt,
+    });
+    if ![c.x, c.y, c.width, c.height].iter().all(|v| v.is_finite())
+        || c.width <= 0.0
+        || c.height <= 0.0
+    {
+        return Err(fail());
+    }
+    let x = c.x.clamp(0.0, page.width_pt);
+    let y = c.y.clamp(0.0, page.height_pt);
+    let width = (c.x + c.width).clamp(0.0, page.width_pt) - x;
+    let height = (c.y + c.height).clamp(0.0, page.height_pt) - y;
+    let w = (width * scale).ceil();
+    let h = (height * scale).ceil();
+    if width <= 0.0 || height <= 0.0 || w > 2048.0 || h > 2048.0 || w * h > 4_000_000.0 {
+        return Err(fail());
+    }
+    Ok((
+        RenderCrop {
+            x,
+            y,
+            width,
+            height,
+        },
+        scale,
+    ))
+}
+
+/// Compose and render only granted project bytes. Rendering never downloads packages.
+pub fn render_page_png_granted(
+    root: &Path,
+    page: &ExportPage,
+    files: &crate::GrantedFiles,
+    crop: Option<RenderCrop>,
+    scale: Option<f64>,
+) -> Result<RenderedPng, ExportError> {
+    let (crop, scale) = render_bounds(page, crop, scale)?;
+    validate_page(root, page, Some(files))?;
+    let (source, overlay) = compose(root, std::slice::from_ref(page), Some(files))?;
+    let document =
+        crate::embedded::export_document(root, "page.typ", source, overlay, false, Some(files))
+            .map_err(ExportError::CompilerFailed)?;
+    let mut page = document
+        .pages()
+        .first()
+        .ok_or_else(|| ExportError::InvalidPage("empty render".into()))?
+        .clone();
+    // A PDF's unpainted paper is transparent. Vision hosts may display that as black,
+    // making black text disappear. Match the notebook canvas's white paper for PNG
+    // context only; preserve explicit paper colours and the original PDF/export.
+    if page.fill_or_white().is_none() {
+        page.fill = typst::foundations::Smart::Custom(Some(typst::visualize::Paint::Solid(
+            typst::visualize::Color::WHITE,
+        )));
+    }
+    use typst::layout::{Abs, Point, Size};
+    page.frame
+        .translate(Point::new(Abs::pt(-crop.x), Abs::pt(-crop.y)));
+    page.frame
+        .set_size(Size::new(Abs::pt(crop.width), Abs::pt(crop.height)));
+    // typst-render makes full-size textures for placed images; flatten vectors inside the crop
+    // first so page-sized ink/PDF backgrounds cannot allocate a full-page raster (ADR 0041).
+    let svg = typst_svg::svg(&page, &typst_svg::SvgOptions::default());
+    let image = typst::visualize::SvgImage::new(typst::foundations::Bytes::from_string(svg))
+        .map_err(|e| ExportError::CompilerFailed(format!("{e:?}")))?;
+    let size = page.frame.size();
+    page.frame = typst::layout::Frame::hard(size);
+    page.frame.push(
+        Point::zero(),
+        typst::layout::FrameItem::Image(
+            typst::visualize::Image::plain(image),
+            size,
+            typst::syntax::Span::detached(),
+        ),
+    );
+    let pixmap = typst_render::render(
+        &page,
+        &typst_render::RenderOptions {
+            pixel_per_pt: typst::utils::Scalar::new(scale),
+            ..Default::default()
+        },
+    );
+    let png = pixmap
+        .encode_png()
+        .map_err(|e| ExportError::CompilerFailed(e.to_string()))?;
+    if png.len() > 4 * 1024 * 1024 {
+        return Err(ExportError::InvalidPage("PNG exceeds 4 MiB".into()));
+    }
+    Ok(RenderedPng {
+        png,
+        width_px: pixmap.width(),
+        height_px: pixmap.height(),
+        origin_pt: (crop.x, crop.y),
+        scale,
+    })
 }

@@ -90,7 +90,7 @@ async function manifest() {
   metadata.sourceDirty ||= dirty;
   const directory = resolve(root, 'target', metadata.packageName);
   const files = {};
-  for (const name of ['Goodtype.exe', 'tinymist.exe', 'goodtype-ink.exe', 'ink-v1.md', 'README.txt', 'LICENSE', 'NOTICE']) {
+  for (const name of ['Goodtype.exe', 'tinymist.exe', 'goodtype-ink.exe', 'goodtype-mcp.exe', 'skill/goodtype/SKILL.md', 'ink-v1.md', 'README.txt', 'LICENSE', 'NOTICE']) {
     files[name] = await sha256(resolve(directory, name));
   }
   const archive = `${metadata.packageName}.zip`;
@@ -140,8 +140,8 @@ async function publish(directory) {
   const tags = JSON.parse(gh('api', '--paginate', '--slurp', `repos/${repository}/tags?per_page=100`)).flat();
   assert.ok(!tags.some((item) => item.name === tag), `${tag} already exists. Published releases are never replaced.`);
   const args = ['release', 'create', tag, ...names.map((name) => resolve(directory, name)),
-    '--repo', repository, '--target', metadata.sourceCommit, '--title', `Goodtype ${tag}`,
-    '--notes', `${channel === 'dev' ? 'Development candidate; test before promotion to main.' : 'Stable-channel rebuild of the tested dev source.'}\n\nSource: ${metadata.sourceCommit}\nBuild: ${metadata.buildUrl}\n\nWindows x64 portable ZIP. Extract the entire folder. WebView2 is required. This build is unsigned; physical pen/touch validation remains separate. See the included README and SHA-256 metadata.`];
+    '--repo', repository, '--target', metadata.sourceCommit, '--title', `Goodtype ${tag} - ${channel === 'dev' ? 'Pre-alpha development build' : 'Pre-alpha release'}`,
+    '--notes', `${channel === 'dev' ? 'Pre-alpha development candidate; test before promotion to main.' : 'Pre-alpha release rebuilt from the tested dev source.'}\n\nSource: ${metadata.sourceCommit}\nBuild: ${metadata.buildUrl}\n\nWindows x64 portable ZIP. Extract the entire folder. WebView2 is required. This build is unsigned; physical pen/touch validation remains separate. See the included README and SHA-256 metadata.`];
   args.push(...(channel === 'dev' ? ['--prerelease', '--latest=false'] : ['--latest']));
   gh(...args);
 }

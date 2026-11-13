@@ -2,23 +2,27 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createSession, type SessionEnvironment } from "./notebookSession.svelte";
 import { blankNotebookSnapshot } from "./newNotebook";
 import { DEFAULT_SETTINGS } from "../settings";
+import { notice } from "../i18n";
 import type { NotebookSnapshot } from "../ipc/types";
 import type { Stroke } from "../model";
+import type { ShapeView } from "./pageView";
+import { TakenShapes } from "./InkSurface.svelte";
 
 const ipc = vi.hoisted(() => ({
   open: vi.fn(), page: vi.fn(), focus: vi.fn(), commit: vi.fn(), history: vi.fn(), structure: vi.fn(),
-  move: vi.fn(), add: vi.fn(),
+  move: vi.fn(), add: vi.fn(), close: vi.fn(), reorder: vi.fn(), presets: vi.fn(),
 }));
 vi.mock("../ipc/notebook", async original => ({ ...await original<typeof import("../ipc/notebook")>(),
   openNotebook: ipc.open, openPage: ipc.page, focusPage: ipc.focus, commitNotebook: ipc.commit,
-  runHistory: ipc.history, runStructureHistory: ipc.structure, createPage: ipc.add,
+  runHistory: ipc.history, runStructureHistory: ipc.structure, createPage: ipc.add, reorderPages: ipc.reorder,
 }));
 vi.mock("../ipc/library", () => ({ moveLibraryEntries: ipc.move }));
 vi.mock("../ipc/workspace", () => ({
   listRecentNotebooks: async () => [], recordNotebookOpened: async () => {},
   recordNotebookPage: async () => {}, recordNotebookSession: async () => {},
+  closeNotebookSession: ipc.close,
 }));
-vi.mock("../ipc/presets", () => ({ listTypstPresets: async () => [] }));
+vi.mock("../ipc/presets", () => ({ listTypstPresets: ipc.presets }));
 vi.mock("../ipc/recovery", () => ({ listRecoveryCandidates: async () => [] }));
 vi.mock("../library/cover", () => ({ notebookCover: async () => null }));
 vi.mock("../pdf/document", () => ({ releasePdfDocuments: async () => {} }));
@@ -36,6 +40,8 @@ beforeEach(() => {
   ipc.history.mockImplementation(async (_root, _command, id) => result(snapshot(id)));
   ipc.structure.mockResolvedValue(result(snapshot()));
   ipc.add.mockResolvedValue(result(snapshot()));
+  ipc.close.mockResolvedValue(undefined);
+  ipc.presets.mockResolvedValue([]);
   ipc.commit.mockImplementation(async (_root, value) => result(value));
 });
 afterEach(() => {
@@ -62,7 +68,7 @@ function deferred<T>() {
 function workspace() {
   const env = {
     addPageOpen: false, collectMetrics: false, followPageText: vi.fn(), message: String, moreOpen: false,
-    navigation: { stopTouchInertia: vi.fn(), pagePointers: new Map(), announceTouchHistory: vi.fn() },
+    navigation: { stopTouchInertia: vi.fn(), lockPageFocus: vi.fn(), pagePointers: new Map(), announceTouchHistory: vi.fn() },
     pageViewport: undefined, paletteDragging: false, previews: { reset: vi.fn() }, resetWorkspaceEditors: vi.fn(),
     saveTemplate: vi.fn(async () => true), searchOpen: false,
     selection: { groupedStrokeIds: [], updateInkSelection: vi.fn() },
@@ -79,6 +85,66 @@ function workspace() {
 }
 
 describe("notebook session coordination", () => {
+  it("rejects free-positioned block insertion on a calculation page", () => {
+    const { session } = workspace();
+    const value = snapshot();
+    value.page.calculation = { id: "calc-001", sourcePath: "calculations/calc-001.ipynb", partId: "part-001" };
+    session.applySnapshot(value);
+    session.addTypstBlock();
+    session.addTranscribedBlock("hello", { x: 12, y: 12, layoutWidthPt: 120 }, notice("transcription.inserted"));
+    expect(session.typstBlocks).toEqual([]);
+    expect(ipc.commit).not.toHaveBeenCalled();
+  });
+
+  it("ignores late calculation saves and heights from another notebook", () => {
+    const { session } = workspace();
+    const height = session.activeGeometry.heightPt;
+    session.calculationHeight("page-001", 300, "another-root");
+    session.calculationSaved("page-001", {
+      nbformat: 4, nbformat_minor: 5, cells: [],
+      metadata: { goodtype: { id: "calc-a", title: "Task", revision: 20, parts: [] } },
+    }, "change", "another-root");
+    expect(session.activeGeometry.heightPt).toBe(height);
+    expect(session.canUndo).toBe(false);
+  });
+  it("ends a background notebook's sessions when its tab closes", async () => {
+    const { session, env } = workspace();
+    const forget = vi.fn();
+    Object.assign(env, { forgetCalculations: forget });
+    session.openTabs = [...session.openTabs, { root: "background", title: "Other" }];
+    await session.closeNotebookTab("background");
+    expect(ipc.close).toHaveBeenCalledWith("background");
+    expect(forget).toHaveBeenCalledWith("background");
+    expect(session.root).toBe("old");
+  });
+  it("keeps calculation Undo after an unrelated page is added and undone", async () => {
+    const { session, env } = workspace();
+    const calculationHistory = vi.fn(async () => true);
+    Object.assign(env, { calculationHistory });
+    session.calculationSaved("page-001", {
+      nbformat: 4, nbformat_minor: 5, cells: [],
+      metadata: { goodtype: { id: "calc-a", title: "Task", revision: 2, parts: [{ id: "part-a", title: "Task" }] } },
+    });
+    await session.addPage({ kind: "last" });
+    await session.routeHistory("undo_notebook", "Undo");
+    await session.persist();
+    await session.routeHistory("undo_notebook", "Undo");
+    expect(calculationHistory).toHaveBeenCalledWith(true, false);
+    expect(ipc.history).not.toHaveBeenCalled();
+  });
+  it("keeps export from starting while a calculation is running", async () => {
+    const { session, env } = workspace();
+    Object.assign(env, { calculationRunning: () => true });
+    await session.exportPdf();
+    expect(env.saveTemplate).not.toHaveBeenCalled();
+    expect(session.busy).toBe(false);
+  });
+  it("keeps an explicitly selected short page active until navigation resumes", async () => {
+    const { session, env } = workspace();
+    await session.activatePage("page-002");
+    expect(env.navigation.lockPageFocus).toHaveBeenCalledOnce();
+    expect(session.activePageId).toBe("page-002");
+  });
   it.each([true, false])("preserves structural Undo across relocation, reopen=%s", async reopened => {
     const { session } = workspace();
     await session.addPage({ kind: "last" });
@@ -132,6 +198,24 @@ describe("notebook session coordination", () => {
     expect(ipc.commit.mock.calls[1][1].inkLayers[0].strokes).toHaveLength(2);
   });
 
+  it("reloads visible neighbours after a page move instead of leaving them on Loading", async () => {
+    const { session } = workspace();
+    vi.stubGlobal("IntersectionObserver", class {
+      constructor(private callback: (entries: { isIntersecting: boolean }[]) => void) {}
+      observe() { this.callback([{ isIntersecting: true }]); }
+      disconnect() {}
+    });
+    // The page element stays mounted through the move, exactly as the keyed page list keeps it.
+    const observer = session.observePage({} as HTMLElement, "page-002");
+    await vi.waitFor(() => expect(session.pageEntries.find(page => page.id === "page-002")?.snapshot).not.toBeNull());
+    const moved = snapshot("page-001");
+    moved.manifest.pages = [moved.manifest.pages[1], moved.manifest.pages[0], moved.manifest.pages[2]];
+    ipc.reorder.mockResolvedValue(result(moved));
+    await session.moveActivePage(1);
+    await vi.waitFor(() => expect(session.pageEntries.find(page => page.id === "page-002")?.snapshot).not.toBeNull());
+    observer.destroy();
+  });
+
   it("does not apply a focus reply over typing that happened during the request", async () => {
     const { session } = workspace();
     const focusing = deferred<ReturnType<typeof result>>(), started = deferred<void>();
@@ -153,5 +237,119 @@ describe("notebook session coordination", () => {
     expect(await session.openNotebookAt("other")).toBe(false);
     expect(ipc.open).not.toHaveBeenCalled();
     expect(session.root).toBe("old");
+  });
+});
+
+describe("preset change notices (P2)", () => {
+  const listed = (name: string) => [{ id: "styles/a.typ", name, description: "", importPath: "/styles/a.typ", kind: "custom" as const }];
+
+  it("refreshes previews and the list only for the open notebook", async () => {
+    const { session } = workspace();
+    ipc.presets.mockResolvedValue(listed("Fresh"));
+    const before = session.presetRevision;
+    session.presetChanged({ root: "elsewhere", path: "/styles/a.typ", revision: "1" });
+    await vi.runAllTimersAsync();
+    expect(session.presetRevision).toBe(before);
+    expect(ipc.presets).not.toHaveBeenCalled();
+    session.presetChanged({ root: "old", path: "/styles/a.typ", revision: "2" });
+    expect(session.presetRevision).toBe(before + 1);
+    await vi.runAllTimersAsync();
+    expect(ipc.presets).toHaveBeenCalledWith("old");
+    expect(session.presets.map(preset => preset.name)).toEqual(["Fresh"]);
+  });
+
+  it("never stores a list read for a notebook that is no longer open", async () => {
+    const { session } = workspace();
+    const pending = deferred<ReturnType<typeof listed>>();
+    ipc.presets.mockReturnValue(pending.promise);
+    const refresh = session.refreshPresets();
+    session.root = "other";
+    pending.resolve(listed("Stale"));
+    await refresh;
+    expect(session.presets).toEqual([]);
+  });
+});
+
+describe("whole-shape erasing", () => {
+  const stroke: Stroke = {
+    id: "ink-1", zIndex: 1, tool: "pen", color: "#000000", widthPt: 2, pattern: "solid", pressure: false,
+    taper: 0, opacity: 1, groupId: null,
+    points: [{ x: 10, y: 10, pressure: 0.5, timeMs: 0, tiltX: 0, tiltY: 0 }, { x: 40, y: 10, pressure: 0.5, timeMs: 8, tiltX: 0, tiltY: 0 }],
+    transform: { translateX: 0, translateY: 0, scaleX: 1, scaleY: 1, rotation: 0 },
+  };
+  const shape = (id: string, zIndex: number): ShapeView => ({
+    id, x: 100, y: 100, rotation: 0, scale: 1, zIndex, readingOrder: zIndex,
+    geometry: { kind: "line", start: { x: 0, y: 0 }, end: { x: 50, y: 0 } },
+    style: { strokeColor: "#000000", strokeWidthPt: 2, fillColor: null, opacity: 1 },
+  });
+
+  /** A page holding one stroke and two shapes, already saved, with the commit spy reset. */
+  async function erasablePage() {
+    const context = workspace();
+    context.session.strokes = [stroke];
+    context.session.shapes = [shape("shape-a", 2), shape("shape-b", 3)];
+    context.session.queueCommit("Setup");
+    await context.session.persist();
+    ipc.commit.mockClear();
+    return context;
+  }
+
+  it("hides taken shapes locally and changes nothing canonical while the pen is down", async () => {
+    const { session } = await erasablePage();
+    const shapesBefore = session.shapes;
+    const previews: (ReadonlyMap<string, ShapeView[]> | null)[] = [];
+    const taken = new TakenShapes(preview => previews.push(preview));
+    expect(taken.take("shape-b")).toBe(true);
+    await vi.advanceTimersByTimeAsync(1500); // a pause past the 500 ms ink debounce
+    expect(taken.take("shape-b")).toBe(false);
+    expect(taken.take("shape-a")).toBe(true);
+    await vi.advanceTimersByTimeAsync(3000); // past the 2 s maximum
+    expect(previews.map(preview => preview && [...preview.keys()])).toEqual([["shape-b"], ["shape-b", "shape-a"]]);
+    expect(session.shapes).toBe(shapesBefore);
+    expect(session.inkPending).toBe(false);
+    expect(ipc.commit).not.toHaveBeenCalled();
+  });
+
+  it("lands taken shapes with the gesture's ink as one commit that one Undo restores", async () => {
+    const { session } = await erasablePage();
+    const taken = new TakenShapes(() => {});
+    taken.take("shape-b");
+    // Release, in InkSurface's order: the shapes, then the ink, in the same tick.
+    session.replaceErasedShapes(taken.removal());
+    taken.clear();
+    session.changeStrokes([], notice("workspace.updatedInk"));
+    expect(ipc.commit).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(2500);
+    await session.persist();
+    expect(ipc.commit).toHaveBeenCalledOnce();
+    const [, committed, previous] = ipc.commit.mock.calls[0] as [string, NotebookSnapshot, NotebookSnapshot];
+    const ids = (value: NotebookSnapshot) => [
+      ...value.page.objects.map(object => object.id),
+      ...value.inkLayers.flatMap(layer => layer.strokes.map(item => item.id)),
+    ].sort();
+    expect(ids(committed)).toEqual(["shape-a"]);
+    expect(ids(previous)).toEqual(["ink-1", "shape-a", "shape-b"]);
+
+    ipc.history.mockImplementation(async () => result(previous));
+    await session.routeHistory("undo_notebook", "Undo");
+    await session.persist();
+    expect(ipc.history).toHaveBeenCalledOnce();
+    expect(session.strokes.map(item => item.id)).toEqual(["ink-1"]);
+    expect(session.shapes.map(item => item.id).sort()).toEqual(["shape-a", "shape-b"]);
+  });
+
+  it("brings taken shapes back and changes nothing when the gesture is cancelled", async () => {
+    const { session } = await erasablePage();
+    const shapesBefore = session.shapes;
+    const previews: (ReadonlyMap<string, ShapeView[]> | null)[] = [];
+    const taken = new TakenShapes(preview => previews.push(preview));
+    taken.take("shape-a");
+    taken.clear(); // pointercancel / lost capture
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(previews.at(-1)).toBeNull();
+    expect(taken.ids.size).toBe(0);
+    expect(session.shapes).toBe(shapesBefore);
+    expect(session.inkPending).toBe(false);
+    expect(ipc.commit).not.toHaveBeenCalled();
   });
 });

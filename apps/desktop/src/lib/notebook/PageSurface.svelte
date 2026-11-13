@@ -1,10 +1,12 @@
 <script lang="ts">
+  import PdfMaterials from "../pdf/PdfMaterials.svelte";
+  import type { PageObject } from "../model";
   import type { PageBackground, ShapeStyle, Stroke, StrokePattern } from "../model";
   import PaperLayer from "../page/PaperLayer.svelte";
   import type { StrokePerformance } from "../ink/metrics";
   import type { TypstCompileResult } from "../editor/typst";
   import { getCachedTypst } from "../editor/typstCache";
-  import { pagePresetPath } from "../page/presets";
+  import { pagePresetPath, readsNotebookFiles } from "../page/presets";
   import type { TypstCompileRequest } from "../ipc/typst";
   import {
     DEFAULT_POINTER_MAPPING,
@@ -35,6 +37,7 @@
   // SVGs — when focus moves onto it, instead of being torn down and rebuilt by a second
   // component.
   let {
+    materials = [],
     blocks = [],
     pageTypst = null,
     images = [],
@@ -51,6 +54,7 @@
     pageWidthPt,
     pageHeightPt,
     zoom = 1,
+    zooming = false,
     interactive = false,
     root = null,
     inlineEditing = true,
@@ -58,6 +62,7 @@
     pageTextBaselineGrid = true,
     presetRevision = 0,
     onRequestEdit,
+    onAskAI,
     tool = "select",
     color = "#16212b",
     widthPt = 2,
@@ -76,6 +81,7 @@
       opacity: 1,
     },
     shapeConstrain = false,
+    shapeEndSnap = true,
     drawAndHoldShapes = true,
     heldLineMinimumPt = 6,
     eraseRadiusPt = 8,
@@ -103,7 +109,6 @@
     onSelectShape,
     onChangeShape,
     onEditShape,
-    onEraseShape,
     onShapesErased,
     onStrokeFinalized,
     onShapeFinalized,
@@ -112,6 +117,7 @@
     onSelectionChange,
     onStrokeMetrics,
   }: {
+    materials?: PageObject[];
     blocks?: BlockView[];
     pageTypst?: PageTypstView | null;
     images?: ImageView[];
@@ -129,6 +135,7 @@
     pageWidthPt: number;
     pageHeightPt: number;
     zoom?: number;
+    zooming?: boolean;
     interactive?: boolean;
     /** Notebook root, forwarded to the editor for completions. */
     root?: string | null;
@@ -137,6 +144,7 @@
     sharedStyle?: string;
     pageTextBaselineGrid?: boolean;
     presetRevision?: number;
+    onAskAI?: (id: string, focus: import("../helper/editorEntry").EditorFocus | null, restore: () => void) => void;
     onRequestEdit?: (id: string) => void;
     tool?: InkTool;
     color?: string;
@@ -152,6 +160,7 @@
     shapeKind?: ShapeKind;
     shapeStyle?: ShapeStyle;
     shapeConstrain?: boolean;
+    shapeEndSnap?: boolean;
     drawAndHoldShapes?: boolean;
     heldLineMinimumPt?: number;
     eraseRadiusPt?: number;
@@ -183,7 +192,6 @@
     onSelectShape?: (id: string) => void;
     onChangeShape?: (shape: ShapeView, commit?: ShapeEditCommit) => void;
     onEditShape?: (id: string, editing: boolean) => void;
-    onEraseShape?: (id: string) => void;
     onShapesErased?: (replaced: ReadonlyMap<string, ShapeView[]>) => void;
     onStrokeFinalized?: (stroke: Stroke) => void;
     onShapeFinalized?: (shape: ShapeDraft) => void;
@@ -194,7 +202,7 @@
   } = $props();
 
   /**
-   * Shapes as a precise erase is cutting them. Held here rather than in the page's shapes so the
+   * Shapes as an erase is cutting or taking them (a taken shape maps to no pieces). Held here rather than in the page's shapes so the
    * gesture stays local; the pieces become real shapes once, on pen-up.
    */
   let shapeErasePreview = $state.raw<ReadonlyMap<string, ShapeView[]> | null>(null);
@@ -221,7 +229,7 @@
     {background}
     geometry={{ widthPt: pageWidthPt, heightPt: pageHeightPt }}
     snapBlocksToGrid={pageTextBaselineGrid}
-    compileDependency={templatePath ? presetRevision : 0}
+    compileDependency={templatePath || readsNotebookFiles(`${sharedStyle}\n${typst.source}`) ? presetRevision : 0}
     readingOrder={typst.readingOrder}
     onCompile={(request) => onCompile(typst.id, request)}
   />
@@ -234,6 +242,7 @@
   {/if}
 </div>
 <div class:interactive class:editing={editingBlockId !== null} class="objects">
+  {#if root}<PdfMaterials objects={materials} {root} {zoom}/>{/if}
   {#each blocks as block (block.id)}
     <TypstBlock
       id={block.id}
@@ -248,6 +257,7 @@
       compileResult={results[block.id] ?? null}
       cached={getCachedTypst(`${sharedStyle}\n${block.source}`, block.layoutWidthPt, root ?? "") ?? null}
       compileContext={sharedStyle}
+      compileDependency={readsNotebookFiles(`${sharedStyle}\n${block.source}`) ? presetRevision : 0}
       {root}
       selected={interactive && selectedBlockId === block.id}
       {toPageDelta}
@@ -262,6 +272,7 @@
       onEditingChange={(editing) =>
         (editingBlockId = editing ? block.id : editingBlockId === block.id ? null : editingBlockId)}
       inlineEditing={interactive && inlineEditing}
+      onAskAI={onAskAI ? (focus, restore) => onAskAI?.(block.id, focus, restore) : undefined}
       onRequestEdit={() => onRequestEdit?.(block.id)}
     />
   {/each}
@@ -296,6 +307,8 @@
       {pageWidthPt}
       {pageHeightPt}
       {zoom}
+      endSnap={shapeEndSnap}
+      snapShapes={displayedShapes}
       {toPageDelta}
       onSelect={interactive ? () => onSelectShape?.(shape.id) : undefined}
       onChange={interactive ? (next, commit) => onChangeShape?.(next, commit) : undefined}
@@ -309,6 +322,7 @@
     {strokes}
     {newStrokeZIndex}
     objectZIndices={[
+      ...materials.map(material => material.zIndex),
       ...blocks.map((block) => block.zIndex),
       ...images.map((image) => image.zIndex),
       ...displayedShapes.map((shape) => shape.zIndex),
@@ -320,6 +334,7 @@
     {showSelectionBounds}
     {pageWidthPt}
     {pageHeightPt}
+    {zooming}
     {zoom}
     {tool}
     {color}
@@ -334,6 +349,7 @@
     {shapeKind}
     {shapeStyle}
     {shapeConstrain}
+    {shapeEndSnap}
     {drawAndHoldShapes}
     {heldLineMinimumPt}
     {eraseRadiusPt}
@@ -344,11 +360,11 @@
     {pointerMapping}
     shapeAt={interactive
       ? (point, reachPt) => {
-          const found = topmostShapeAt(shapes, point, reachPt);
+          // As displayed: a shape this erase has already taken is hidden, and must not be hit again.
+          const found = topmostShapeAt(displayedShapes, point, reachPt);
           return found && { id: found.id, zIndex: found.zIndex };
         }
       : undefined}
-    onEraseShape={interactive ? (id) => onEraseShape?.(id) : undefined}
     shapes={interactive ? shapes : undefined}
     onShapeErasePreview={(preview) => (shapeErasePreview = preview)}
     onShapesErased={interactive ? (replaced) => onShapesErased?.(replaced) : undefined}

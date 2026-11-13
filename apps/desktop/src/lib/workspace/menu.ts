@@ -5,10 +5,10 @@
 // every future page-level feature has to land in — templates, bookmarks, rotation, outline — and
 // each of those should cost an entry, not a rewrite.
 //
-// The two kinds cover what the menu currently needs to express. Resist adding another without a
+// One kind covers what the menu currently needs to express. Resist adding another without a
 // real entry that needs it: a menu that can render anything stops being a menu.
 
-export type MenuEntry = MenuAction | MenuNumber;
+export type MenuEntry = MenuAction;
 
 type Shared = {
   /** Stable identity for the keyed each block. */
@@ -27,15 +27,6 @@ export type MenuAction = Shared & {
   /** Red styling. Reserve it for entries that destroy work the writer cannot retype. */
   destructive?: boolean;
   onSelect: () => void;
-};
-
-/** A bounded number committed on Enter or blur — a page to jump to, a count, a size. */
-export type MenuNumber = Shared & {
-  kind: "number";
-  value: number;
-  min: number;
-  max: number;
-  onCommit: (value: number) => void;
 };
 
 export type MenuSection = {

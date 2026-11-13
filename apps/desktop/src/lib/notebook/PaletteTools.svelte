@@ -106,13 +106,13 @@
     border: 0;
     border-radius: var(--radius-lg);
     background: transparent;
-    color: #c4cad2;
+    color: var(--muted);
     cursor: pointer;
     place-items: center;
   }
-  .tool-tile:hover { background: var(--wash); }
-  .tool-tile.active { background: var(--blueprint); color: #fff; }
-  .tool-tile:focus-visible { outline: 2px solid var(--blueprint); outline-offset: 1px; }
+  .tool-tile:hover { background: var(--wash); color: var(--text); }
+  .tool-tile.active { background: var(--blueprint); color: var(--on-accent); }
+  .tool-tile:focus-visible { outline: 2px solid var(--blueprint-light); outline-offset: 2px; }
   .tool-tile svg {
     /* A touch larger than chrome icons: the tip is the detail that names the instrument. */
     width: calc(var(--icon) + 4px);

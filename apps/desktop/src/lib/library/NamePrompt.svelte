@@ -1,7 +1,7 @@
 <script lang="ts">
   import { t } from "../i18n";
   import { untrack } from "svelte";
-  import { focusTrap } from "../workspace/focus";
+  import Dialog from "../workspace/Dialog.svelte";
   import { nameProblem } from "./library";
 
   /**
@@ -47,23 +47,9 @@
   }
 </script>
 
-<!-- On the window rather than the form, so Escape closes the prompt wherever focus has gone. -->
-<svelte:window
-  onkeydown={(event) => {
-    if (event.key === "Escape") onCancel();
-  }}
-/>
-
-<div
-  class="scrim"
-  role="presentation"
-  onpointerdown={(event) => {
-    if (event.target === event.currentTarget) onCancel();
-  }}
->
-  <div use:focusTrap class="prompt" role="dialog" aria-modal="true" aria-labelledby="name-prompt-title" tabindex="-1">
-    <form onsubmit={submit}>
-      <h2 id="name-prompt-title">{heading}</h2>
+<Dialog title={heading} size="sm" onClose={onCancel}>
+  {#snippet children()}
+    <form id="name-prompt-form" onsubmit={submit}>
       <input
         bind:this={field}
         bind:value
@@ -76,149 +62,32 @@
         maxlength="80"
       />
       <!-- Reserves its line whether or not there is a problem, so the buttons never jump. -->
-      <p id="name-prompt-problem" class="problem" class:shown={problem !== null}>{problem ?? " "}</p>
-      <div class="actions">
-        <button type="button" class="quiet" disabled={busy} onclick={onCancel}>{$t("library.cancel")}</button>
-        <button type="submit" class="primary" disabled={!ready}>{confirmLabel}</button>
-      </div>
+      <p id="name-prompt-problem" class="name-problem" class:shown={problem !== null}>{problem ?? " "}</p>
     </form>
-  </div>
-</div>
+  {/snippet}
+  {#snippet actions()}
+    <button type="button" class="control" disabled={busy} onclick={onCancel}>{$t("library.cancel")}</button>
+    <button type="submit" form="name-prompt-form" class="primary" disabled={!ready}>{confirmLabel}</button>
+  {/snippet}
+</Dialog>
 
 <style>
-  .scrim {
-    position: absolute;
-    z-index: 60;
-    display: grid;
-    padding: 20px;
-    background: rgb(10 12 16 / 62%);
-    inset: 0;
-    place-items: center;
-    animation: scrim-in 140ms ease-out;
-  }
-
-  .prompt {
-    width: min(400px, 100%);
-    padding: 18px;
-    border: 1px solid var(--edge, rgb(255 255 255 / 12%));
-    border-radius: var(--radius-lg, 10px);
-    background: var(--panel, #23272f);
-    box-shadow: 0 18px 44px rgb(0 0 0 / 55%);
-    animation: prompt-in 160ms cubic-bezier(0.16, 1, 0.3, 1);
-  }
-
-  h2 {
-    margin: 0 0 12px;
-    color: var(--text, #e9ebee);
-    font-size: var(--text-lg, 15px);
-    font-weight: 600;
-  }
-
   input {
     box-sizing: border-box;
     width: 100%;
-    min-height: var(--control, 36px);
+    min-height: var(--control);
     padding: 9px 11px;
-    border: 1px solid var(--edge, rgb(255 255 255 / 12%));
-    border-radius: var(--radius, 6px);
+    border: 1px solid var(--edge);
+    border-radius: var(--radius);
     background: rgb(0 0 0 / 25%);
-    color: var(--text, #e9ebee);
+    color: var(--text);
     font: inherit;
-    font-size: var(--text-md, 13px);
+    font-size: var(--text-md);
   }
-
-  input:focus-visible {
-    border-color: var(--blueprint-light, #7fb0f7);
-    outline: 2px solid var(--blueprint-light, #7fb0f7);
-    outline-offset: 1px;
-  }
-
-  input:hover {
-    border-color: rgb(255 255 255 / 20%);
-  }
-
-  input[aria-invalid="true"] {
-    border-color: var(--oxide, #e5645e);
-  }
-
-  .problem {
-    min-height: 1.2em;
-    margin: 7px 2px 14px;
-    color: transparent;
-    font-size: var(--text-sm, 11px);
-  }
-
-  .problem.shown {
-    color: var(--oxide, #e5645e);
-  }
-
-  .actions {
-    display: flex;
-    gap: 8px;
-    justify-content: flex-end;
-  }
-
-  .primary,
-  .quiet {
-    min-height: var(--control, 36px);
-    padding: 0 14px;
-    border: 0;
-    border-radius: var(--radius, 6px);
-    font: inherit;
-    font-size: var(--text-md, 13px);
-    cursor: pointer;
-    touch-action: manipulation;
-  }
-
-  .primary {
-    background: var(--blueprint, #4c8df0);
-    color: #0e1b31;
-    font-weight: 600;
-  }
-
-  .quiet {
-    background: rgb(255 255 255 / 5%);
-    color: var(--text, #e9ebee);
-  }
-
-  button:disabled {
-    cursor: default;
-    opacity: 0.5;
-  }
-
-  button:focus-visible {
-    outline: 2px solid var(--blueprint-light, #7fb0f7);
-    outline-offset: 1px;
-  }
-
-  .quiet:hover:not(:disabled) {
-    background: var(--wash, rgb(255 255 255 / 8%));
-  }
-
-  .primary:hover:not(:disabled) {
-    background: var(--blueprint-light, #7fb0f7);
-  }
-
-  @keyframes scrim-in {
-    from { opacity: 0; }
-  }
-
-  @keyframes prompt-in {
-    from { opacity: 0; transform: translateY(7px) scale(0.99); }
-  }
-
-  @media (pointer: coarse) {
-    input,
-    .primary,
-    .quiet {
-      min-height: var(--control-touch, 44px);
-    }
-  }
-
-  @media (prefers-reduced-motion: reduce) {
-    .scrim,
-    .prompt {
-      animation: none;
-    }
-  }
+  input:hover { border-color: var(--edge-strong); }
+  input:focus-visible { border-color: var(--blueprint-light); outline: 2px solid var(--blueprint-light); outline-offset: 2px; }
+  input[aria-invalid="true"] { border-color: var(--oxide); }
+  .name-problem { min-height: 1.2em; margin: 7px 2px 0; color: transparent; font-size: var(--text-sm); }
+  .name-problem.shown { color: var(--oxide); }
+  @media (pointer: coarse) { input { min-height: var(--control-touch); } }
 </style>

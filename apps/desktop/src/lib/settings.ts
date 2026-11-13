@@ -104,7 +104,12 @@ export type EraserReach = "everything" | "highlighter";
 /** Whole marks, or only the ink under the eraser (ADR 0037). */
 export type EraserMode = "stroke" | "precise";
 
+/** What happens when the assistant asks for context the user did not attach. Rust enforces it. */
+export type HelperPermission = "allow" | "ask" | "never";
+export type HelperPermissions = { pages: HelperPermission; presets: HelperPermission; pageNames: HelperPermission };
+
 export type AppSettings = {
+  aiHelper: { enabled: boolean; usage: "low" | "balanced" | "detailed"; webSearch: boolean; codexPath: string | null; codexModel: string | null; allowedMcpServers: string[]; permissions: HelperPermissions };
   uiLanguage: "en" | "de";
   /** Resolved into ordinary Typst source when a new movable text block is created. */
   inlineTextFont: string;
@@ -141,6 +146,8 @@ export type AppSettings = {
   shapePattern: StrokePattern;
   shapePatternSpacing: number;
   shapeConstrain: boolean;
+  /** Line ends and rectangle corners meet nearby ends and corners; Alt places freely. */
+  shapeEndSnap: boolean;
   drawAndHoldShapes: boolean;
   heldLineMinimumPt: number;
   /** Where the undo and redo buttons sit; `auto` keeps them clear of the palette on their own. */
@@ -162,6 +169,7 @@ export type AppSettings = {
   pageTextLineWrap: boolean;
   /** Allow downloading Typst Universe packages on a cache miss. */
   remotePackages: boolean;
+  pythonPackageDownloads: boolean;
   /** Scrolling on past the last page, against resistance, adds a page in the notebook paper. */
   pullToAddPage: boolean;
   /** One finger draws with the active tool; two fingers still pan and pinch. */
@@ -178,6 +186,7 @@ export type AppSettings = {
 };
 
 export const DEFAULT_SETTINGS: AppSettings = {
+  aiHelper: { enabled: false, usage: "balanced", webSearch: true, codexPath: null, codexModel: null, allowedMcpServers: [], permissions: { pages: "ask", presets: "ask", pageNames: "allow" } },
   uiLanguage: "en",
   inlineTextFont: "",
   penPresets: [
@@ -208,6 +217,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   shapePattern: "solid",
   shapePatternSpacing: 1,
   shapeConstrain: false,
+  shapeEndSnap: true,
   drawAndHoldShapes: true,
   heldLineMinimumPt: 6,
   historyCorner: "auto",
@@ -222,6 +232,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   pageTextBaselineGrid: true,
   pageTextLineWrap: true,
   remotePackages: true,
+  pythonPackageDownloads: true,
   pullToAddPage: true,
   drawWithFinger: false,
   touchHistory: true,
@@ -324,7 +335,12 @@ export function withRecentColor(recent: string[], color: string): string[] {
 export async function loadSettings(tauriAvailable: boolean): Promise<AppSettings> {
   if (!tauriAvailable) return structuredClone(DEFAULT_SETTINGS);
   try {
-    return await loadAppSettings();
+    const loaded = await loadAppSettings();
+    const aiHelper = { ...DEFAULT_SETTINGS.aiHelper, ...loaded.aiHelper };
+    aiHelper.permissions = { ...DEFAULT_SETTINGS.aiHelper.permissions, ...loaded.aiHelper?.permissions };
+    // Null is the Goodtype Luna default; preserve every nonblank explicit choice.
+    if (!aiHelper.codexModel?.trim()) aiHelper.codexModel = null;
+    return { ...loaded, aiHelper };
   } catch {
     return structuredClone(DEFAULT_SETTINGS);
   }

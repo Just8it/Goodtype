@@ -1,3 +1,40 @@
+<script module lang="ts">
+  import type { ShapeView as TakenShapeView } from "./pageView";
+
+  /**
+   * The whole shapes one erase gesture has taken. Shapes live above the ink surface, so while
+   * the pen is down they are only hidden through the page's shape-erase preview; they leave the
+   * page together with the gesture's ink, once, on release, or reappear if it is cancelled.
+   */
+  export class TakenShapes {
+    readonly ids = new Set<string>();
+    readonly #preview: (preview: ReadonlyMap<string, TakenShapeView[]> | null) => void;
+    constructor(preview: (preview: ReadonlyMap<string, TakenShapeView[]> | null) => void) {
+      this.#preview = preview;
+    }
+
+    /** Hide one more shape; false when this gesture had already taken it. */
+    take(id: string): boolean {
+      if (this.ids.has(id)) return false;
+      this.ids.add(id);
+      this.#preview(this.removal());
+      return true;
+    }
+
+    /** Each taken shape mapped to no pieces: the same shape-erase result a precise cut hands over. */
+    removal(): Map<string, TakenShapeView[]> {
+      return new Map([...this.ids].map((id) => [id, []]));
+    }
+
+    /** Stop hiding; a finished gesture has handed the shapes over first, a cancelled one has not. */
+    clear(): void {
+      if (this.ids.size === 0) return;
+      this.ids.clear();
+      this.#preview(null);
+    }
+  }
+</script>
+
 <script lang="ts">
   import { shapeMessage, toolMessage } from "../i18n/labels";
   import { t, notice, renderMessage, type UiText } from "../i18n";
@@ -32,7 +69,7 @@
     type PointerMapping,
     type PressureCalibration,
   } from "../ink/pipeline";
-  import { patternedOutlinePoints } from "../ink/pattern";
+  import { LiveInkOutline, type InkPolygon, type LiveInkStyle } from "../ink/pattern";
   import { limitedTaper, outlinePath } from "../ink/outline";
   import type { PaintedStratum } from "../ink/paint";
   import { preparedStrata } from "../ink/prepare";
@@ -44,6 +81,7 @@
   import { eraseShapesThrough } from "../shape/erase";
   import type { ShapeView } from "./pageView";
   import {
+    followHeldLine,
     shapeFromDrag,
     shapeDashArray,
     shapePath,
@@ -52,8 +90,8 @@
     type ShapeKind,
   } from "../shape/geometry";
   import { closedOutline, recognizeHeldShape } from "../shape/recognize";
+  import { SNAP_RADIUS_SCREEN_PT, snapPoint, snapTargets } from "../shape/snap";
   import {
-    eraseStrokeAt,
     hitStroke,
     moveSelected,
     scaleSelected,
@@ -74,6 +112,7 @@
     pageWidthPt: number;
     pageHeightPt: number;
     zoom?: number;
+    zooming?: boolean;
     tool?: InkTool;
     color?: string;
     widthPt?: number;
@@ -93,6 +132,8 @@
     shapeKind?: ShapeKind;
     shapeStyle?: ShapeStyle;
     shapeConstrain?: boolean;
+    /** Line ends and rectangle corners meet nearby shape ends; Alt bypasses it. */
+    shapeEndSnap?: boolean;
     drawAndHoldShapes?: boolean;
     heldLineMinimumPt?: number;
     eraseRadiusPt?: number;
@@ -107,12 +148,11 @@
     /// The topmost shape the eraser reaches at this point, if any. Shapes live above this
     /// component, so it asks rather than holding them.
     shapeAt?: (point: Point, reachPt: number) => { id: string; zIndex: number } | null;
-    onEraseShape?: (id: string) => void;
     /** Shapes the precise eraser may cut. Absent on a page that is not being edited. */
     shapes?: ShapeView[];
     /** What the shapes look like mid-gesture: each cut shape and its pieces, or null when done. */
     onShapeErasePreview?: (preview: ReadonlyMap<string, ShapeView[]> | null) => void;
-    /** On pen-up: each shape the precise eraser cut, and the pieces that replace it. */
+    /** On pen-up: each shape the eraser cut or took whole, and the pieces (none) that replace it. */
     onShapesErased?: (replaced: ReadonlyMap<string, ShapeView[]>) => void;
     /** Fires as an erase gesture lifts, whether or not it reached anything. */
     onEraseEnd?: () => void;
@@ -139,6 +179,7 @@
     pageWidthPt,
     pageHeightPt,
     zoom = 1,
+    zooming = false,
     tool = "select",
     color = "#16212b",
     widthPt = 2,
@@ -157,6 +198,7 @@
       opacity: 1,
     },
     shapeConstrain = false,
+    shapeEndSnap = true,
     drawAndHoldShapes = true,
     heldLineMinimumPt = 6,
     eraseRadiusPt = 8,
@@ -166,7 +208,6 @@
     calibration = DEFAULT_PRESSURE_CALIBRATION,
     pointerMapping = DEFAULT_POINTER_MAPPING,
     shapeAt,
-    onEraseShape,
     shapes,
     onShapeErasePreview,
     onShapesErased,
@@ -210,6 +251,12 @@
         feedbackMs: number | null;
         holdAnchor: Point;
         shapePreview: ShapeDraft | null;
+        /** Ends a snapped held line may meet, gathered once as it snaps. */
+        snapTargets: Point[];
+        snapRing: Point | null;
+        /** Live geometry kept between frames, and the canvas paths built from its stable runs. */
+        live: LiveInkOutline | null;
+        livePaths: Map<InkPolygon[], { path: Path2D; count: number }>;
       }
     | {
         kind: "shape";
@@ -218,6 +265,12 @@
         points: StrokePoint[];
         constrain: boolean;
         preview: ShapeDraft | null;
+        /** Ends a line or rectangle corner may meet, gathered once at pointerdown. */
+        snapTargets: Point[];
+        /** Where the moving end has snapped to, if anywhere. */
+        endSnap: Point | null;
+        /** The point the feedback ring marks: the snapped start, then the snapped end. */
+        snapRing: Point | null;
       }
     | { kind: "lasso"; pointerId: number; points: Point[] }
     | {
@@ -226,6 +279,8 @@
         initial: Stroke[];
         initialSelection: string[];
         precise: PreciseGesture | null;
+        /** Whole shapes taken so far; null for the precise eraser, which cuts them instead. */
+        taken: TakenShapes | null;
       }
     | {
         kind: "move";
@@ -261,6 +316,9 @@
   const SHAPE_HOLD_MS = 500;
   const SHAPE_SNAP_DEGREES = 15;
   const SHAPE_HOLD_DRIFT_PT = 4;
+  // Once a held closed shape has snapped, the hand relaxes and the tip creeps; only a deliberate
+  // move past this many screen points goes back to freehand. A held line follows the pen instead.
+  const SHAPE_RELEASE_DRIFT_PT = 14;
 
   $effect(() => {
     // Reads `strokes`, never `localStrokes`: now that the local copy is reactive, reading it here
@@ -283,7 +341,12 @@
    */
   // The hairline floor follows zoom in half-octave tiers, not every pinch step: with a per-step
   // floor every page rebuilt and re-joined all of its outlines dozens of times a second.
-  const inkZoomTier = $derived(zoomTier(zoom));
+  // svelte-ignore state_referenced_locally
+  let inkZoomTier = $state(zoomTier(zoom));
+  $effect(() => {
+    // Keep edits reactive, but retain the current hairline geometry throughout a zoom.
+    if (!zooming) inkZoomTier = zoomTier(zoom);
+  });
   let committedStrata = $state.raw<PaintedStratum[]>([]);
   $effect(() => {
     const current = localStrokes;
@@ -388,9 +451,10 @@
         initial: localStrokes,
         initialSelection: localSelection,
         precise,
+        taken: precise ? null : new TakenShapes((preview) => onShapeErasePreview?.(preview)),
       };
       if (precise) sweepEraser(precise, [point]);
-      else eraseAt(point);
+      else eraseAt(gesture.taken!, point);
       return;
     }
     if (role === "draw") {
@@ -403,6 +467,10 @@
         feedbackMs: null,
         holdAnchor: pagePoint(event),
         shapePreview: null,
+        snapTargets: [],
+        snapRing: null,
+        live: null,
+        livePaths: new Map(),
       };
       gesture = drawGesture;
       armHoldPreview(drawGesture);
@@ -413,7 +481,10 @@
       return;
     }
     if (role === "shape") {
-      const point = sample(event);
+      const pressed = sample(event);
+      const targets = shapeKind === "line" || shapeKind === "rectangle" ? endSnapTargets() : [];
+      const startSnap = snappedEnd(targets, pressed, event);
+      const point = startSnap ? { ...pressed, x: startSnap.x, y: startSnap.y } : pressed;
       gesture = {
         kind: "shape",
         pointerId: event.pointerId,
@@ -421,6 +492,9 @@
         points: [point],
         constrain: shapeConstrain || event.shiftKey,
         preview: null,
+        snapTargets: targets,
+        endSnap: null,
+        snapRing: startSnap,
       };
       redrawImmediate();
       return;
@@ -490,13 +564,15 @@
       for (const next of events.length > 0 ? events : [event]) {
         gesture.points.push(sample(next));
       }
-      updateHoldPreview(gesture);
+      updateHoldPreview(gesture, event);
     } else if (gesture.kind === "shape") {
       const events = event.getCoalescedEvents?.() ?? [];
       for (const next of events.length > 0 ? events : [event]) {
         gesture.points.push(sample(next));
       }
       gesture.constrain = shapeConstrain || event.shiftKey;
+      gesture.endSnap = snappedEnd(gesture.snapTargets, gesture.points.at(-1) ?? gesture.start, event);
+      gesture.snapRing = gesture.endSnap;
       // A line, rectangle or ellipse is two points of arithmetic and can follow the pointer
       // exactly. A spline is a curve fit over every sample so far, which is far too much to
       // repeat per pointer event on a pen reporting hundreds a second — so it re-fits once a
@@ -509,7 +585,7 @@
       if (gesture.precise) {
         const events = event.getCoalescedEvents?.() ?? [];
         sweepEraser(gesture.precise, (events.length > 0 ? events : [event]).map(pagePoint));
-      } else eraseAt(pagePoint(event));
+      } else if (gesture.taken) eraseAt(gesture.taken, pagePoint(event));
     } else if (gesture.kind === "move") {
       const point = pagePoint(event);
       localPreview = { ids: localSelection, delta: {
@@ -531,11 +607,12 @@
       const commitStartedAt = performance.now();
       // Straighten before quantising, so the snapped angle is rounded once rather than twice, and
       // store the result: what is committed is the straightened stroke, not a flag to reinterpret.
+      const lifted = sample(event);
       const smoothed = smoothPoints(
-        gesture.points.concat(sample(event)),
+        gesture.points.concat(lifted),
         calibration.smoothing,
       );
-      const heldShape = gesture.shapePreview;
+      const heldShape = gesture.shapePreview && heldLineFollowing(gesture, gesture.shapePreview, lifted, event);
       const points = quantizePoints(
         heldShape ? smoothed : straighten ? straightenStroke(smoothed) : smoothed,
       );
@@ -557,10 +634,12 @@
         commitMs: performance.now() - commitStartedAt,
       });
     } else if (gesture.kind === "shape") {
+      const lifted = sample(event);
       const finalGesture = {
         ...gesture,
-        points: [...gesture.points, sample(event)],
+        points: [...gesture.points, lifted],
         constrain: shapeConstrain || event.shiftKey,
+        endSnap: snappedEnd(gesture.snapTargets, lifted, event),
       };
       const draft = shapeDraft(finalGesture);
       if (draft) {
@@ -589,6 +668,11 @@
           onShapesErased?.(shapePieces(precise));
           onShapeErasePreview?.(null);
         }
+      }
+      // Taken shapes and erased ink land in the same tick, so they form one commit and one undo step.
+      if (gesture.taken && gesture.taken.ids.size > 0) {
+        onShapesErased?.(gesture.taken.removal());
+        gesture.taken.clear();
       }
       if (localStrokes !== gesture.initial) {
         onStrokesChange?.(localStrokes, precise?.replaced);
@@ -639,6 +723,7 @@
     liveInk = undefined;
     // A cancelled gesture leaves no pieces behind; a finished one has already handed them over.
     if (gesture?.kind === "erase" && gesture.precise?.shapesReplaced.size) onShapeErasePreview?.(null);
+    if (gesture?.kind === "erase") gesture.taken?.clear();
     gesture = null;
     localPreview = null;
     eraserPressed = false;
@@ -654,19 +739,20 @@
    * over a shape would take the shape out from under it. A tie goes to the shape, which is the
    * case where a held mark was promoted and the two carry the same index by construction.
    */
-  function eraseAt(point: Point): void {
+  function eraseAt(taken: TakenShapes, point: Point): void {
     const highlighterOnly = eraserReach === "highlighter";
     const reaches = (stroke: Stroke) => !highlighterOnly || stroke.tool === "highlighter";
-    const shape = highlighterOnly ? null : (shapeAt?.(point, eraserRadiusOnPage) ?? null);
+    // `shapeAt` searches the shapes as displayed, so a shape this gesture has hidden is not found
+    // again and the eraser reaches what lies beneath it.
+    const shape = highlighterOnly || !onShapesErased ? null : (shapeAt?.(point, eraserRadiusOnPage) ?? null);
     const stroke = hitStroke(localStrokes, point, eraserRadiusOnPage, reaches);
     if (!shape && !stroke) return;
     if (shape && (!stroke || shape.zIndex >= (stroke.zIndex ?? DEFAULT_INK_Z_INDEX))) {
-      onEraseShape?.(shape.id);
-      status = notice("workspace.erasedOneShape");
+      if (taken.take(shape.id)) status = notice("workspace.erasedOneShape");
       return;
     }
-    const next = eraseStrokeAt(localStrokes, point, eraserRadiusOnPage, reaches);
-    if (next === localStrokes) return;
+    // The stroke is already found; filtering it out by id spares a second search of the layer.
+    const next = localStrokes.filter((candidate) => candidate.id !== stroke!.id);
     localStrokes = next;
     strokeCount = localStrokes.length;
     localSelection = localSelection.filter((id) =>
@@ -811,20 +897,13 @@
     if (!context || !immediateCanvas) return;
     context.clearRect(0, 0, pageWidthPt, pageHeightPt);
     if (gesture?.kind === "draw") {
-      if (gesture.shapePreview) drawShapePreview(context, gesture.shapePreview);
-      else
-        drawPoints(
-          context,
-          gesture.points,
-          color,
-          liveWidthPt(gesture.strokeTool),
-          pressure,
-          gesture.strokeTool === "pen" ? limitedTaper(gesture.points, taper, widthPt * taperLengthWidths) : taper,
-          gesture.strokeTool === "pen" ? pattern : "solid",
-          opacity,
-        );
-    } else if (gesture?.kind === "shape" && gesture.preview) {
-      drawShapePreview(context, gesture.preview);
+      if (gesture.shapePreview) {
+        drawShapePreview(context, gesture.shapePreview);
+        if (gesture.snapRing) drawSnapRing(context, gesture.snapRing);
+      } else drawLiveStroke(context, gesture);
+    } else if (gesture?.kind === "shape") {
+      if (gesture.preview) drawShapePreview(context, gesture.preview);
+      if (gesture.snapRing) drawSnapRing(context, gesture.snapRing);
     } else if (gesture?.kind === "lasso") {
       context.save();
       context.strokeStyle = "#206acb";
@@ -851,32 +930,62 @@
    * The stroke still under the pen. It lives on canvas because immediate feedback matters more
    * than crispness for the few milliseconds before release; on release it joins the SVG layer.
    * Same silhouette either way, so nothing shifts at the handover.
+   *
+   * The geometry is kept between frames (`LiveInkOutline`), so a frame rebuilds only the pieces
+   * that can still change rather than the whole growing stroke.
    */
-  function drawPoints(
-    context: CanvasRenderingContext2D,
-    points: StrokePoint[],
-    strokeColor: string,
-    baseWidthPt: number,
-    usePressure: boolean,
-    strokeTaper: number,
-    strokePattern: StrokePattern,
-    strokeOpacity: number,
-  ): void {
-    if (points.length === 0) return;
-    const polygons = patternedOutlinePoints(points, {
+  function drawLiveStroke(context: CanvasRenderingContext2D, active: Extract<Gesture, { kind: "draw" }>): void {
+    if (active.points.length === 0) return;
+    const pen = active.strokeTool === "pen";
+    const style: LiveInkStyle = {
       // Below roughly half a device pixel the fill has nothing to cover, so hairline ink stays
       // visible when zoomed far out instead of dropping out entirely.
-      widthPt: Math.max(baseWidthPt, 0.5 / zoom),
-      pressure: usePressure,
-      taper: strokeTaper,
-    }, strokePattern, patternSpacing, gesture?.kind === "draw" && gesture.strokeTool === "pen");
-    if (polygons.length === 0) return;
+      widthPt: Math.max(liveWidthPt(active.strokeTool), 0.5 / zoom),
+      pressure,
+      taper,
+      taperMaximumPt: pen ? widthPt * taperLengthWidths : null,
+      pattern: pen ? pattern : "solid",
+      spacing: patternSpacing,
+      round: pen,
+    };
+    if (!active.live?.matches(style)) {
+      active.live = new LiveInkOutline(style);
+      active.livePaths.clear();
+    }
+    const frame = active.live.update(active.points);
+    // One compound path for the complete stroke, filled once: overlapping joins must not darken
+    // translucent ink. Stable runs keep their path and only append polygons added since.
+    const whole = new Path2D();
+    let pending: InkPolygon[] = [];
+    const flush = () => {
+      if (pending.length > 0) whole.addPath(new Path2D(pending.map(outlinePath).join(" ")));
+      pending = [];
+    };
+    for (const run of frame.runs) {
+      if (!run.stable) {
+        pending.push(...run.polygons);
+        continue;
+      }
+      flush();
+      let cached = active.livePaths.get(run.polygons);
+      if (!cached) active.livePaths.set(run.polygons, cached = { path: new Path2D(), count: 0 });
+      for (; cached.count < run.polygons.length; cached.count += 1) appendPolygon(cached.path, run.polygons[cached.count]);
+      whole.addPath(cached.path);
+    }
+    flush();
     context.save();
-    context.fillStyle = strokeColor;
-    context.globalAlpha = Math.min(1, Math.max(0, strokeOpacity));
-    // Fill the complete stroke once: overlapping joins must not darken translucent ink.
-    context.fill(new Path2D(polygons.map(outlinePath).join(" ")));
+    context.fillStyle = color;
+    context.globalAlpha = Math.min(1, Math.max(0, opacity));
+    context.fill(whole);
     context.restore();
+  }
+
+  /** The same subpath `outlinePath` writes: move, line through every vertex, close. */
+  function appendPolygon(target: Path2D, polygon: InkPolygon): void {
+    if (polygon.length === 0) return;
+    target.moveTo(polygon[0].x, polygon[0].y);
+    for (let index = 1; index < polygon.length; index += 1) target.lineTo(polygon[index].x, polygon[index].y);
+    target.closePath();
   }
 
   function path(context: CanvasRenderingContext2D, points: Point[]): void {
@@ -930,12 +1039,13 @@
       const { outline, closed } = closedOutline(active.points);
       return splineFromPoints(outline, shapeStyle, 1.5 / Math.max(zoom, 0.1), closed);
     }
+    // A snapped end lands exactly on what it met; squaring or angle steps would pull it off.
     return shapeFromDrag(
       shapeKind,
       active.start,
-      active.points.at(-1) ?? active.start,
+      active.endSnap ?? active.points.at(-1) ?? active.start,
       shapeStyle,
-      active.constrain,
+      active.constrain && !active.endSnap,
     );
   }
 
@@ -952,19 +1062,52 @@
         { snapDegrees: shapeConstrain ? SHAPE_SNAP_DEGREES : 0, minimumLineLengthPt: heldLineMinimumPt },
       )?.draft ?? null;
       if (active.shapePreview) {
-        status = notice("workspace.releaseToUseContinueDrawingToKeep", { "kind": shapeMessage(active.shapePreview.geometry.kind) });
+        if (active.shapePreview.geometry.kind === "line") active.snapTargets = endSnapTargets();
+        status = active.shapePreview.geometry.kind === "line"
+          ? notice("workspace.releaseToUseLineMoveToAim")
+          : notice("workspace.releaseToUseContinueDrawingToKeep", { "kind": shapeMessage(active.shapePreview.geometry.kind) });
         redrawImmediate();
       }
     }, SHAPE_HOLD_MS);
   }
 
-  function updateHoldPreview(active: Extract<Gesture, { kind: "draw" }>): void {
+  function updateHoldPreview(active: Extract<Gesture, { kind: "draw" }>, event: PointerEvent): void {
     const point = active.points.at(-1);
     if (!point) return;
-    if (Math.hypot(point.x - active.holdAnchor.x, point.y - active.holdAnchor.y) <= SHAPE_HOLD_DRIFT_PT / zoom) return;
+    // A snapped line is being aimed, not abandoned: its end follows the pen until it lifts.
+    if (active.shapePreview?.geometry.kind === "line") {
+      active.shapePreview = heldLineFollowing(active, active.shapePreview, point, event);
+      return;
+    }
+    const drift = active.shapePreview ? SHAPE_RELEASE_DRIFT_PT : SHAPE_HOLD_DRIFT_PT;
+    if (Math.hypot(point.x - active.holdAnchor.x, point.y - active.holdAnchor.y) <= drift / zoom) return;
     active.holdAnchor = point;
     active.shapePreview = null;
     armHoldPreview(active);
+  }
+
+  /** A snapped held line with its end on the pen; any other held shape stays as it snapped. */
+  function heldLineFollowing(
+    active: Extract<Gesture, { kind: "draw" }>,
+    held: ShapeDraft,
+    pen: Point,
+    event: PointerEvent,
+  ): ShapeDraft {
+    if (held.geometry.kind !== "line") return held;
+    const snapped = snappedEnd(active.snapTargets, pen, event);
+    active.snapRing = snapped;
+    return followHeldLine(held, snapped ?? pen, shapeConstrain && !snapped);
+  }
+
+  /** The page points a line end or rectangle corner may meet; none while snapping is off. */
+  function endSnapTargets(): Point[] {
+    return shapeEndSnap ? snapTargets(shapes ?? []) : [];
+  }
+
+  /** Where `point` snaps to, or null when nothing is near, snapping is off or Alt is held. */
+  function snappedEnd(targets: readonly Point[], point: Point, event: PointerEvent): Point | null {
+    if (!shapeEndSnap || event.altKey || targets.length === 0) return null;
+    return snapPoint(point, targets, SNAP_RADIUS_SCREEN_PT / zoom);
   }
 
   function clearHoldTimer(): void {
@@ -1010,6 +1153,18 @@
       context.fill(path);
     }
     context.stroke(path);
+    context.restore();
+  }
+
+  /** A small ring on the end a dragged point has met. It is feedback only and never stored. */
+  function drawSnapRing(context: CanvasRenderingContext2D, point: Point): void {
+    if (!surface) return;
+    context.save();
+    context.strokeStyle = getComputedStyle(surface).getPropertyValue("--paper-select").trim();
+    context.lineWidth = 1.5 / zoom;
+    context.beginPath();
+    context.arc(point.x, point.y, 4 / zoom, 0, Math.PI * 2);
+    context.stroke();
     context.restore();
   }
 
@@ -1135,7 +1290,7 @@
   }
 
   .ink-surface:focus-visible {
-    outline: 2px solid #206acb;
+    outline: 2px solid var(--paper-select);
     outline-offset: 2px;
   }
 
@@ -1166,8 +1321,8 @@
   }
 
   .selection-overlay {
-    fill: var(--paper, #fcfcfa);
-    stroke: var(--blueprint, #4c8df0);
+    fill: var(--paper);
+    stroke: var(--blueprint);
     pointer-events: none;
   }
 
@@ -1186,12 +1341,12 @@
   }
 
   .eraser-cursor.pressed .eraser-cursor-halo {
-    fill: rgb(76 141 240 / 12%);
+    fill: var(--accent-tint);
     stroke: rgb(255 255 255 / 90%);
   }
 
   .eraser-cursor.pressed .eraser-cursor-ring {
-    stroke: #206acb;
+    stroke: var(--paper-select);
   }
 
   .status {

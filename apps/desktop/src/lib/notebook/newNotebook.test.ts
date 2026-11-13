@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { PAGE_SIZES, geometryOf } from "../page/sizes";
 import { PAPER_TONES, templateGroups } from "../page/templates";
 import { blankNotebookSnapshot } from "./newNotebook";
-import { SCHEMA_VERSION } from "../model";
+import { BINARY_INK_SCHEMA_VERSION } from "../model";
 
 describe("new notebook setup", () => {
   it("keeps every supported paper combination as the default and starts pen-empty", () => {
@@ -14,8 +14,8 @@ describe("new notebook setup", () => {
         expect(snapshot.manifest.defaultPage).toEqual({ geometry, background });
         expect(snapshot.page.objects).toEqual([]);
         expect(snapshot.blocks).toEqual([]);
-        expect(snapshot.manifest.schemaVersion).toBe(SCHEMA_VERSION);
-        expect(snapshot.page.schemaVersion).toBe(SCHEMA_VERSION);
+        expect(snapshot.manifest.schemaVersion).toBe(BINARY_INK_SCHEMA_VERSION);
+        expect(snapshot.page.schemaVersion).toBe(BINARY_INK_SCHEMA_VERSION);
         expect(snapshot.page.inkLayers[0]?.path).toBe("ink/page-001-layer-001.ink");
       }
     }

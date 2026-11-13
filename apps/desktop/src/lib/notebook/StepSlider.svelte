@@ -156,13 +156,13 @@
   }
 
   .nudge:hover:not(:disabled) { background: var(--wash); color: var(--text); }
-  .nudge:active:not(:disabled) { background: rgb(76 141 240 / 22%); color: var(--text); }
-  .nudge:disabled { opacity: 0.4; cursor: default; }
+  .nudge:active:not(:disabled) { background: var(--accent-fill); color: var(--text); }
+  .nudge:disabled { opacity: var(--disabled); cursor: default; }
   .nudge svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-width: 1.8; }
 
   .nudge:focus-visible,
   .track input:focus-visible {
-    outline: 2px solid var(--blueprint-light, var(--blueprint));
-    outline-offset: 1px;
+    outline: 2px solid var(--blueprint-light);
+    outline-offset: 2px;
   }
 </style>

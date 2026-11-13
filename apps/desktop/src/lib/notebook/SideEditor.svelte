@@ -28,6 +28,7 @@
     styleTitle = $t("workspace.notebookStyle"),
     presets = [],
     presetBusy = false,
+    onAskAI,
     onChange,
     onClose,
     onDockChange,
@@ -38,6 +39,8 @@
     onPresetAction,
     onPageTextLineWrapChange,
     blockControls,
+    customEditor,
+    customTitle,
   }: {
     /** `edit` — the target is on this page; `away` — it is on another page; `none` — no target. */
     mode?: "edit" | "style" | "away" | "none";
@@ -56,6 +59,7 @@
     styleTitle?: string;
     presets?: PresetSummary[];
     presetBusy?: boolean;
+    onAskAI?: (focus: import("../helper/editorEntry").EditorFocus | null) => void;
     onChange: (value: string) => void;
     onClose: () => void;
     onDockChange: (dock: "left" | "right") => void;
@@ -66,6 +70,8 @@
     onPresetAction?: (action: string) => void;
     onPageTextLineWrapChange?: (lineWrap: boolean) => void;
     blockControls?: Snippet;
+    customEditor?: Snippet;
+    customTitle?: string;
   } = $props();
 
   const MIN_WIDTH = 280;
@@ -78,6 +84,7 @@
 
   let editor = $state<{
     focus: () => void;
+    getFocus: () => import("../helper/editorEntry").EditorFocus | null;
     showHelp: () => Promise<void>;
     formatDocument: () => Promise<void>;
     applyWritingCommand: (command: WritingCommand) => void;
@@ -127,13 +134,13 @@
   class="side-editor"
   class:dock-right={dock === "right"}
   style:width={`${width}px`}
-  aria-label={$t("editor.typstSource")}
+  aria-label={customTitle ?? $t("editor.typstSource")}
 >
   <!-- Identity strip: what this panel is holding, and how to move or close it. Everything you do
        *to* the text lives in the writing bar below, so this row never grows tool buttons. -->
   <header>
     <span class="identity">
-      <span class="title">{mode === "style" ? styleTitle : pageText ? $t("workspace.pageText") : mode === "edit" || mode === "away" ? blockLabel : $t("editor.typstSource")}</span>
+      <span class="title">{customTitle ?? (mode === "style" ? styleTitle : pageText ? $t("workspace.pageText") : mode === "edit" || mode === "away" ? blockLabel : $t("editor.typstSource"))}</span>
       <!-- Only when the target is somewhere you cannot see. While you are editing the page in
            view, the status strip already answers "which page", and printing it twice made
            neither one look like the answer. -->
@@ -141,7 +148,12 @@
         <span class="where">{$t("workspace.page2", { "pageNumber": pageNumber })}</span>
       {/if}
     </span>
-    {#if mode === "edit" || mode === "style"}
+    {#if onAskAI && (mode === "edit" || customEditor)}
+        <button type="button" class="icon" aria-label={$t("aiEntry.ask")} title={$t("aiEntry.shortcut")} onclick={() => onAskAI?.(editor?.getFocus() ?? null)}>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h14v10H10l-5 4Z" /></svg>
+        </button>
+    {/if}
+    {#if !customEditor && (mode === "edit" || mode === "style")}
       {#if !pageText || mode === "style"}
         <EditorColorButton onCommand={(command) => editor?.applyWritingCommand(command)} />
       {/if}
@@ -192,7 +204,7 @@
     </button>
   </header>
 
-  {#if mode === "edit" && pageText}
+  {#if !customEditor && mode === "edit" && pageText}
     <WritingBar
       {source}
       {presets}
@@ -202,11 +214,13 @@
     />
   {/if}
 
-  {#if mode === "edit" && !pageText && blockControls}
+  {#if !customEditor && mode === "edit" && !pageText && blockControls}
     <div class="block-controls" data-preserve-selection>{@render blockControls()}</div>
   {/if}
 
-  {#if mode === "edit" || mode === "style"}
+  {#if customEditor}
+    <div class="body">{@render customEditor()}</div>
+  {:else if mode === "edit" || mode === "style"}
     <div class="body">
       <TypstEditor
         bind:this={editor}
@@ -217,6 +231,7 @@
         ariaLabel={mode === "style" ? styleTitle : $t("workspace.sourceFor", { "blockLabel": blockLabel })}
         onChange={(next) => onChange(next)}
         onExit={onClose}
+        onAskAI={mode === "edit" && onAskAI ? () => onAskAI?.(editor?.getFocus() ?? null) : undefined}
         onLineWrapToggle={pageText && onPageTextLineWrapChange
           ? () => onPageTextLineWrapChange?.(!pageTextLineWrap)
           : undefined}
@@ -299,7 +314,7 @@
        window is resized, not just while dragging. */
     max-width: 50%;
     border-right: 1px solid var(--edge-soft);
-    background: var(--surround, #1b1e24);
+    background: var(--surround);
   }
 
   .side-editor.dock-right {
@@ -314,7 +329,7 @@
     gap: 2px;
     padding: 0 6px 0 12px;
     border-bottom: 1px solid var(--edge-soft);
-    background: var(--panel, #23272f);
+    background: var(--panel);
   }
 
   .identity {
@@ -328,18 +343,17 @@
 
   .title {
     overflow: hidden;
-    color: var(--muted, #aeb5be);
+    color: var(--muted);
     font-size: var(--text-sm);
-    letter-spacing: 0.09em;
+    font-weight: 600;
     text-overflow: ellipsis;
-    text-transform: uppercase;
     white-space: nowrap;
   }
 
   /* Which page the target sits on. Quiet, because it is context rather than a control. */
   .where {
     flex: none;
-    color: var(--quiet, #6a727c);
+    color: var(--quiet);
     font-size: var(--text-sm);
   }
 
@@ -351,19 +365,19 @@
     border: 0;
     border-radius: var(--radius);
     background: transparent;
-    color: var(--muted, #aeb5be);
+    color: var(--muted);
     cursor: pointer;
     place-items: center;
   }
 
   .icon:hover {
     background: var(--wash);
-    color: var(--text, #e9ebee);
+    color: var(--text);
   }
 
   .icon:focus-visible {
-    outline: 2px solid var(--blueprint-light, #7fb0f7);
-    outline-offset: 1px;
+    outline: 2px solid var(--blueprint-light);
+    outline-offset: 2px;
   }
 
   .icon svg {
@@ -387,7 +401,7 @@
     align-items: flex-start;
     gap: 10px;
     padding: 18px 16px;
-    color: #e9ebee;
+    color: var(--text);
     font-size: var(--text-md);
   }
 
@@ -396,7 +410,7 @@
   }
 
   .notice .quiet {
-    color: #6a727c;
+    color: var(--quiet);
     font-size: var(--text-sm);
   }
 
@@ -404,8 +418,8 @@
     padding: 7px 11px;
     border: 1px solid var(--edge);
     border-radius: var(--radius);
-    background: #23272f;
-    color: #e9ebee;
+    background: var(--panel);
+    color: var(--text);
     font-size: var(--text-md);
     cursor: pointer;
   }
@@ -415,8 +429,8 @@
   }
 
   .action:focus-visible {
-    outline: 2px solid #7fb0f7;
-    outline-offset: 1px;
+    outline: 2px solid var(--blueprint-light);
+    outline-offset: 2px;
   }
 
   .diagnostics {
@@ -424,14 +438,14 @@
     margin: 0;
     padding: 8px 12px;
     border-top: 1px solid var(--edge-soft);
-    color: #aeb5be;
+    color: var(--muted);
     font: var(--text-sm)/1.5 "Cascadia Mono", Consolas, monospace;
     list-style: none;
     overflow-y: auto;
   }
 
   .diagnostics .error {
-    color: #e5645e;
+    color: var(--oxide);
   }
 
   .resizer {
@@ -451,7 +465,7 @@
 
   .resizer:hover,
   .resizer:focus-visible {
-    background: rgb(76 141 240 / 45%);
+    background: var(--accent-select);
     outline: none;
   }
 </style>

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { t } from "../i18n";
   import { onMount } from "svelte";
-  import { focusTrap } from "../workspace/focus";
+  import Dialog from "../workspace/Dialog.svelte";
   import { errorDetails } from "../ipc/errors";
   import { listTypstPresets, pickTypstPreset } from "../ipc/presets";
   import { presetPresentation } from "../page/presets";
@@ -9,6 +9,7 @@
   import { DEFAULT_PAGE_SIZE, PAGE_SIZES, pageSizes, geometryOf, type Orientation } from "../page/sizes";
   import { PAPER_TONES, paperTones, templateGroups } from "../page/templates";
   import { nameProblem } from "./library";
+  import { isPageListSyntax } from "../workspace/exportTarget";
 
   let { busy = false, onConfirm, onCancel }: {
     busy?: boolean;
@@ -19,6 +20,8 @@
   let name = $state("");
   let sizeId = $state(DEFAULT_PAGE_SIZE.id);
   let orientation = $state<Orientation>("portrait");
+  let fromPdf = $state(false);
+  let pdfPages = $state("");
   let toneId = $state(PAPER_TONES[0].id);
   let templateId = $state("blank-white");
   let preset = $state<PresetChoice>({ kind: "none" });
@@ -30,7 +33,8 @@
   const tone = $derived(PAPER_TONES.find((item) => item.id === toneId) ?? PAPER_TONES[0]);
   const templates = $derived(templateGroups(tone, $t).flatMap((group) => group.templates));
   const problem = $derived(name ? nameProblem(name, $t) : null);
-  const ready = $derived(Boolean(name) && !problem && !busy);
+  const pdfPagesValid = $derived(!fromPdf || isPageListSyntax(pdfPages));
+  const ready = $derived(Boolean(name) && !problem && !busy && pdfPagesValid);
 
   onMount(async () => {
     field?.focus();
@@ -72,25 +76,37 @@
       geometry: geometryOf(size, orientation),
       background: { kind: "template", template },
       preset,
+      fromPdf,
+      ...(fromPdf && pdfPages.trim() ? { pdfPages: pdfPages.trim() } : {}),
     });
   }
 </script>
 
-<svelte:window onkeydown={(event) => { if (event.key === "Escape") onCancel(); }} />
-<div class="scrim" role="presentation" onpointerdown={(event) => { if (event.target === event.currentTarget) onCancel(); }}>
-  <div use:focusTrap class="setup" role="dialog" aria-modal="true" aria-labelledby="notebook-setup-title" tabindex="-1">
-    <form onsubmit={submit}>
-      <header>
-      <h2 id="notebook-setup-title">{$t("library.newNotebook")}</h2>
-      <p>{$t("library.setUpThePaperTheWayYou")}</p>
-      </header>
-
+<Dialog title={$t("library.newNotebook")} lead={$t("library.setUpThePaperTheWayYou")} size="lg" onClose={onCancel}>
+  {#snippet children()}
+    <form id="notebook-setup-form" onsubmit={submit}>
       <label class="wide">{$t("library.name")}
       <input bind:this={field} bind:value={name} maxlength="80" autocomplete="off" spellcheck="false" aria-invalid={problem !== null} aria-describedby="notebook-name-help" />
       <small id="notebook-name-help" class:error={problem}>{problem ?? $t("library.savedLocallyInYourGoodtypeLibrary")}</small>
       </label>
 
       <div class="fields">
+      <fieldset class="wide">
+        <legend>{$t("library.startWith")}</legend>
+        <div class="segmented">
+          <button type="button" class:active={!fromPdf} aria-pressed={!fromPdf} onclick={() => (fromPdf = false)}>{$t("library.blankPaper")}</button>
+          <button type="button" class:active={fromPdf} aria-pressed={fromPdf} onclick={() => (fromPdf = true)}>{$t("library.pdfPages")}</button>
+        </div>
+        {#if fromPdf}<small>{$t("library.pdfStartHelp")}</small>{/if}
+      </fieldset>
+      {#if fromPdf}
+      <label class="wide">{$t("library.pdfPageList")}
+        <input bind:value={pdfPages} type="text" inputmode="numeric" spellcheck="false" autocomplete="off" placeholder={$t("library.pdfPageListPlaceholder")} aria-invalid={!pdfPagesValid} aria-describedby="notebook-pdf-pages-help" />
+        <small id="notebook-pdf-pages-help" class:error={!pdfPagesValid}>{pdfPagesValid ? $t("library.pdfPageListHelp") : $t("library.pdfPageListInvalid")}</small>
+      </label>
+      {/if}
+      <!-- A PDF brings its own page sizes, so the paper controls only apply to blank paper. -->
+      {#if !fromPdf}
       <label>{$t("library.pageSize")}
         <select bind:value={sizeId}>{#each pageSizes($t) as size}<option value={size.id}>{size.name} · {size.detail}</option>{/each}</select>
       </label>
@@ -107,6 +123,7 @@
       <label>{$t("library.paperTemplate")}
         <select bind:value={templateId}>{#each templates as template}<option value={template.id}>{template.name}</option>{/each}</select>
       </label>
+      {/if}
       <label class="wide">{$t("library.typstPreset")}
         <select value={presetValue} onchange={(event) => void choosePreset(event.currentTarget.value)}>
           <option value="none">{$t("library.none")}</option>
@@ -118,46 +135,31 @@
       </div>
 
       {#if failure}<p class="failure" role="alert">{failure}</p>{/if}
-      <footer>
-        <button type="button" class="quiet" disabled={busy} onclick={onCancel}>{$t("library.cancel")}</button>
-        <button type="submit" class="primary" disabled={!ready}>{$t("library.createNotebook")}</button>
-      </footer>
     </form>
-  </div>
-</div>
+  {/snippet}
+  {#snippet actions()}
+    <button type="button" class="control" disabled={busy} onclick={onCancel}>{$t("library.cancel")}</button>
+    <button type="submit" form="notebook-setup-form" class="primary" disabled={!ready}>{fromPdf ? $t("library.createAndChoosePdf") : $t("library.createNotebook")}</button>
+  {/snippet}
+</Dialog>
 
 <style>
-  .scrim { position: absolute; z-index: 60; display: grid; padding: 20px; background: rgb(10 12 16 / 62%); inset: 0; place-items: center; animation: scrim-in 140ms ease-out; }
-  .setup { width: min(620px, 100%); max-height: 100%; padding: 22px; border: 1px solid var(--edge, rgb(255 255 255 / 12%)); border-radius: var(--radius-lg, 10px); background: var(--panel, #23272f); box-shadow: 0 18px 44px rgb(0 0 0 / 55%); color: var(--text, #e9ebee); overflow-y: auto; animation: setup-in 160ms cubic-bezier(0.16, 1, 0.3, 1); }
-  header { margin-bottom: 18px; }
-  header p { margin: 5px 0 0; color: var(--muted, #aeb5be); font-size: var(--text-md, 13px); }
-  h2 { margin: 0; font-size: 20px; font-weight: 600; letter-spacing: -0.02em; }
   .fields { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 14px; }
-  label, fieldset { display: grid; gap: 6px; min-width: 0; margin: 0; padding: 0; border: 0; color: var(--muted, #aeb5be); font-size: var(--text-sm, 11px); }
+  label, fieldset { display: grid; gap: 6px; min-width: 0; margin: 0; padding: 0; border: 0; color: var(--muted); font-size: var(--text-sm); }
   .wide { grid-column: 1 / -1; }
-  input, select { box-sizing: border-box; width: 100%; height: var(--control, 36px); padding: 0 10px; border: 1px solid var(--edge, rgb(255 255 255 / 12%)); border-radius: var(--radius, 6px); background-color: rgb(0 0 0 / 25%); color: var(--text, #e9ebee); font: var(--text-md, 13px) var(--font-ui, Bahnschrift, system-ui, sans-serif); }
+  input, select { box-sizing: border-box; width: 100%; height: var(--control); padding: 0 10px; border: 1px solid var(--edge); border-radius: var(--radius); background-color: rgb(0 0 0 / 25%); color: var(--text); font: var(--text-md) var(--font-ui); }
   select { padding-right: 34px; appearance: none; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%23aeb5be' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m7 9.5 5 5 5-5'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 10px center; }
-  option { background: var(--panel, #23272f); }
-  input:focus-visible, select:focus-visible, button:focus-visible { outline: 2px solid var(--blueprint-light, #7fb0f7); outline-offset: 1px; }
-  input:hover, select:hover { border-color: rgb(255 255 255 / 20%); }
-  input[aria-invalid="true"] { border-color: var(--oxide, #e5645e); }
-  small { min-height: 1.2em; color: var(--quiet, #6a727c); }
-  small.error, .failure { color: var(--oxide, #e5645e); }
-  .segmented { display: flex; height: var(--control, 36px); padding: 3px; border: 1px solid var(--edge, rgb(255 255 255 / 12%)); border-radius: var(--radius, 6px); background: rgb(0 0 0 / 25%); gap: 3px; }
-  .segmented button { flex: 1; border: 0; border-radius: var(--radius, 6px); background: transparent; color: var(--muted, #aeb5be); cursor: pointer; }
-  .segmented button:hover { background: var(--wash, rgb(255 255 255 / 8%)); color: var(--text, #e9ebee); }
-  .segmented button.active { background: rgb(76 141 240 / 16%); box-shadow: inset 0 0 0 1px rgb(76 141 240 / 52%); color: var(--text, #e9ebee); }
-  .failure { margin: 12px 0 0; font-size: var(--text-sm, 11px); }
-  footer { display: flex; gap: 8px; justify-content: flex-end; margin-top: 20px; }
-  footer button { min-height: var(--control, 36px); padding: 0 15px; border: 0; border-radius: var(--radius, 6px); color: var(--text, #e9ebee); font: inherit; cursor: pointer; touch-action: manipulation; }
-  .quiet { background: rgb(255 255 255 / 5%); }
-  .quiet:hover { background: var(--wash, rgb(255 255 255 / 8%)); }
-  .primary { background: var(--blueprint, #4c8df0); color: #0e1b31; font-weight: 600; }
-  .primary:hover:not(:disabled) { background: var(--blueprint-light, #7fb0f7); }
-  button:disabled { opacity: .5; cursor: default; }
-  @keyframes scrim-in { from { opacity: 0; } }
-  @keyframes setup-in { from { opacity: 0; transform: translateY(7px) scale(.99); } }
-  @media (max-width: 520px) { .fields { grid-template-columns: 1fr; } .wide { grid-column: auto; } .setup { padding: 18px; } }
-  @media (pointer: coarse) { input, select, .segmented, footer button { min-height: var(--control-touch, 44px); } }
-  @media (prefers-reduced-motion: reduce) { .scrim, .setup { animation: none; } }
+  option { background: var(--panel); }
+  input:focus-visible, select:focus-visible, button:focus-visible { outline: 2px solid var(--blueprint-light); outline-offset: 2px; }
+  input:hover, select:hover { border-color: var(--edge-strong); }
+  input[aria-invalid="true"] { border-color: var(--oxide); }
+  small { min-height: 1.2em; color: var(--quiet); }
+  small.error, .failure { color: var(--oxide); }
+  .segmented { display: flex; height: var(--control); padding: 3px; border: 1px solid var(--edge); border-radius: var(--radius); background: rgb(0 0 0 / 25%); gap: 3px; }
+  .segmented button { flex: 1; border: 0; border-radius: var(--radius); background: transparent; color: var(--muted); cursor: pointer; }
+  .segmented button:hover { background: var(--wash); color: var(--text); }
+  .segmented button.active { background: var(--accent-fill); box-shadow: inset 0 0 0 1px var(--accent-edge); color: var(--text); }
+  .failure { margin: 12px 0 0; font-size: var(--text-sm); }
+  @media (max-width: 520px) { .fields { grid-template-columns: 1fr; } .wide { grid-column: auto; } }
+  @media (pointer: coarse) { input, select, .segmented { min-height: var(--control-touch); } }
 </style>

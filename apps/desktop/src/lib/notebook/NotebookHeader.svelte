@@ -53,7 +53,7 @@
 <style>
   button { border: 0; }
   button:focus-visible { outline: 2px solid var(--blueprint-light); outline-offset: 2px; }
-  button:disabled { cursor: not-allowed; opacity: .32; }
+  button:disabled { cursor: not-allowed; opacity: var(--disabled); }
   .command-strip {
     z-index: 30;
     display: flex;
@@ -61,7 +61,7 @@
     justify-content: space-between;
     gap: 1rem;
     padding: 0 14px 0 18px;
-    border-bottom: 1px solid rgb(255 255 255 / 8%);
+    border-bottom: 1px solid var(--wash);
     background: var(--charcoal);
   }
 

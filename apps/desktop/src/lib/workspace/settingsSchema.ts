@@ -1,4 +1,4 @@
-import type { AppSettings } from "../settings";
+import type { AppSettings, HelperPermission } from "../settings";
 import { LANGUAGES, translate, formatNumber, type Translator } from "../i18n";
 import { paletteTools, type PaletteCommand } from "../notebook/palette";
 
@@ -24,7 +24,7 @@ import { paletteTools, type PaletteCommand } from "../notebook/palette";
  * diagnostic belongs in Settings rather than one tap from the page, but it is not a preference,
  * so it needs somewhere to send the request.
  */
-export type SettingActions = { openMetrics: () => void };
+export type SettingActions = { openMetrics: () => void; changePython: () => void };
 
 export type SettingControl =
   | {
@@ -74,7 +74,7 @@ export type SettingGroup = {
   items: SettingItem[];
 };
 
-export function settingGroups(t: Translator = translate, fonts: string[] = []): SettingGroup[] { return [
+export function settingGroups(t: Translator = translate, fonts: string[] = [], aiEnabled = false): SettingGroup[] { const groups: SettingGroup[] = [
   {
     id: "appearance",
     title: t("workspace.appearance"),
@@ -297,6 +297,25 @@ export function settingGroups(t: Translator = translate, fonts: string[] = []): 
     ],
   },
   {
+    id: "python",
+    title: "Python",
+    icon: "M4 5h16M4 12h16M4 19h16",
+    items: [{
+      id: "pythonRuntime",
+      label: t("calculation.pythonRuntime"),
+      hint: t("calculation.pythonRuntimeHint"),
+      keywords: [t("calculation.pythonRuntimeSearch")],
+      control: { kind: "action", buttonLabel: t("calculation.changePython"), run: actions => actions.changePython() },
+    }, {
+      id: "pythonPackageDownloads",
+      label: t("calculation.downloadPackages"),
+      hint: t("calculation.downloadHint"),
+      keywords: [t("calculation.downloadSearch")],
+      control: { kind: "toggle", read: settings => settings.pythonPackageDownloads,
+        write: (settings, value) => ({ ...settings, pythonPackageDownloads: value }) },
+    }],
+  },
+  {
     id: "motion",
     title: t("workspace.motion"),
     icon: "M4 12h5l2-5 3 10 2-5h4",
@@ -348,7 +367,26 @@ export function settingGroups(t: Translator = translate, fonts: string[] = []): 
       },
     ],
   },
-]; }
+  {
+    id: "aiHelper", title: t("helper.title"), icon: "M5 5h14v10H10l-5 4Z",
+    blurb: t("helper.about"), items: [
+      { id: "helperEnabled", label: t("helper.enable"), keywords: [...t("helper.search").split(" "), ...t("codex.search").split(" ")], control: { kind: "toggle", read: s => s.aiHelper.enabled, write: (s, enabled) => ({ ...s, aiHelper: { ...s.aiHelper, enabled } }) } },
+      { id: "helperUsage", label: t("helper.usage"), hint: t("helper.usageHint"), control: { kind: "choice", options: [{ value: "low", label: t("helper.low"), hint: t("helper.lowHint") }, { value: "balanced", label: t("helper.balanced"), hint: t("helper.balancedHint") }, { value: "detailed", label: t("helper.detailed"), hint: t("helper.detailedHint") }], read: s => s.aiHelper.usage, write: (s, usage) => ({ ...s, aiHelper: { ...s.aiHelper, usage: usage as AppSettings["aiHelper"]["usage"] } }) } },
+      { id: "helperWebSearch", label: t("helper.webSearch"), hint: t("helper.webHint"), control: { kind: "toggle", read: s => s.aiHelper.webSearch, write: (s, webSearch) => ({ ...s, aiHelper: { ...s.aiHelper, webSearch } }) } },
+      ...(["pages", "presets", "pageNames"] as const).map(key => {
+        const name = ({ pages: "Pages", presets: "Presets", pageNames: "Names" } as const)[key];
+        return { id: `helperPermission${name}`, label: t(`helper.permission${name}`), hint: t(`helper.permission${name}Hint`), control: { kind: "choice" as const, options: (["allow", "ask", "never"] as const).map(value => {
+          const word = ({ allow: "Allow", ask: "Ask", never: "Never" } as const)[value];
+          return { value, label: t(`helper.permission${word}`), hint: t(`helper.permission${word}Hint`) };
+        }), read: (s: AppSettings) => s.aiHelper.permissions[key], write: (s: AppSettings, value: string) => ({ ...s, aiHelper: { ...s.aiHelper, permissions: { ...s.aiHelper.permissions, [key]: value as HelperPermission } } }) } };
+      }),
+    ],
+  },
+];
+  if (aiEnabled) return groups;
+  const enable = groups.find(group => group.id === "aiHelper")!.items[0];
+  return groups.filter(group => group.id !== "aiHelper").map(group => group.id === "appearance" ? { ...group, items: [...group.items, enable] } : group);
+}
 
 /** At least one pen stays on the bar; Rust holds the same line for an edited settings file. */
 function lastPenShown(settings: AppSettings, id: PaletteCommand): boolean {

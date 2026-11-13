@@ -12,6 +12,7 @@ import type { InkLayer, NotebookManifest, Page } from "../model";
 export type StoredFile = { path: string; bytes: number[] };
 
 export type NotebookSnapshot = {
+  calculations?: StoredFile[];
   manifest: NotebookManifest;
   page: Page;
   blocks: StoredFile[];
