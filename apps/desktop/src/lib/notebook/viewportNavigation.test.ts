@@ -29,6 +29,7 @@ describe("viewport navigation", () => {
   });
 
   it("coalesces zoom requests and preserves the page point under the pointer", () => {
+    vi.useFakeTimers();
     const { navigation, env } = workspace();
     let frame!: FrameRequestCallback;
     vi.stubGlobal("requestAnimationFrame", vi.fn(callback => { frame = callback; return 7; }));
@@ -42,6 +43,32 @@ describe("viewport navigation", () => {
     expect(env.pageViewport?.scrollTop).toBe(120);
   });
 
+  it("settles 180 ms after the last applied frame and records gesture intervals", () => {
+    vi.useFakeTimers();
+    const { navigation, env } = workspace();
+    Object.assign(env, { collectMetrics: true });
+    let frame!: FrameRequestCallback;
+    vi.stubGlobal("requestAnimationFrame", vi.fn(callback => { frame = callback; return 7; }));
+    navigation.zoomAt(3, 180, 300);
+    expect(navigation.zooming).toBe(true);
+    frame(0);
+    vi.advanceTimersByTime(40);
+    navigation.zoomAt(4, 180, 300);
+    vi.advanceTimersByTime(20);
+    expect(navigation.zooming).toBe(true);
+    frame(60);
+    vi.advanceTimersByTime(179);
+    expect(navigation.zooming).toBe(true);
+    vi.advanceTimersByTime(1);
+    expect(navigation.zooming).toBe(false);
+    expect(navigation.zoomIntervals).toEqual({ average: 60, worst: 60 });
+    navigation.zoomAt(3, 180, 300);
+    frame(240);
+    vi.advanceTimersByTime(180);
+    expect(navigation.zoomIntervals).toBeNull();
+    navigation.dispose();
+  });
+
   it("cancels queued zoom, long press, and history feedback on disposal", async () => {
     vi.useFakeTimers();
     const { navigation, env } = workspace();
@@ -51,6 +78,7 @@ describe("viewport navigation", () => {
     navigation.announceTouchHistory("Undo");
     navigation.dispose();
     expect(cancelAnimationFrame).toHaveBeenCalledWith(7);
+    expect(navigation.zooming).toBe(false);
     expect(vi.getTimerCount()).toBe(0);
     expect(env.zoom).toBe(2);
   });

@@ -11,7 +11,14 @@ use std::{
 use serde::{Deserialize, Serialize};
 use tauri::Manager;
 
+static SETTINGS_WRITES: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+pub(crate) static PAGE_WRITES: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 const MAX_SETTINGS_BYTES: usize = 64 * 1024;
+// Page workers share this file with session/pin/move updates. Serialize the
+// entire read/modify/write so an unrelated update cannot restore an older page.
+static RECENTS_IO: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 const MAX_RECENTS: usize = 30;
 
 /// The frontend may have an unsaved session choice. Only supported language IDs select copy.
@@ -567,22 +574,48 @@ pub fn load_app_settings(app: tauri::AppHandle) -> Result<AppSettings, String> {
 }
 
 #[tauri::command]
-pub fn save_app_settings(
+pub async fn save_app_settings(
     app: tauri::AppHandle,
     packages: tauri::State<'_, RemotePackages>,
     python: tauri::State<'_, crate::computation::RuntimeState>,
     settings: AppSettings,
 ) -> Result<AppSettings, String> {
+    let _ = (packages, python);
+    let permit = SETTINGS_WRITES.lock().await;
+    tauri::async_runtime::spawn_blocking(move || {
+        let _permit = permit;
+        let packages = app.state::<RemotePackages>();
+        let python = app.state::<crate::computation::RuntimeState>();
+        let settings = persist_settings(
+            &config_file(&app, "settings.json")?,
+            &packages,
+            &python.downloads,
+            settings,
+        )?;
+        app.state::<crate::helper::Helper>()
+            .apply(&app, settings.ai_helper.clone())?;
+        Ok(settings)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+// Persistence and policy publication form one serialized operation. A failed write
+// must leave both in-memory download policies at their last confirmed values.
+fn persist_settings(
+    path: &Path,
+    packages: &RemotePackages,
+    downloads: &std::sync::atomic::AtomicBool,
+    settings: AppSettings,
+) -> Result<AppSettings, String> {
     let settings = sanitize(settings);
-    write_config(&app, "settings.json", &settings)?;
-    // Keep the compile path's in-memory policy in step with what was just stored.
+    crate::store::write_json(path, &settings, MAX_SETTINGS_BYTES)
+        .map_err(|error| format!("settings.json: {error}"))?;
     packages.set(settings.remote_packages);
-    python.downloads.store(
+    downloads.store(
         settings.python_package_downloads,
         std::sync::atomic::Ordering::SeqCst,
     );
-    app.state::<crate::helper::Helper>()
-        .apply(&app, settings.ai_helper.clone())?;
     Ok(settings)
 }
 
@@ -660,6 +693,7 @@ pub fn relocate_recent_roots(
     app: &tauri::AppHandle,
     moves: &[(PathBuf, PathBuf)],
 ) -> Result<(), String> {
+    let _recents_io = RECENTS_IO.lock().map_err(|error| error.to_string())?;
     let mut recents = read_config::<RecentNotebooks>(app, "recents.json")?;
     let mut changed = false;
     for entry in &mut recents.entries {
@@ -691,6 +725,7 @@ pub fn record_recent_session(
     roots: Vec<String>,
     active_root: Option<String>,
 ) -> Result<(), String> {
+    let _recents_io = RECENTS_IO.lock().map_err(|error| error.to_string())?;
     let mut recents = read_config::<RecentNotebooks>(app, "recents.json")?;
     let mut open_roots = Vec::new();
     for root in roots {
@@ -705,6 +740,7 @@ pub fn record_recent_session(
 }
 
 pub fn clear_active_recent(app: &tauri::AppHandle, root: &str) -> Result<(), String> {
+    let _recents_io = RECENTS_IO.lock().map_err(|error| error.to_string())?;
     let mut recents = read_config::<RecentNotebooks>(app, "recents.json")?;
     let before = recents.open_roots.len();
     recents.open_roots.retain(|known| known != root);
@@ -724,6 +760,7 @@ pub fn record_recent(
     title: &str,
     opened_at: &str,
 ) -> Result<(), String> {
+    let _recents_io = RECENTS_IO.lock().map_err(|error| error.to_string())?;
     let mut recents = read_config::<RecentNotebooks>(app, "recents.json")?;
     let pinned = recents
         .entries
@@ -761,6 +798,7 @@ pub fn record_recent(
 }
 
 pub fn record_recent_page(app: &tauri::AppHandle, root: &str, page_id: &str) -> Result<(), String> {
+    let _recents_io = RECENTS_IO.lock().map_err(|error| error.to_string())?;
     if page_id.is_empty() || page_id.len() > 128 {
         return Err("page id must be present and bounded".to_owned());
     }
@@ -780,6 +818,7 @@ pub fn set_notebook_pinned(
     root: String,
     pinned: bool,
 ) -> Result<Vec<RecentNotebook>, String> {
+    let _recents_io = RECENTS_IO.lock().map_err(|error| error.to_string())?;
     let mut recents = read_config::<RecentNotebooks>(&app, "recents.json")?;
     for entry in &mut recents.entries {
         if entry.root == root {
@@ -795,6 +834,7 @@ pub fn remove_recent_notebook(
     app: tauri::AppHandle,
     root: String,
 ) -> Result<Vec<RecentNotebook>, String> {
+    let _recents_io = RECENTS_IO.lock().map_err(|error| error.to_string())?;
     let mut recents = read_config::<RecentNotebooks>(&app, "recents.json")?;
     recents.entries.retain(|entry| entry.root != root);
     recents.open_roots.retain(|known| known != &root);
@@ -829,22 +869,68 @@ impl RemotePackages {
     }
 }
 
-/// Seed the in-memory policy from the stored settings at startup.
-pub fn seed_remote_packages(app: &tauri::AppHandle, policy: &RemotePackages) {
-    if let Ok(settings) = read_config::<AppSettings>(app, "settings.json") {
-        let settings = sanitize(settings);
-        policy.set(settings.remote_packages);
-        if let Err(error) = app
-            .state::<crate::helper::Helper>()
-            .apply(app, settings.ai_helper)
-        {
-            eprintln!("AI helper startup failed: {error}");
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn failed_settings_write_keeps_both_policies() {
+        let temporary = tempfile::tempdir().unwrap();
+        let policy = super::RemotePackages::default();
+        policy.set(false);
+        let downloads = std::sync::atomic::AtomicBool::new(false);
+        let settings = super::AppSettings {
+            remote_packages: true,
+            python_package_downloads: true,
+            ..Default::default()
+        };
+        // A directory cannot be replaced by the atomic file writer.
+        assert!(super::persist_settings(temporary.path(), &policy, &downloads, settings).is_err());
+        assert!(!policy.allowed());
+        assert!(!downloads.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn settings_workers_commit_in_admission_order() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("settings.json");
+        let first = super::SETTINGS_WRITES.lock().await;
+        let next_path = path.clone();
+        let next = tokio::spawn(async move {
+            let permit = super::SETTINGS_WRITES.lock().await;
+            tokio::task::spawn_blocking(move || {
+                let _permit = permit;
+                super::persist_settings(
+                    &next_path,
+                    &super::RemotePackages::default(),
+                    &std::sync::atomic::AtomicBool::new(false),
+                    super::AppSettings {
+                        ui_language: "de".into(),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            })
+            .await
+            .unwrap();
+        });
+        let first_path = path.clone();
+        tokio::task::spawn_blocking(move || {
+            let _permit = first;
+            super::persist_settings(
+                &first_path,
+                &super::RemotePackages::default(),
+                &std::sync::atomic::AtomicBool::new(false),
+                super::AppSettings::default(),
+            )
+            .unwrap();
+        })
+        .await
+        .unwrap();
+        next.await.unwrap();
+        let saved: super::AppSettings =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(saved.ui_language, "de");
+    }
+
     #[test]
     fn ui_language_defaults_normalizes_and_round_trips_without_resetting_other_preferences() {
         let legacy: super::AppSettings = serde_json::from_str(r#"{"touchGlide":1.5}"#).unwrap();

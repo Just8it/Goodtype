@@ -304,6 +304,7 @@
     set typstBlocks(value) { session.typstBlocks = value; },
     get workspace() { return workspace; },
     set workspace(value) { workspace = value; },
+    get zooming() { return navigation.zooming; },
     get zoom() { return zoom; },
     set zoom(value) { zoom = value; },
   });
@@ -903,6 +904,10 @@
       void session.strokes;
     }
     void $t;
+    if (navigation.zooming) {
+      selection.selectionToolbarPosition = { left: 0, top: 0, ready: false };
+      return;
+    }
     void zoom;
     void session.activePageId;
     void sideEditorOpen;
@@ -2037,7 +2042,6 @@
       <div class="page-scroll-content" bind:this={pageViewport} onscroll={() => { session.lastScrollAt = performance.now(); selection.scheduleSelectionToolbar(); session.scheduleFocus(session.FOCUS_SETTLE_MS); }}>
         <div
           class="page-pan-field"
-          style:--page-zoom={zoom}
           class:pulling={navigation.pull !== null}
           style:transform={navigation.pullShift > 0 ? `translateY(${-navigation.pullShift}px)` : undefined}
         >
@@ -2051,6 +2055,7 @@
             class:active-page={active}
             class:calculation-stack-item={Boolean(entry.snapshot?.page.calculation)}
             class="page-stack-item"
+            style:--page-zoom={zoom}
             data-page-id={entry.id}
             aria-label={$t("workspace.page4", { "value1": index + 1 })}
             aria-current={active ? "page" : undefined}
@@ -2080,16 +2085,17 @@
                 >&darr;</button>
               {/if}
             </div>
-            <div class="page-frame" use:trackActiveFrame={active} style:--page-width={`${box.widthPt}px`} style:--page-height={`${box.heightPt}px`} style:width="calc(var(--page-width) * var(--page-zoom))" style:height="calc(var(--page-height) * var(--page-zoom))">
+            <div class="page-frame" use:trackActiveFrame={active} style:--page-zoom={zoom} style:--page-width={`${box.widthPt}px`} style:--page-height={`${box.heightPt}px`} style:width="calc(var(--page-width) * var(--page-zoom))" style:height="calc(var(--page-height) * var(--page-zoom))">
               <ProposalPreview root={session.root} pageId={entry.id} width={box.widthPt} height={box.heightPt} {zoom} />
               <ShareChip pageId={entry.id} width={box.widthPt} height={box.heightPt} onError={helperError} />
-              <div class="page" class:computational={Boolean(entry.snapshot?.page.calculation)} style:width={`${box.widthPt}px`} style:height={`${box.heightPt}px`} style:transform="scale(var(--page-zoom))">
+              <div class="page" class:computational={Boolean(entry.snapshot?.page.calculation)} style:width={`${box.widthPt}px`} style:height={`${box.heightPt}px`} style:--page-zoom={zoom} style:transform="scale(var(--page-zoom))">
                 {#if entry.snapshot?.page.calculation}
                   <CalculationPage root={session.root} pageId={entry.id} snapshot={entry.snapshot}
                     workspace={calculations} {active} sideOpen={sideEditorOpen} onAskAI={settings.aiHelper.enabled ? codexAction ? askCellAI : explainAISetup : undefined}
                     activate={() => session.activatePage(entry.id)} openSide={() => void openSideEditor()} />
                 {:else if active || entry.snapshot}
                   <PageSurface
+                    zooming={navigation.zooming}
                     blocks={active ? activeBlockViews : blockViewsFromSnapshot(entry.snapshot!)}
                     pageTypst={active
                       ? activePageTypstView
@@ -2189,7 +2195,6 @@
                       active
                         ? session.addStroke(stroke)
                         : session.commitNeighborInk(entry.id, [...session.neighborStrokesFor(entry), stroke], $t("workspace.addedInk"))}
-                    onEraseShape={active ? session.eraseShape : undefined}
                     onShapesErased={active ? session.replaceErasedShapes : undefined}
                     onShapeFinalized={active ? session.addShape : undefined}
                     onInkShapeRecognized={active ? session.promoteHeldInk : undefined}
@@ -2652,6 +2657,8 @@
           <dt>{$t("workspace.strokeCommitMedianPWorst")}</dt><dd>{timingSummary("commitMs")}</dd>
           <dt>{$t("workspace.latestTypstCompile")}</dt><dd>{$t("workspace.msDebounce", { "value1": milliseconds(compileMs), "TYPST_IDLE_DEBOUNCE_MS": TYPST_IDLE_DEBOUNCE_MS })}</dd>
           <dt>{$t("workspace.latestZoomFrame")}</dt><dd>{milliseconds(zoomFrameMs)}</dd>
+          <dt>{$t("workspace.zoomIntervalAverage")}</dt><dd>{milliseconds(navigation.zoomIntervals?.average ?? null)}</dd>
+          <dt>{$t("workspace.zoomIntervalWorst")}</dt><dd>{milliseconds(navigation.zoomIntervals?.worst ?? null)}</dd>
           <dt>{$t("workspace.saveReopenExport")}</dt><dd>{milliseconds(session.saveMs)} / {milliseconds(session.reopenMs)} / {milliseconds(session.exportMs)}</dd>
         </dl>
       </aside>
@@ -2782,6 +2789,10 @@
     flex-direction: column;
     gap: 46px;
   }
+  /* Not inherited: each element that scales with zoom sets it itself. Inherited from the pan
+     field, every zoom frame recalculated the style of every node on every page (about 12 ms on
+     an ink-heavy page in a WebView2 trace). */
+  @property --page-zoom { syntax: "<number>"; inherits: false; initial-value: 1; }
   .page-stack-item { position: relative; flex: none; }
   .calculation-stack-item {
     margin-top: calc(var(--calculation-top-space, 32px) * var(--page-zoom));
@@ -2882,6 +2893,11 @@
     box-shadow: var(--shadow-page);
     transform-origin: top left;
   }
+  /* Always its own layer. Promoting it only while zooming cost one 400 ms raster stall at the
+     start of every pinch and still re-rastered ink each frame; permanent promotion presented a
+     steady frame rate in a WebView2 trace and stays sharp once the zoom settles. Computational
+     pages are left out because their content overflows the page box. */
+  .page:not(.computational) { will-change: transform; }
   .page.computational { overflow: visible; background: var(--charcoal); }
   .page-loading { display: grid; height: 100%; color: var(--quiet); font-size: var(--text-md); place-items: center; }
 

@@ -52,25 +52,34 @@ struct RecoveryIntent {
     candidate: NotebookSnapshot,
 }
 
+/// The binary codec bytes of each ink layer exactly as they were placed in the recovery
+/// envelope, in `ink_layers` order. A `.ink` canonical file is the same codec output, so the
+/// transaction writes these bytes instead of encoding every candidate layer a second time.
+pub(crate) struct StagedInk {
+    pub(crate) previous: Vec<Vec<u8>>,
+    pub(crate) candidate: Vec<Vec<u8>>,
+}
+
 /// Record both states before a transactional write touches canonical files.
 pub(crate) fn stage_transaction(
     root: &Path,
     previous: &NotebookSnapshot,
     candidate: &NotebookSnapshot,
-) -> Result<(), StorageError> {
+) -> Result<StagedInk, StorageError> {
     if root.join(layout::PENDING_TRANSACTION).exists()
         || root.join(layout::LEGACY_PENDING_TRANSACTION).exists()
     {
         return invalid("a pending recovery transaction already exists");
     }
-    let bytes = encode_intent(previous, candidate)?;
-    write_atomic(root, layout::PENDING_TRANSACTION, &bytes)
+    let (bytes, staged) = encode_intent(previous, candidate)?;
+    write_atomic(root, layout::PENDING_TRANSACTION, &bytes)?;
+    Ok(staged)
 }
 
 fn encode_intent(
     previous: &NotebookSnapshot,
     candidate: &NotebookSnapshot,
-) -> Result<Vec<u8>, StorageError> {
+) -> Result<(Vec<u8>, StagedInk), StorageError> {
     let mut payload_bytes = 0usize;
     let (previous, previous_layers) = store_snapshot(previous, &mut payload_bytes)?;
     let (candidate, candidate_layers) = store_snapshot(candidate, &mut payload_bytes)?;
@@ -95,11 +104,17 @@ fn encode_intent(
     bytes.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
     bytes.extend_from_slice(&metadata_len.to_le_bytes());
     bytes.extend_from_slice(&metadata);
-    for layer in previous_layers.into_iter().chain(candidate_layers) {
-        bytes.extend_from_slice(&layer);
+    for layer in previous_layers.iter().chain(&candidate_layers) {
+        bytes.extend_from_slice(layer);
     }
     debug_assert_eq!(bytes.len(), total_len);
-    Ok(bytes)
+    Ok((
+        bytes,
+        StagedInk {
+            previous: previous_layers,
+            candidate: candidate_layers,
+        },
+    ))
 }
 
 fn store_snapshot(
@@ -545,7 +560,7 @@ mod tests {
     fn binary_envelope_round_trips_and_rejects_bad_bounds() {
         let previous = snapshot().without_assets();
         let candidate = changed(&previous);
-        let encoded = encode_intent(&previous, &candidate).unwrap();
+        let (encoded, _) = encode_intent(&previous, &candidate).unwrap();
         let decoded = decode_binary(&encoded).unwrap();
         assert_eq!(
             decoded.candidate.ink_layers[0].strokes[0].points[0].x,
@@ -560,6 +575,37 @@ mod tests {
         let mut trailing = encoded;
         trailing.push(0);
         assert!(decode_binary(&trailing).is_err());
+    }
+
+    /// Finding 3: each candidate layer is encoded once. The blob in the recovery envelope, the
+    /// bytes handed to the canonical write, and the `.ink` file on disk are the same bytes.
+    #[test]
+    fn canonical_ink_bytes_are_the_envelope_candidate_bytes() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("notebook");
+        create_notebook(&root, &snapshot()).unwrap();
+        let canonical = canonical_root(&root).unwrap();
+        let previous = open_notebook(&root).unwrap();
+        let candidate = changed(&previous);
+
+        let (envelope, staged) = encode_intent(&previous, &candidate).unwrap();
+        assert_eq!(staged.candidate.len(), candidate.ink_layers.len());
+        assert!(envelope.ends_with(&staged.candidate.concat()));
+        let decoded = decode_binary(&envelope).unwrap();
+        assert_eq!(
+            ink_codec::encode(&decoded.candidate.ink_layers[0]).unwrap(),
+            staged.candidate[0]
+        );
+
+        save_transactional(&canonical, &previous, &candidate).unwrap();
+        assert_eq!(
+            fs::read(root.join(&candidate.page.ink_layers[0].path)).unwrap(),
+            staged.candidate[0]
+        );
+        assert_eq!(
+            open_notebook(&root).unwrap().ink_layers[0].strokes[0].points[0].x,
+            160.0
+        );
     }
 
     #[test]

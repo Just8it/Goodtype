@@ -1029,6 +1029,8 @@ export const de = {
     "strokeCommitMedianPWorst": "Strichspeicherung: Median / p95 / Maximum",
     "latestTypstCompile": "Letzte Typst-Kompilierung",
     "msDebounce": "{{value1}} + {{TYPST_IDLE_DEBOUNCE_MS}} ms Wartezeit",
+    "zoomIntervalAverage": "Letzte Zoom-Geste: mittlerer Bildabstand",
+    "zoomIntervalWorst": "Letzte Zoom-Geste: längster Bildabstand",
     "latestZoomFrame": "Letztes Zoom-Bild",
     "saveReopenExport": "Speichern / Öffnen / Exportieren",
     "renderedPageText": "Gerenderter Seitentext",

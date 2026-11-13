@@ -1028,6 +1028,8 @@ export const en = {
     "strokeCommitMedianPWorst": "Stroke commit median / p95 / worst",
     "latestTypstCompile": "Latest Typst compile",
     "msDebounce": "{{value1}} + {{TYPST_IDLE_DEBOUNCE_MS}} ms debounce",
+    "zoomIntervalAverage": "Last zoom gesture: average frame interval",
+    "zoomIntervalWorst": "Last zoom gesture: worst frame interval",
     "latestZoomFrame": "Latest zoom frame",
     "saveReopenExport": "Save / reopen / export",
     "renderedPageText": "Rendered page text",

@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, mpsc};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const TINYMIST_VERSION: &str = "0.15.2";
 const TINYMIST_SHA256: &str = "8780ed5076135f5afb11a03e6215d43659c193bc649634aff9b9dc91d77200a8";
@@ -21,20 +21,43 @@ const EDITOR_FILE: &str = "__goodtype_editor.typ";
 type Pending = Arc<Mutex<HashMap<u64, mpsc::Sender<Result<Value, String>>>>>;
 type PublishedDiagnostics = Arc<(Mutex<DiagnosticState>, Condvar)>;
 
+#[cfg(test)]
 fn wait_diagnostics(
     published: &PublishedDiagnostics,
     source: &str,
     uri: &str,
     version: u64,
 ) -> Result<Vec<Diagnostic>, String> {
+    wait_diagnostics_until(
+        published,
+        source,
+        uri,
+        version,
+        Instant::now() + Duration::from_secs(1),
+    )
+}
+
+fn wait_diagnostics_until(
+    published: &PublishedDiagnostics,
+    source: &str,
+    uri: &str,
+    version: u64,
+    deadline: Instant,
+) -> Result<Vec<Diagnostic>, String> {
     let (slot, ready) = &**published;
     let diagnostics = slot
         .lock()
         .map_err(|_| "Tinymist diagnostic state is unavailable")?;
     let (diagnostics, _) = ready
-        .wait_timeout_while(diagnostics, Duration::from_secs(1), |value| {
-            value.document_uri == uri && value.version == version && value.published.is_none()
-        })
+        .wait_timeout_while(
+            diagnostics,
+            deadline
+                .saturating_duration_since(Instant::now())
+                .min(Duration::from_secs(1)),
+            |value| {
+                value.document_uri == uri && value.version == version && value.published.is_none()
+            },
+        )
         .map_err(|_| "Tinymist diagnostic state is unavailable")?;
     if diagnostics.document_uri != uri || diagnostics.version != version {
         return Ok(Vec::new());
@@ -181,6 +204,7 @@ impl Tinymist {
     }
 
     pub fn analyze(&self, root: &Path, source: &str) -> Result<Analysis, String> {
+        let deadline = Instant::now() + REQUEST_TIMEOUT;
         let generation = self.1.fetch_add(1, Ordering::Relaxed) + 1;
         // Retries and diagnostic waits release the client between requests, so completion can
         // run while a cold semantic analysis is still warming up.
@@ -192,7 +216,7 @@ impl Tinymist {
                 if self.1.load(Ordering::Relaxed) != generation {
                     return Ok(Analysis::unavailable());
                 }
-                let result = self.run(root, source, |client| {
+                let result = self.run_until(root, source, deadline, |client| {
                     client.sync(source)?;
                     let response = client.request(
                         "textDocument/semanticTokens/full",
@@ -216,7 +240,9 @@ impl Tinymist {
                 if let Some((highlights, published, uri, version)) = result {
                     return Ok(Analysis {
                         highlights,
-                        diagnostics: wait_diagnostics(&published, source, &uri, version)?,
+                        diagnostics: wait_diagnostics_until(
+                            &published, source, &uri, version, deadline,
+                        )?,
                         available: true,
                     });
                 }
@@ -239,6 +265,16 @@ impl Tinymist {
         &self,
         root: &Path,
         source: &str,
+        operation: impl FnMut(&mut Client) -> Result<T, String>,
+    ) -> Result<T, String> {
+        self.run_until(root, source, Instant::now() + REQUEST_TIMEOUT, operation)
+    }
+
+    fn run_until<T>(
+        &self,
+        root: &Path,
+        source: &str,
+        deadline: Instant,
         mut operation: impl FnMut(&mut Client) -> Result<T, String>,
     ) -> Result<T, String> {
         if source.len() > goodtype_typst::MAX_SOURCE_BYTES {
@@ -248,14 +284,34 @@ impl Tinymist {
                 source.len()
             ));
         }
-        let mut slot = self.0.lock().map_err(|_| "Tinymist state is unavailable")?;
+        let mut slot = loop {
+            if Instant::now() >= deadline {
+                return Err("Tinymist operation timed out".into());
+            }
+            match self.0.try_lock() {
+                Ok(slot) => break slot,
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    std::thread::sleep(Duration::from_millis(2))
+                }
+                Err(_) => return Err("Tinymist state is unavailable".into()),
+            }
+        };
         let mut last_error = String::new();
         for _ in 0..2 {
-            if slot.as_ref().is_none_or(|client| client.root != root) {
-                *slot = Some(Client::start(root.to_owned())?);
+            if Instant::now() >= deadline {
+                return Err("Tinymist operation timed out".into());
             }
-            match operation(slot.as_mut().expect("Tinymist client was just created")) {
-                Ok(value) => return Ok(value),
+            if slot.as_ref().is_none_or(|client| client.root != root) {
+                *slot = Some(Client::start(root.to_owned(), deadline)?);
+            }
+            let client = slot.as_mut().expect("Tinymist client was just created");
+            client.deadline = deadline;
+            client.watchdog.arm(Some(deadline));
+            match operation(client) {
+                Ok(value) => {
+                    client.watchdog.arm(None);
+                    return Ok(value);
+                }
                 Err(error) => {
                     last_error = error;
                     slot.take();
@@ -263,6 +319,55 @@ impl Tinymist {
             }
         }
         Err(last_error)
+    }
+}
+
+struct Watchdog {
+    child: Arc<Mutex<Child>>,
+    deadline: Arc<Mutex<Option<Instant>>>,
+    stop: mpsc::Sender<()>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Watchdog {
+    fn new(child: Child, deadline: Instant) -> Self {
+        let child = Arc::new(Mutex::new(child));
+        let due = Arc::new(Mutex::new(Some(deadline)));
+        let (stop, receiver) = mpsc::channel();
+        let process = child.clone();
+        let timer = due.clone();
+        let thread = std::thread::spawn(move || {
+            while receiver.recv_timeout(Duration::from_millis(5)).is_err() {
+                // Hold the deadline through the kill: `arm` then cannot disarm or re-arm for a
+                // new request between the expiry check and the kill.
+                let due = timer.lock().unwrap();
+                if due.is_some_and(|due| Instant::now() >= due) {
+                    let _ = process.lock().unwrap().kill();
+                    break;
+                }
+            }
+        });
+        Self {
+            child,
+            deadline: due,
+            stop,
+            thread: Some(thread),
+        }
+    }
+
+    fn arm(&self, deadline: Option<Instant>) {
+        *self.deadline.lock().unwrap() = deadline;
+    }
+}
+
+impl Drop for Watchdog {
+    fn drop(&mut self) {
+        let _ = self.child.lock().unwrap().kill();
+        let _ = self.child.lock().unwrap().wait();
+        let _ = self.stop.send(());
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
     }
 }
 
@@ -275,11 +380,15 @@ struct Client {
     semantic_legend: Vec<String>,
     semantic_modifiers: Vec<String>,
     diagnostics: PublishedDiagnostics,
-    child: Child,
+    watchdog: Watchdog,
+    deadline: Instant,
     input: Arc<Mutex<ChildStdin>>,
     pending: Pending,
     next_id: AtomicU64,
     proxy_alive: Arc<AtomicBool>,
+    proxy_thread: Option<std::thread::JoinHandle<()>>,
+    reader: Option<std::thread::JoinHandle<()>>,
+    stderr: Option<std::thread::JoinHandle<()>>,
 }
 
 /// A warm edit is answered within a retry or two; a cold first analysis on a busy machine can
@@ -288,7 +397,7 @@ const SEMANTIC_TOKEN_ATTEMPTS: u32 = 12;
 const SEMANTIC_TOKEN_RETRY: Duration = Duration::from_millis(25);
 
 impl Client {
-    fn start(root: PathBuf) -> Result<Self, String> {
+    fn start(root: PathBuf, deadline: Instant) -> Result<Self, String> {
         let binary = verified_binary()?;
         let root_uri = tauri::Url::from_directory_path(&root)
             .map_err(|_| "Notebook root cannot be represented as a file URL")?
@@ -297,7 +406,7 @@ impl Client {
             .map_err(|_| "Typst editor path cannot be represented as a file URL")?
             .to_string();
         let settings = settings(&root);
-        let (proxy_url, proxy_alive) = local_proxy_sink()?;
+        let (proxy_url, proxy_alive, proxy_thread) = local_proxy_sink()?;
 
         let mut command = Command::new(binary);
         // The release app has no console, so Windows would give the sidecar a console window of
@@ -342,7 +451,7 @@ impl Client {
             }),
             Condvar::new(),
         ));
-        spawn_reader(
+        let reader = spawn_reader(
             output,
             input.clone(),
             pending.clone(),
@@ -350,9 +459,10 @@ impl Client {
             settings.clone(),
             root_uri.clone(),
         );
-        if let Some(stderr) = child.stderr.take() {
-            std::thread::spawn(move || for _ in BufReader::new(stderr).lines() {});
-        }
+        let stderr = child
+            .stderr
+            .take()
+            .map(|stderr| std::thread::spawn(move || for _ in BufReader::new(stderr).lines() {}));
 
         let mut client = Self {
             root,
@@ -363,11 +473,15 @@ impl Client {
             semantic_legend: Vec::new(),
             semantic_modifiers: Vec::new(),
             diagnostics,
-            child,
+            watchdog: Watchdog::new(child, deadline),
+            deadline,
             input,
             pending,
             next_id: AtomicU64::new(1),
             proxy_alive,
+            proxy_thread: Some(proxy_thread),
+            reader: Some(reader),
+            stderr,
         };
         let initialize = client.request(
             "initialize",
@@ -493,7 +607,12 @@ impl Client {
                 .and_then(|mut pending| pending.remove(&id));
             return Err(error);
         }
-        self.receive(method, id, receiver, REQUEST_TIMEOUT)
+        self.receive(
+            method,
+            id,
+            receiver,
+            self.deadline.saturating_duration_since(Instant::now()),
+        )
     }
 
     fn receive(
@@ -510,7 +629,7 @@ impl Client {
                     .lock()
                     .ok()
                     .and_then(|mut pending| pending.remove(&id));
-                let _ = self.notify("$/cancelRequest", json!({ "id": id }));
+                let _ = self.watchdog.child.lock().unwrap().kill();
                 Err(format!("Tinymist request {method} timed out"))
             }
         }
@@ -527,25 +646,18 @@ impl Client {
 impl Drop for Client {
     fn drop(&mut self) {
         self.proxy_alive.store(false, Ordering::Relaxed);
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let (sender, receiver) = mpsc::channel();
-        if let Ok(mut pending) = self.pending.lock() {
-            pending.insert(id, sender);
+        // Never write during teardown: even shutdown can fill an unread pipe.
+        let _ = self.watchdog.child.lock().unwrap().kill();
+        let _ = self.watchdog.child.lock().unwrap().wait();
+        if let Some(proxy) = self.proxy_thread.take() {
+            let _ = proxy.join();
         }
-        let _ = write_message(
-            &self.input,
-            &json!({ "jsonrpc": "2.0", "id": id, "method": "shutdown", "params": null }),
-        );
-        let _ = self.receive("shutdown", id, receiver, Duration::from_millis(250));
-        let _ = self.notify("exit", json!({}));
-        for _ in 0..10 {
-            if self.child.try_wait().ok().flatten().is_some() {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(25));
+        if let Some(reader) = self.reader.take() {
+            let _ = reader.join();
         }
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        if let Some(stderr) = self.stderr.take() {
+            let _ = stderr.join();
+        }
     }
 }
 
@@ -561,7 +673,9 @@ fn settings(root: &Path) -> Value {
     })
 }
 
-fn local_proxy_sink() -> Result<(String, Arc<AtomicBool>), String> {
+type ProxySink = (String, Arc<AtomicBool>, std::thread::JoinHandle<()>);
+
+fn local_proxy_sink() -> Result<ProxySink, String> {
     let listener = TcpListener::bind(("127.0.0.1", 0))
         .map_err(|error| format!("Could not contain Tinymist network access: {error}"))?;
     listener
@@ -572,7 +686,7 @@ fn local_proxy_sink() -> Result<(String, Arc<AtomicBool>), String> {
         .map_err(|error| format!("Could not read Tinymist proxy address: {error}"))?;
     let alive = Arc::new(AtomicBool::new(true));
     let thread_alive = alive.clone();
-    std::thread::spawn(move || {
+    let thread = std::thread::spawn(move || {
         while thread_alive.load(Ordering::Relaxed) {
             match listener.accept() {
                 Ok((stream, _)) => drop(stream),
@@ -583,7 +697,7 @@ fn local_proxy_sink() -> Result<(String, Arc<AtomicBool>), String> {
             }
         }
     });
-    Ok((format!("http://{address}"), alive))
+    Ok((format!("http://{address}"), alive, thread))
 }
 
 fn spawn_reader(
@@ -593,7 +707,7 @@ fn spawn_reader(
     diagnostics: PublishedDiagnostics,
     settings: Value,
     root_uri: String,
-) {
+) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let mut reader = BufReader::new(output);
         while let Ok(Some(message)) = read_message(&mut reader) {
@@ -646,7 +760,7 @@ fn spawn_reader(
                 let _ = sender.send(Err("Tinymist stopped unexpectedly".into()));
             }
         }
-    });
+    })
 }
 
 fn read_message(reader: &mut impl BufRead) -> Result<Option<Value>, String> {
@@ -1033,6 +1147,124 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore = "subprocess fixture"]
+    fn unreading_sidecar() {
+        if std::env::var_os("GOODTYPE_UNREADING_SIDECAR").is_some() {
+            std::thread::sleep(Duration::from_secs(60));
+        }
+    }
+
+    #[test]
+    fn blocked_completion_does_not_strand_analysis_or_reset() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../fixtures/typst")
+            .canonicalize()
+            .unwrap();
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "tinymist::tests::unreading_sidecar", "--ignored"])
+            .env("GOODTYPE_UNREADING_SIDECAR", "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let input = Arc::new(Mutex::new(child.stdin.take().unwrap()));
+        let pending = Arc::new(Mutex::new(HashMap::new()));
+        let diagnostics = Arc::new((
+            Mutex::new(DiagnosticState {
+                document_uri: String::new(),
+                version: 0,
+                published: None,
+            }),
+            Condvar::new(),
+        ));
+        let reader = spawn_reader(
+            child.stdout.take().unwrap(),
+            input.clone(),
+            pending.clone(),
+            diagnostics.clone(),
+            json!({}),
+            String::new(),
+        );
+        let watchdog = Watchdog::new(child, Instant::now() + REQUEST_TIMEOUT);
+        let process = watchdog.child.clone();
+        let tinymist = Tinymist::default();
+        *tinymist.0.lock().unwrap() = Some(Client {
+            root: root.clone(),
+            document_uri: String::new(),
+            source: String::new(),
+            version: 0,
+            opened: false,
+            semantic_legend: vec![],
+            semantic_modifiers: vec![],
+            diagnostics,
+            watchdog,
+            deadline: Instant::now() + REQUEST_TIMEOUT,
+            input,
+            pending,
+            next_id: AtomicU64::new(1),
+            proxy_alive: Arc::new(AtomicBool::new(false)),
+            proxy_thread: None,
+            reader: Some(reader),
+            stderr: None,
+        });
+        let started = Instant::now();
+        let completing = tinymist.clone();
+        let completion_root = root.clone();
+        let completion = std::thread::spawn(move || {
+            completing.complete(
+                &completion_root,
+                &"x".repeat(goodtype_typst::MAX_SOURCE_BYTES),
+                0,
+                true,
+            )
+        });
+        while tinymist.0.try_lock().is_ok() {
+            assert!(started.elapsed() < Duration::from_secs(2));
+            std::thread::yield_now();
+        }
+        let resetting = tinymist.clone();
+        let reset = std::thread::spawn(move || resetting.reset());
+        let analyzing = tinymist.clone();
+        let analysis = std::thread::spawn(move || analyzing.analyze(&root, "#let a = 1"));
+        assert!(completion.join().unwrap().is_err());
+        let _ = analysis.join().unwrap();
+        reset.join().unwrap();
+        tinymist.reset();
+        assert!(started.elapsed() < REQUEST_TIMEOUT + Duration::from_secs(2));
+        assert!(process.lock().unwrap().try_wait().unwrap().is_some());
+    }
+
+    #[test]
+    fn watchdog_kills_a_child_that_does_not_read_a_large_frame() {
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "tinymist::tests::unreading_sidecar", "--ignored"])
+            .env("GOODTYPE_UNREADING_SIDECAR", "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap();
+        let input = Arc::new(Mutex::new(child.stdin.take().unwrap()));
+        let started = Instant::now();
+        let watchdog = Watchdog::new(child, started + Duration::from_millis(150));
+        let writer = std::thread::spawn(move || {
+            write_message(&input, &json!({"payload": "x".repeat(8 * 1024 * 1024)}))
+        });
+        assert!(writer.join().unwrap().is_err());
+        assert!(
+            watchdog
+                .child
+                .lock()
+                .unwrap()
+                .wait()
+                .unwrap()
+                .code()
+                .is_some()
+        );
+        drop(watchdog);
+        assert!(started.elapsed() < Duration::from_secs(3));
+    }
+
+    #[test]
     fn diagnostic_wait_discards_a_replaced_document_without_holding_the_client() {
         let published = Arc::new((
             Mutex::new(DiagnosticState {
@@ -1237,7 +1469,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .as_ref()
-                .map(|client| client.child.id())
+                .map(|client| client.watchdog.child.lock().unwrap().id())
         };
         tinymist.analyze(&root, "= Title").unwrap();
         let first = process(&tinymist).expect("Tinymist should be running");

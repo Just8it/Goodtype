@@ -22,3 +22,14 @@ it("rejects distant bounds while retaining exact segment hits, transforms, and t
   expect(hitStroke([moved], { x: middle.x + 500, y: middle.y }, 2)).toBe(moved);
   expect(strokeBounds({ ...stroke, points: [] })).toBeNull();
 });
+
+it("hits the visually highest zIndex with array order breaking ties", () => {
+  const base: Stroke = {id:"base",tool:"pen",color:"#000000",widthPt:2,pressure:false,taper:0,opacity:1,groupId:null,
+    transform:{translateX:0,translateY:0,scaleX:1,scaleY:1,rotation:0},
+    points:[{x:0,y:0,pressure:1,timeMs:0,tiltX:0,tiltY:0},{x:20,y:0,pressure:1,timeMs:1,tiltX:0,tiltY:0}]};
+  const high={...base,id:"high",zIndex:20}, low={...base,id:"low",zIndex:1};
+  expect(hitStroke([high,low],{x:10,y:0},1)).toBe(high);
+  expect(hitStroke([low,high],{x:10,y:0},1)).toBe(high);
+  const tie={...high,id:"tie"};
+  expect(hitStroke([high,tie],{x:10,y:0},1)).toBe(tie);
+});

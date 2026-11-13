@@ -463,6 +463,22 @@ export function createNavigation(env: NavigationEnvironment) {
     null;
 
   let pendingZoomFrame = 0;
+  let zooming = $state(false);
+  let zoomIdleTimer: ReturnType<typeof setTimeout> | undefined;
+  let previousZoomFrame: number | null = null;
+  let zoomIntervalTotal = 0;
+  let zoomIntervalCount = 0;
+  let zoomIntervalWorst = 0;
+  let zoomIntervals = $state<{ average: number; worst: number } | null>(null);
+
+  function settleZoom() {
+    zooming = false;
+    if (env.collectMetrics) {
+      zoomIntervals = zoomIntervalCount
+        ? { average: zoomIntervalTotal / zoomIntervalCount, worst: zoomIntervalWorst }
+        : null;
+    }
+  }
 
   /** Where zoom is heading, so events arriving within one frame build on each other. */
   function targetZoom() {
@@ -471,6 +487,12 @@ export function createNavigation(env: NavigationEnvironment) {
 
   function zoomAt(next: number, clientX: number, clientY: number, fixedPagePoint?: Point) {
     if (!env.pageViewport || !env.pageFrame) return;
+    if (!zooming) {
+      previousZoomFrame = null;
+      zoomIntervalTotal = zoomIntervalCount = zoomIntervalWorst = 0;
+    }
+    zooming = true;
+    clearTimeout(zoomIdleTimer);
     automaticPageFocusLocked = true;
     pendingZoom = { zoom: clampZoom(next), clientX, clientY, fixedPagePoint };
     if (!pendingZoomFrame) pendingZoomFrame = requestAnimationFrame(applyPendingZoom);
@@ -480,10 +502,22 @@ export function createNavigation(env: NavigationEnvironment) {
     pendingZoomFrame = 0;
     const pending = pendingZoom;
     pendingZoom = null;
-    if (!pending || !env.pageViewport || !env.pageFrame) return;
+    if (!pending || !env.pageViewport || !env.pageFrame) {
+      settleZoom();
+      return;
+    }
     const viewport = env.pageViewport;
     const frame = env.pageFrame;
     const startedAt = performance.now();
+    if (env.collectMetrics) {
+      if (previousZoomFrame !== null) {
+        const interval = startedAt - previousZoomFrame;
+        zoomIntervalTotal += interval;
+        zoomIntervalCount++;
+        zoomIntervalWorst = Math.max(zoomIntervalWorst, interval);
+      }
+      previousZoomFrame = startedAt;
+    }
     const before = frame.getBoundingClientRect();
     const pagePoint = pending.fixedPagePoint ?? screenToPage(
       { x: pending.clientX, y: pending.clientY }, before,
@@ -499,6 +533,8 @@ export function createNavigation(env: NavigationEnvironment) {
     viewport.scrollLeft += anchored.x - pending.clientX;
     viewport.scrollTop += anchored.y - pending.clientY;
     if (env.collectMetrics) env.zoomFrameMs = performance.now() - startedAt;
+    clearTimeout(zoomIdleTimer);
+    zoomIdleTimer = setTimeout(settleZoom, 180);
   }
 
   /**
@@ -582,6 +618,8 @@ export function createNavigation(env: NavigationEnvironment) {
     cancelLongPress();
     clearTimeout(touchHistoryToastTimer);
     clearTimeout(pullIdleTimer);
+    clearTimeout(zoomIdleTimer);
+    zooming = false;
     if (pendingZoomFrame) cancelAnimationFrame(pendingZoomFrame);
     pendingZoom = null;
     pendingZoomFrame = 0;
@@ -603,6 +641,8 @@ export function createNavigation(env: NavigationEnvironment) {
     wheelZoom,
     lockPageFocus: () => { automaticPageFocusLocked = true; },
     pagePointAt,
+    get zooming() { return zooming; },
+    get zoomIntervals() { return zoomIntervals; },
     get panFrom() { return panFrom; },
     get touchTaps() { return touchTaps; },
     get touchHistoryToast() { return touchHistoryToast; },

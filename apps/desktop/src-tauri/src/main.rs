@@ -30,8 +30,14 @@ fn main() {
         .setup(|app| {
             let handle = app.handle().clone();
             let policy = app.state::<settings::RemotePackages>();
-            settings::seed_remote_packages(&handle, &policy);
             if let Ok(settings) = settings::load_app_settings(handle.clone()) {
+                policy.set(settings.remote_packages);
+                if let Err(error) = app
+                    .state::<helper::Helper>()
+                    .apply(&handle, settings.ai_helper)
+                {
+                    eprintln!("AI helper startup failed: {error}");
+                }
                 app.state::<computation::RuntimeState>().downloads.store(
                     settings.python_package_downloads,
                     std::sync::atomic::Ordering::SeqCst,

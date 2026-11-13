@@ -1,5 +1,5 @@
 import type { Point } from "../geometry/coordinates";
-import type { Stroke, StrokePattern, StrokePoint } from "../model";
+import { DEFAULT_INK_Z_INDEX, type Stroke, type StrokePattern, type StrokePoint } from "../model";
 import type { InkTool } from "./pipeline";
 
 export type Bounds = {
@@ -8,6 +8,18 @@ export type Bounds = {
   right: number;
   bottom: number;
 };
+
+const placedCache = new WeakMap<Stroke, Point[]>();
+
+/** Committed strokes are immutable; transforms create a new stroke identity. */
+export function placedPoints(stroke: Stroke): Point[] {
+  let points = placedCache.get(stroke);
+  if (!points) {
+    points = stroke.points.map((point) => transformedPoint(stroke, point));
+    placedCache.set(stroke, points);
+  }
+  return points;
+}
 
 const boundsCache = new WeakMap<Stroke, Bounds | null>();
 
@@ -29,7 +41,7 @@ export function transformedPoint(stroke: Stroke, point: StrokePoint): Point {
 
 export function strokeBounds(stroke: Stroke): Bounds | null {
   if (boundsCache.has(stroke)) return boundsCache.get(stroke)!;
-  const bounds = stroke.points.length === 0 ? null : pointsBounds(stroke.points.map((point) => transformedPoint(stroke, point)));
+  const bounds = stroke.points.length === 0 ? null : pointsBounds(placedPoints(stroke));
   boundsCache.set(stroke, bounds);
   return bounds;
 }
@@ -51,10 +63,14 @@ export function selectionBounds(strokes: Stroke[], selectedIds: string[]): Bound
 
 export function selectStrokesInLasso(strokes: Stroke[], polygon: Point[], reaches: StrokeFilter = () => true): string[] {
   if (polygon.length < 3) return [];
+  const loop = pointsBounds(polygon);
   return strokes
-    .filter((stroke) => reaches(stroke) && polylineInLasso(
-      stroke.points.map((point) => transformedPoint(stroke, point)), polygon,
-    ))
+    .filter((stroke) => {
+      if (!reaches(stroke)) return false;
+      const line = strokeBounds(stroke);
+      if (!line || !overlaps(line, loop)) return false;
+      return polylineInLasso(placedPoints(stroke), polygon, false, line, loop);
+    })
     .map((stroke) => stroke.id);
 }
 
@@ -67,15 +83,17 @@ export function hitStroke(
   radius: number,
   reaches: StrokeFilter = () => true,
 ): Stroke | null {
+  let hit: Stroke | null = null;
   for (let strokeIndex = strokes.length - 1; strokeIndex >= 0; strokeIndex -= 1) {
     const stroke = strokes[strokeIndex];
+    if (hit && (stroke.zIndex ?? DEFAULT_INK_Z_INDEX) <= (hit.zIndex ?? DEFAULT_INK_Z_INDEX)) continue;
     if (!reaches(stroke)) continue;
     const hitRadius =
       Math.max(radius, (stroke.widthPt * Math.max(stroke.transform.scaleX, stroke.transform.scaleY)) / 2);
     const bounds = strokeBounds(stroke);
     if (!bounds || point.x < bounds.left - hitRadius || point.x > bounds.right + hitRadius ||
       point.y < bounds.top - hitRadius || point.y > bounds.bottom + hitRadius) continue;
-    const points = stroke.points.map((sample) => transformedPoint(stroke, sample));
+    const points = placedPoints(stroke);
     if (
       points.some((sample, index) =>
         index === 0
@@ -83,10 +101,10 @@ export function hitStroke(
           : distanceToSegment(point, points[index - 1], sample) <= hitRadius,
       )
     ) {
-      return stroke;
+      hit = stroke;
     }
   }
-  return null;
+  return hit;
 }
 
 export function eraseStrokeAt(
@@ -213,12 +231,15 @@ export function pointInPolygon(point: Point, polygon: Point[]): boolean {
 }
 
 /** Include crossings between sparse samples, not just samples that fall inside the lasso. */
-export function polylineInLasso(points: Point[], polygon: Point[], closed = false): boolean {
+function overlaps(line: Bounds, loop: Bounds): boolean {
+  return !(line.right < loop.left || line.left > loop.right || line.bottom < loop.top || line.top > loop.bottom);
+}
+
+export function polylineInLasso(points: Point[], polygon: Point[], closed = false,
+  lineBounds?: Bounds, polygonBounds?: Bounds): boolean {
   if (polygon.length < 3 || points.length === 0) return false;
-  const aabb = (values: Point[]) => values.reduce((b, p) => ({ left: Math.min(b.left, p.x), top: Math.min(b.top, p.y),
-    right: Math.max(b.right, p.x), bottom: Math.max(b.bottom, p.y) }), { left: Infinity, top: Infinity, right: -Infinity, bottom: -Infinity });
-  const line = aabb(points), loop = aabb(polygon);
-  if (line.right < loop.left || line.left > loop.right || line.bottom < loop.top || line.top > loop.bottom) return false;
+  const line = lineBounds ?? pointsBounds(points), loop = polygonBounds ?? pointsBounds(polygon);
+  if (!overlaps(line, loop)) return false;
   if (points.some((point) => pointInPolygon(point, polygon))) return true;
   if (closed && polygon.some((point) => pointInPolygon(point, points))) return true;
   for (let i = 1; i < points.length + (closed ? 1 : 0); i++) {

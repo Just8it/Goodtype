@@ -60,6 +60,7 @@ export type SelectionEnvironment = {
   typstBlocks: TypstBlockState[];
   workspace: HTMLElement | undefined;
   readonly zoom: number;
+  readonly zooming?: boolean;
 };
 
 /** Instance-owned selection state and operations. Callers supply live values at the boundary. */
@@ -821,10 +822,12 @@ export function createSelection(env: SelectionEnvironment) {
 
   function scheduleSelectionToolbar(attempt = 0) {
     if (selectionToolbarFrame) cancelAnimationFrame(selectionToolbarFrame);
+    if (env.zooming) return;
     selectionToolbarFrame = requestAnimationFrame(() => {
       selectionToolbarFrame = undefined;
       // A block just created or pasted is selected before it is on the page: its element appears
       // a few frames later. Keep looking briefly instead of leaving the toolbar hidden for good.
+      if (env.zooming) return;
       if (!positionSelectionToolbar() && attempt < 30) scheduleSelectionToolbar(attempt + 1);
     });
   }

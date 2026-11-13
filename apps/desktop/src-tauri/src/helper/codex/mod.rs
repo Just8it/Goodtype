@@ -120,6 +120,26 @@ fn state(
         json!({"runId":run,"conversationId":conversation,"state":state,"problem":problem}),
     );
 }
+/// The oldest Codex whose app-server protocol this integration was written against. Newer
+/// versions are accepted: Codex updates itself, and a protocol change is caught by the account
+/// check and the config/MCP preflight before any prompt is sent.
+const MIN_CODEX_VERSION: (u64, u64, u64) = (0, 166, 0);
+
+/// `codex --version` prints `codex-cli MAJOR.MINOR.PATCH`, optionally with a suffix.
+fn version_supported(reported: &str) -> bool {
+    let Some(number) = reported.trim().strip_prefix("codex-cli ") else {
+        return false;
+    };
+    let core = number.split(['-', '+', ' ']).next().unwrap_or("");
+    let mut parts = core.split('.').map(str::parse::<u64>);
+    match (parts.next(), parts.next(), parts.next(), parts.next()) {
+        (Some(Ok(major)), Some(Ok(minor)), Some(Ok(patch)), None) => {
+            (major, minor, patch) >= MIN_CODEX_VERSION
+        }
+        _ => false,
+    }
+}
+
 fn probe(settings: &HelperSettings) -> CodexStatus {
     let mut s = CodexStatus {
         available: false,
@@ -137,7 +157,7 @@ fn probe(settings: &HelperSettings) -> CodexStatus {
         let version =
             client::version(&path).map_err(|e| problem("codex_version_unsupported", e))?;
         s.version = Some(version.clone());
-        if version != "codex-cli 0.166.0" {
+        if !version_supported(&version) {
             return Err(problem("codex_version_unsupported", version));
         }
         let mut c = client::Client::spawn(&path, &[]).map_err(|e| problem("codex_crashed", e))?;
@@ -546,7 +566,7 @@ fn actor(
                         );
                         let version = client::version(&executable)
                             .map_err(|e| problem("codex_version_unsupported", e))?;
-                        if version != "codex-cli 0.166.0" {
+                        if !version_supported(&version) {
                             return Err(problem("codex_version_unsupported", version));
                         }
                         let mut c = client::Client::spawn(

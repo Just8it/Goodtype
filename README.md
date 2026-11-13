@@ -76,6 +76,11 @@ Goodtype keeps your notebooks as plain files on your own disk. No account, no sy
   Python runs only after you press Run, through a restricted Windows process. Choose a compatible
   local interpreter or explicitly install the optional pinned scientific runtime. Saved content
   stays readable without Python; missing libraries report an error without downloading anything.
+  Imports have no module whitelist. Python can write and read CSV files in its temporary session
+  folder, for example with `Path("plot_data").mkdir(exist_ok=True)` and `pandas.read_csv`.
+  The AI assistant can propose cells that recreate CSV data and plot it when you press Run.
+  Keep the data or generator in the saved cell source: session files disappear on restart and
+  notebook/host files are not automatically accessible. Use relative paths, not `__file__`.
 - **PDF export** of the whole notebook, in manifest order, from the files on disk rather than from
   whatever the screen happens to be showing.
 - **Crash recovery** built on atomic writes and a revision check, so an interrupted save cannot
