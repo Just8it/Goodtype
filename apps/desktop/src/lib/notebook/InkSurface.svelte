@@ -336,8 +336,8 @@
 
   /**
    * Committed ink as SVG rather than canvas. Zoom becomes a transform the browser
-   * composites, so it stays crisp without JavaScript re-rasterising every stroke — which is what
-   * made zooming lag. Only filled outlines can be merged like this; stroked polylines could not.
+   * composites during gestures; the page refreshes its raster after zoom settles. Only filled
+   * outlines can be merged like this; stroked polylines could not.
    */
   // The hairline floor follows zoom in half-octave tiers, not every pinch step: with a per-step
   // floor every page rebuilt and re-joined all of its outlines dozens of times a second.
