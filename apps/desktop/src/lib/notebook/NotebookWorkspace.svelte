@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { refreshPageRaster } from "./refreshPageRaster";
   import { createWindowCloseHandler } from "./windowClose";
   import { cellGrant, registerCellApply, type CellEntry } from "../calculation/cellIntent";
   import { editorShare } from "../helper/editorEntry";
@@ -2088,7 +2089,7 @@
             <div class="page-frame" use:trackActiveFrame={active} style:--page-zoom={zoom} style:--page-width={`${box.widthPt}px`} style:--page-height={`${box.heightPt}px`} style:width="calc(var(--page-width) * var(--page-zoom))" style:height="calc(var(--page-height) * var(--page-zoom))">
               <ProposalPreview root={session.root} pageId={entry.id} width={box.widthPt} height={box.heightPt} {zoom} />
               <ShareChip pageId={entry.id} width={box.widthPt} height={box.heightPt} onError={helperError} />
-              <div class="page" class:computational={Boolean(entry.snapshot?.page.calculation)} style:width={`${box.widthPt}px`} style:height={`${box.heightPt}px`} style:--page-zoom={zoom} style:transform="scale(var(--page-zoom))">
+              <div class="page" use:refreshPageRaster={navigation.zooming} class:computational={Boolean(entry.snapshot?.page.calculation)} style:width={`${box.widthPt}px`} style:height={`${box.heightPt}px`} style:--page-zoom={zoom} style:transform="scale(var(--page-zoom))">
                 {#if entry.snapshot?.page.calculation}
                   <CalculationPage root={session.root} pageId={entry.id} snapshot={entry.snapshot}
                     workspace={calculations} {active} sideOpen={sideEditorOpen} onAskAI={settings.aiHelper.enabled ? codexAction ? askCellAI : explainAISetup : undefined}
@@ -2893,11 +2894,9 @@
     box-shadow: var(--shadow-page);
     transform-origin: top left;
   }
-  /* Always its own layer. Promoting it only while zooming cost one 400 ms raster stall at the
-     start of every pinch and still re-rastered ink each frame; permanent promotion presented a
-     steady frame rate in a WebView2 trace and stays sharp once the zoom settles. Computational
-     pages are left out because their content overflows the page box. */
-  .page:not(.computational) { will-change: transform; }
+  /* Keep promotion ready for pinches, but refresh its fixed-resolution bitmap after settle.
+     Computational pages are left out because their content overflows the page box. */
+  .page:not(.computational) { will-change: var(--page-layer-hint, transform); }
   .page.computational { overflow: visible; background: var(--charcoal); }
   .page-loading { display: grid; height: 100%; color: var(--quiet); font-size: var(--text-md); place-items: center; }
 
